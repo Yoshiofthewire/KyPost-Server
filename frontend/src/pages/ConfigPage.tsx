@@ -302,33 +302,6 @@ export function ConfigPage() {
       </label>
 
       <hr />
-      <h3>Llama</h3>
-      <label>
-        <div>Base URL</div>
-        <input value={cfg.llama.baseUrl} onChange={(event) => updateConfig("llama", { ...cfg.llama, baseUrl: event.target.value })} />
-      </label>
-      <label>
-        <div>API Key</div>
-        <input
-          type="password"
-          value={cfg.llama.apiKey}
-          onChange={(event) => updateConfig("llama", { ...cfg.llama, apiKey: event.target.value })}
-        />
-      </label>
-      <label>
-        <div>Classify Path</div>
-        <input
-          value={cfg.llama.classifyPath}
-          onChange={(event) => updateConfig("llama", { ...cfg.llama, classifyPath: event.target.value })}
-        />
-      </label>
-
-      <button type="button" onClick={runLlamaTest} disabled={llamaTestBusy}>
-        {llamaTestBusy ? "Testing..." : "Run Llama Test"}
-      </button>
-      {llamaTestResult ? <pre>{llamaTestResult}</pre> : null}
-
-      <hr />
       <h3>IMAP</h3>
       <p>Saved IMAP config is encrypted at rest.</p>
       <label>
@@ -397,6 +370,33 @@ export function ConfigPage() {
       {labelsFromImap.length > 0 ? <p>Discovered IMAP labels: {labelsFromImap.join(", ")}</p> : <p>No IMAP labels discovered yet.</p>}
 
       {configStatus ? <p>{configStatus}</p> : null}
+
+      <hr />
+      <h3>Remote LLM Model</h3>
+      <label>
+        <div>Base URL</div>
+        <input value={cfg.llama.baseUrl} onChange={(event) => updateConfig("llama", { ...cfg.llama, baseUrl: event.target.value })} />
+      </label>
+      <label>
+        <div>API Key</div>
+        <input
+          type="password"
+          value={cfg.llama.apiKey}
+          onChange={(event) => updateConfig("llama", { ...cfg.llama, apiKey: event.target.value })}
+        />
+      </label>
+      <label>
+        <div>Classify Path</div>
+        <input
+          value={cfg.llama.classifyPath}
+          onChange={(event) => updateConfig("llama", { ...cfg.llama, classifyPath: event.target.value })}
+        />
+      </label>
+
+      <button type="button" onClick={runLlamaTest} disabled={llamaTestBusy}>
+        {llamaTestBusy ? "Testing..." : "Run Llama Test"}
+      </button>
+      {llamaTestResult ? <pre>{llamaTestResult}</pre> : null}
     </section>
   );
 }

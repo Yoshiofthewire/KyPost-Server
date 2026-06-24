@@ -2,6 +2,10 @@ package imap
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -56,6 +60,20 @@ type APIClient struct {
 	mailbox  string
 }
 
+type storedIMAPConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Mailbox  string `json:"mailbox"`
+}
+
+type encryptedPayload struct {
+	Version    int    `json:"version"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
 func NewAPIClientFromEnv() *APIClient {
 	host := strings.TrimSpace(os.Getenv("IMAP_HOST"))
 	username := strings.TrimSpace(os.Getenv("IMAP_USERNAME"))
@@ -79,6 +97,113 @@ func NewAPIClientFromEnv() *APIClient {
 		password: password,
 		mailbox:  mailbox,
 	}
+}
+
+func defaultConfigPath() string {
+	path := strings.TrimSpace(os.Getenv("IMAP_CONFIG_FILE"))
+	if path == "" {
+		path = "/llama_lab/private/imap-config.json"
+	}
+	return path
+}
+
+func defaultConfigKeyPath() string {
+	path := strings.TrimSpace(os.Getenv("IMAP_CONFIG_KEY_FILE"))
+	if path == "" {
+		path = "/llama_lab/private/imap-config.key"
+	}
+	return path
+}
+
+func (c *APIClient) ensureCredentialsFromStoredConfigLocked() error {
+	if strings.TrimSpace(c.host) != "" && strings.TrimSpace(c.username) != "" && strings.TrimSpace(c.password) != "" {
+		return nil
+	}
+
+	raw, err := os.ReadFile(defaultConfigPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read imap config: %w", err)
+	}
+
+	plain, err := decryptStoredPayload(raw, defaultConfigKeyPath())
+	if err != nil {
+		return fmt.Errorf("decrypt imap config: %w", err)
+	}
+
+	var payload storedIMAPConfig
+	if err := json.Unmarshal(plain, &payload); err != nil {
+		return fmt.Errorf("parse imap config: %w", err)
+	}
+
+	payload.Host = strings.TrimSpace(payload.Host)
+	payload.Username = strings.TrimSpace(payload.Username)
+	payload.Password = strings.TrimSpace(payload.Password)
+	payload.Mailbox = strings.TrimSpace(payload.Mailbox)
+	if payload.Port <= 0 {
+		payload.Port = 993
+	}
+	if payload.Mailbox == "" {
+		payload.Mailbox = "INBOX"
+	}
+
+	if payload.Host == "" || payload.Username == "" || payload.Password == "" {
+		return nil
+	}
+
+	c.host = payload.Host
+	c.port = payload.Port
+	c.username = payload.Username
+	c.password = payload.Password
+	if strings.TrimSpace(c.mailbox) == "" || c.mailbox == "INBOX" {
+		c.mailbox = payload.Mailbox
+	}
+
+	return nil
+}
+
+func decryptStoredPayload(raw []byte, keyPath string) ([]byte, error) {
+	var env encryptedPayload
+	if err := json.Unmarshal(raw, &env); err != nil || env.Version != 1 || strings.TrimSpace(env.Nonce) == "" || strings.TrimSpace(env.Ciphertext) == "" {
+		// Backward-compatibility with plaintext credentials.
+		return raw, nil
+	}
+
+	keyRaw, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(keyRaw)))
+	if err != nil {
+		return nil, err
+	}
+	if len(key) != 32 {
+		return nil, errors.New("invalid encryption master key length")
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := base64.StdEncoding.DecodeString(env.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(env.Ciphertext)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plain, nil
 }
 
 func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error) {
@@ -234,8 +359,12 @@ func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if err := c.ensureCredentialsFromStoredConfigLocked(); err != nil {
+		return nil, err
+	}
+
 	if strings.TrimSpace(c.host) == "" || strings.TrimSpace(c.username) == "" || strings.TrimSpace(c.password) == "" {
-		return nil, errors.New("missing IMAP credentials; configure IMAP_HOST, IMAP_USERNAME, and IMAP_PASSWORD")
+		return nil, errors.New("missing IMAP credentials; configure IMAP_HOST, IMAP_USERNAME, and IMAP_PASSWORD or save credentials in IMAP settings")
 	}
 
 	if c.dialer == nil {
