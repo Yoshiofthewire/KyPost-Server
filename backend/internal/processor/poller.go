@@ -231,12 +231,20 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 		})
 		return p.store.MarkProcessed(msg.ID)
 	}
-	p.log.Info("applying label", "message_id", msg.ID, "selected_label", selected, "sender", msg.Sender, "subject", msg.Subject)
-	if err := applyLabelWithRetry(ctx, p.mail, msg.ID, selected); err != nil {
+	keywords := keywordsForSelectedLabel(selected, p.cfg.Labels.KeywordMappings)
+	p.log.Info(
+		"applying label",
+		"message_id", msg.ID,
+		"selected_label", selected,
+		"keywords", strings.Join(keywords, ","),
+		"sender", msg.Sender,
+		"subject", msg.Subject,
+	)
+	if err := applyKeywordsWithRetry(ctx, p.mail, msg.ID, keywords); err != nil {
 		p.log.Error("label apply failed", "message_id", msg.ID, "selected_label", selected, "error", err.Error())
 		return err
 	}
-	p.log.Info("label applied", "message_id", msg.ID, "selected_label", selected)
+	p.log.Info("label applied", "message_id", msg.ID, "selected_label", selected, "keywords", strings.Join(keywords, ","))
 	if err := p.store.MarkProcessed(msg.ID); err != nil {
 		return err
 	}
@@ -331,12 +339,21 @@ func (p *Poller) clearAICreditsExhausted() {
 	}
 }
 
-func applyLabelWithRetry(ctx context.Context, c imapadapter.Client, messageID, label string) error {
+func applyKeywordsWithRetry(ctx context.Context, c imapadapter.Client, messageID string, keywords []string) error {
+	for _, keyword := range keywords {
+		if err := applySingleKeywordWithRetry(ctx, c, messageID, keyword); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, messageID, keyword string) error {
 	var err error
 	for i := 0; i < 3; i++ {
-		err = c.EnsureLabel(ctx, label)
+		err = c.EnsureLabel(ctx, keyword)
 		if err == nil {
-			err = c.ApplyLabel(ctx, messageID, label)
+			err = c.ApplyLabel(ctx, messageID, keyword)
 		}
 		if err == nil {
 			return nil
@@ -346,6 +363,38 @@ func applyLabelWithRetry(ctx context.Context, c imapadapter.Client, messageID, l
 		}
 	}
 	return err
+}
+
+func keywordsForSelectedLabel(label string, mappings map[string][]string) []string {
+	base := strings.TrimSpace(label)
+	if base == "" {
+		return []string{}
+	}
+
+	out := []string{base}
+	for mappedLabel, mappedKeywords := range mappings {
+		if !strings.EqualFold(strings.TrimSpace(mappedLabel), base) {
+			continue
+		}
+		for _, keyword := range mappedKeywords {
+			if cleaned := strings.TrimSpace(keyword); cleaned != "" {
+				out = append(out, cleaned)
+			}
+		}
+		break
+	}
+
+	seen := map[string]bool{}
+	unique := make([]string, 0, len(out))
+	for _, keyword := range out {
+		key := strings.ToLower(strings.TrimSpace(keyword))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, strings.TrimSpace(keyword))
+	}
+	return unique
 }
 
 func (p *Poller) allowByRate() bool {

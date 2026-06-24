@@ -6,7 +6,7 @@ type AppConfig = {
   logLevel: string;
   scan: { intervalSeconds: number };
   rateLimits: { perMinute: number; perHour: number };
-  labels: { allowlist: string[] };
+  labels: { allowlist: string[]; keywordMappings: Record<string, string[]> };
   llama: { baseUrl: string; apiKey: string; classifyPath: string };
 };
 
@@ -47,7 +47,8 @@ function normalizeConfig(input: Partial<AppConfig>): AppConfig {
       perHour: input.rateLimits?.perHour ?? 20
     },
     labels: {
-      allowlist: input.labels?.allowlist ?? []
+      allowlist: input.labels?.allowlist ?? [],
+      keywordMappings: input.labels?.keywordMappings ?? {}
     },
     llama: {
       baseUrl: input.llama?.baseUrl ?? "",
@@ -69,11 +70,39 @@ function textToLabels(raw: string): string[] {
   return uniqueLabels(raw.split(/\r?\n/));
 }
 
+function mappingToText(mapping: Record<string, string[]>): string {
+  return Object.keys(mapping)
+    .sort((a, b) => a.localeCompare(b))
+    .map((label) => `${label}: ${uniqueLabels(mapping[label] ?? []).join(", ")}`)
+    .join("\n");
+}
+
+function textToMapping(raw: string): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const splitAt = trimmed.indexOf(":");
+    if (splitAt <= 0) {
+      continue;
+    }
+    const label = trimmed.slice(0, splitAt).trim();
+    const values = uniqueLabels(trimmed.slice(splitAt + 1).split(","));
+    if (label && values.length > 0) {
+      out[label] = values;
+    }
+  }
+  return out;
+}
+
 export function ConfigPage() {
   const testPrompt = "Email Address: test@example.com Subject Line: Llama connectivity test Return only the label Updates";
 
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [allowlistText, setAllowlistText] = useState("");
+  const [keywordMappingText, setKeywordMappingText] = useState("");
   const [labelsFromImap, setLabelsFromImap] = useState<string[]>([]);
   const [configStatus, setConfigStatus] = useState("");
 
@@ -127,6 +156,7 @@ export function ConfigPage() {
         const normalized = normalizeConfig(nextConfig);
         setCfg(normalized);
         setAllowlistText(labelsToText(normalized.labels.allowlist));
+        setKeywordMappingText(mappingToText(normalized.labels.keywordMappings));
       } catch {
         if (!cancelled) {
           setConfigStatus("Failed to load configuration data.");
@@ -161,7 +191,8 @@ export function ConfigPage() {
       ...cfg,
       labels: {
         ...cfg.labels,
-        allowlist: effectiveAllowlist
+        allowlist: effectiveAllowlist,
+        keywordMappings: textToMapping(keywordMappingText)
       }
     };
 
@@ -364,6 +395,15 @@ export function ConfigPage() {
       <label>
         <div>Allowlist</div>
         <textarea rows={10} value={allowlistText} onChange={(event) => setAllowlistText(event.target.value)} style={{ width: "100%" }} />
+      </label>
+      <label>
+        <div>Keyword Mappings (one per line: Label: Keyword1, Keyword2)</div>
+        <textarea
+          rows={8}
+          value={keywordMappingText}
+          onChange={(event) => setKeywordMappingText(event.target.value)}
+          style={{ width: "100%" }}
+        />
       </label>
       <button type="button" onClick={applyImapLabelsToAllowlist}>Merge IMAP Labels</button>
       <button type="button" onClick={saveConfig}>Save Configuration</button>

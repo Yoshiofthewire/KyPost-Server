@@ -38,7 +38,8 @@ type Config struct {
 	} `yaml:"redaction"`
 
 	Labels struct {
-		Allowlist []string `yaml:"allowlist"`
+		Allowlist       []string            `yaml:"allowlist"`
+		KeywordMappings map[string][]string `yaml:"keywordMappings"`
 	} `yaml:"labels"`
 }
 
@@ -66,6 +67,7 @@ func Default() Config {
 		{Name: "iban", Regex: `\\b[A-Z]{2}\\d{2}[A-Z0-9]{10,30}\\b`, Replacement: "[REDACTED_IBAN]"},
 		{Name: "card", Regex: `\\b(?:\\d[ -]*?){13,19}\\b`, Replacement: "[REDACTED_CARD]"},
 	}
+	cfg.Labels.KeywordMappings = map[string][]string{}
 	return cfg
 }
 
