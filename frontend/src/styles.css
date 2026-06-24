@@ -1,0 +1,274 @@
+:root {
+  --bg: #2a1d17;
+  --panel: #3a2a22;
+  --ink: #f2e4d3;
+  --accent: #b97a4a;
+  --accent-soft: #6a4732;
+  --line: #8e6144;
+  --mono: "IBM Plex Mono", monospace;
+  --sans: "Space Grotesk", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: radial-gradient(circle at top right, #6a4732, transparent 45%), var(--bg);
+}
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  padding: 20px;
+  background: linear-gradient(180deg, #4a3328, #2a1d17);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-logo {
+  margin-bottom: 16px;
+}
+
+.sidebar nav {
+  flex: 1;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 0.72rem;
+  opacity: 0.5;
+  text-align: center;
+}
+
+.sidebar-footer p {
+  margin: 0;
+}
+
+.sidebar h1 {
+  margin: 0 0 16px;
+  font-size: 1.6rem;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.session-meta {
+  margin-bottom: 16px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(106, 71, 50, 0.34);
+}
+
+.session-meta p {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+}
+
+.sidebar a {
+  text-decoration: none;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  transition: all 180ms ease;
+}
+
+.sidebar a:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.content {
+  padding: 28px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 18px;
+  box-shadow: 0 10px 32px rgba(14, 9, 7, 0.42);
+}
+
+.auth-form {
+  display: grid;
+  gap: 12px;
+  max-width: 520px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+}
+
+input {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+}
+
+button {
+  width: fit-content;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+pre {
+  font-family: var(--mono);
+  white-space: pre-wrap;
+}
+
+.notice {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.notice-success {
+  background: rgba(72, 115, 88, 0.32);
+}
+
+.notice-warning {
+  background: rgba(154, 108, 54, 0.32);
+}
+
+.notice-error {
+  background: rgba(155, 64, 93, 0.38);
+}
+
+.log-line { color: var(--ink); }
+.log-error { color: #ff6b6b; }
+.log-warn  { color: #ffcc66; }
+.log-info  { color: var(--accent); opacity: 0.9; }
+.log-debug { color: #888; }
+
+.health-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.health-head h2 {
+  margin: 0;
+}
+
+.health-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.health-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.health-controls select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+}
+
+.health-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.health-ok {
+  background: rgba(72, 115, 88, 0.28);
+}
+
+.health-bad {
+  background: rgba(155, 64, 93, 0.34);
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.health-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(56, 39, 30, 0.82);
+  padding: 12px;
+}
+
+.health-card h4 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+
+.health-value {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.health-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .health-grid {
+    grid-template-columns: 1fr;
+  }
+}
