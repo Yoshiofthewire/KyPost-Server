@@ -35,25 +35,62 @@ type IMAPForm = {
   mailbox: string;
 };
 
-function normalizeConfig(input: Partial<AppConfig>): AppConfig {
+function normalizeKeywordMappings(input: unknown): Record<string, string[]> {
+  if (!input || typeof input !== "object") {
+    return {};
+  }
+  const source = input as Record<string, unknown>;
+  const out: Record<string, string[]> = {};
+  for (const [label, rawValues] of Object.entries(source)) {
+    const cleanLabel = String(label).trim();
+    if (!cleanLabel) {
+      continue;
+    }
+    if (Array.isArray(rawValues)) {
+      const values = uniqueLabels(rawValues.map((item) => String(item)));
+      if (values.length > 0) {
+        out[cleanLabel] = values;
+      }
+      continue;
+    }
+    if (typeof rawValues === "string") {
+      const values = uniqueLabels(rawValues.split(","));
+      if (values.length > 0) {
+        out[cleanLabel] = values;
+      }
+    }
+  }
+  return out;
+}
+
+function normalizeConfig(input: unknown): AppConfig {
+  const source = (input ?? {}) as Record<string, any>;
+  const labels = (source.labels ?? source.Labels ?? {}) as Record<string, any>;
+  const llama = (source.llama ?? source.Llama ?? {}) as Record<string, any>;
+  const scan = (source.scan ?? source.Scan ?? {}) as Record<string, any>;
+  const rateLimits = (source.rateLimits ?? source.RateLimits ?? {}) as Record<string, any>;
+
+  const rawMappings =
+    labels.keywordMappings ?? labels.KeywordMappings ?? labels.keyword_mappings ?? source.keywordMappings ?? source.KeywordMappings;
+
   return {
-    timezone: input.timezone ?? "UTC",
-    logLevel: input.logLevel ?? "info",
+    timezone: source.timezone ?? source.Timezone ?? "UTC",
+    logLevel: source.logLevel ?? source.LogLevel ?? "info",
     scan: {
-      intervalSeconds: input.scan?.intervalSeconds ?? 90
+      intervalSeconds: scan.intervalSeconds ?? scan.IntervalSeconds ?? 90
     },
     rateLimits: {
-      perMinute: input.rateLimits?.perMinute ?? 10,
-      perHour: input.rateLimits?.perHour ?? 20
+      perMinute: rateLimits.perMinute ?? rateLimits.PerMinute ?? 10,
+      perHour: rateLimits.perHour ?? rateLimits.PerHour ?? 20
     },
     labels: {
-      allowlist: input.labels?.allowlist ?? [],
-      keywordMappings: input.labels?.keywordMappings ?? {}
+      allowlist: labels.allowlist ?? labels.Allowlist ?? [],
+      keywordMappings: normalizeKeywordMappings(rawMappings)
     },
     llama: {
-      baseUrl: input.llama?.baseUrl ?? "",
-      apiKey: input.llama?.apiKey ?? "",
-      classifyPath: input.llama?.classifyPath ?? "/"
+      baseUrl: llama.baseUrl ?? llama.BaseURL ?? "",
+      apiKey: llama.apiKey ?? llama.APIKey ?? "",
+      classifyPath: llama.classifyPath ?? llama.ClassifyPath ?? "/"
     }
   };
 }
@@ -149,7 +186,7 @@ export function ConfigPage() {
 
     const load = async () => {
       try {
-        const nextConfig = await getJSON<AppConfig>("/api/config");
+        const nextConfig = await getJSON<unknown>("/api/config");
         if (cancelled) {
           return;
         }
