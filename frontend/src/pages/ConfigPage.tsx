@@ -51,6 +51,28 @@ type IMAPForm = {
   mailbox: string;
 };
 
+function normalizeConfig(input: Partial<AppConfig>): AppConfig {
+  return {
+    timezone: input.timezone ?? "UTC",
+    logLevel: input.logLevel ?? "info",
+    scan: {
+      intervalSeconds: input.scan?.intervalSeconds ?? 90
+    },
+    rateLimits: {
+      perMinute: input.rateLimits?.perMinute ?? 10,
+      perHour: input.rateLimits?.perHour ?? 20
+    },
+    labels: {
+      allowlist: input.labels?.allowlist ?? []
+    },
+    llama: {
+      baseUrl: input.llama?.baseUrl ?? "",
+      apiKey: input.llama?.apiKey ?? "",
+      classifyPath: input.llama?.classifyPath ?? "/"
+    }
+  };
+}
+
 function uniqueLabels(labels: string[]): string[] {
   return Array.from(new Set(labels.map((label) => label.trim()).filter(Boolean)));
 }
@@ -120,19 +142,36 @@ export function ConfigPage() {
   }
 
   useEffect(() => {
-    Promise.all([
-      getJSON<AppConfig>("/api/config"),
-      refreshLabels(),
-      refreshIMAPStatus(),
-      refreshLlamaAuthStatus()
-    ])
-      .then(([nextConfig]) => {
-        setCfg(nextConfig);
-        setAllowlistText(labelsToText(nextConfig.labels.allowlist ?? []));
-      })
-      .catch(() => {
-        setConfigStatus("Failed to load configuration data.");
-      });
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const nextConfig = await getJSON<AppConfig>("/api/config");
+        if (cancelled) {
+          return;
+        }
+        const normalized = normalizeConfig(nextConfig);
+        setCfg(normalized);
+        setAllowlistText(labelsToText(normalized.labels.allowlist));
+      } catch {
+        if (!cancelled) {
+          setConfigStatus("Failed to load configuration data.");
+        }
+        return;
+      }
+
+      // Load secondary panels independently so one failure does not block the entire page.
+      await Promise.all([
+        refreshLabels().catch(() => undefined),
+        refreshIMAPStatus().catch(() => undefined),
+        refreshLlamaAuthStatus().catch(() => undefined)
+      ]);
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!cfg) {
