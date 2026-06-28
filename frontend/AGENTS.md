@@ -22,12 +22,12 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 |------|---------------|
 | `LoginPage.tsx` | `POST /api/auth/login`, `POST /api/auth/password` |
 | `StatusPage.tsx` | `GET /api/status` |
-| `HealthPage.tsx` | `GET /api/health`, `GET /api/status` |
-| `ConfigPage.tsx` | `GET/POST /api/imap/config`, `POST /api/imap/test` |
+| `HealthPage.tsx` | `GET /api/health`, `GET /api/status`, `POST /api/health/repair` |
+| `ConfigPage.tsx` | `GET/POST /api/imap/config`, `POST /api/imap/test`, `GET|POST /api/llama/auth` |
 | `TuningPage.tsx` | `GET/PUT /api/tuning` |
 | `LabelsPage.tsx` | `GET /api/labels` |
 | `DecisionsPage.tsx` | `GET /api/decisions?limit=10` |
-| `LogsPage.tsx` | `GET /api/logs`, `GET /api/logs/list` |
+| `LogsPage.tsx` | `GET /api/logs?file=<name>.log&lines=<n>`, `GET /api/logs/list` |
 
 ### Auth Flow
 

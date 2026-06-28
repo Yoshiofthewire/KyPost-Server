@@ -17,9 +17,7 @@ All files under `scripts/`. CI config lives in `.github/workflows/playwright.yml
 - `entrypoint.sh`: creates required directories, chowns to `llamalab` user, launches `supervisord`
 - `bootstrap.sh`: generates scrypt-hashed admin credentials and writes `admin.env`; **must not be re-run on an existing install** — it overwrites credentials
 - `start-ollama.sh`: launches Ollama daemon on port 11434
-- `pull-ollama-model.sh`: pulls the configured model (e.g. `nemotron-3-nano:4b`); requires Ollama daemon to be running first
-- `generate_mail_auth.js`: Proton Mail bridge auth helper; uses `mail_auth.json` as config template
-- `proton-bootstrap.json`: config template for Proton Mail auth bootstrap
+- `pull-ollama-model.sh`: pulls the model named by `OLLAMA_MODEL` (docker-compose default: `nemotron-3-nano:4b`); requires Ollama daemon to be running first
 
 ### Supervisord Programs (from `supervisord.conf` at repo root)
 

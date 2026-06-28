@@ -38,8 +38,6 @@ ENV TZ=America/New_York
 ENV OLLAMA_BASE_URL=http://127.0.0.1:11434
 ENV OLLAMA_MODEL=nemotron-3-nano:4b
 ENV OLLAMA_MODELS=/llama_lab/ollama-models
-ENV PROTON_PRIVATE_KEY_FILE=/llama_lab/private/proton-private-key.asc
-ENV PROTON_PRIVATE_KEY_PASSWORD_FILE=/llama_lab/private/proton-private-key-password
 
 RUN mkdir -p /llama_lab/config /llama_lab/private /llama_lab/logs /llama_lab/state \
 	&& mkdir -p /llama_lab/ollama-models \

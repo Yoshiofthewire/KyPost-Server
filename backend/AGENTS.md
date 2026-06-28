@@ -48,18 +48,71 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 
 ### API Contract (consumed by frontend)
 
-- `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, `POST /api/auth/password`
-- `GET/PUT /api/config` — full config read/write; changes broadcast to running poller
-- `GET/POST/DELETE /api/imap/config`, `POST /api/imap/test`
-- `GET/PUT /api/tuning` — TUNING.md read/write
-- `POST /api/llama/auth`, `POST /api/llama/test`
-- `GET /api/health`, `GET /api/status`
-- `GET /api/decisions?limit=N`
-- `GET /api/logs` (stream), `GET /api/logs/list`
+| Route | Auth | Notes |
+|-------|------|-------|
+| `POST /api/auth/login` | no | — |
+| `GET /api/auth/me` | no | — |
+| `POST /api/auth/logout` | yes | — |
+| `POST /api/auth/password` | yes | — |
+| `GET /api/setup` | no | Returns admin credential bootstrap status |
+| `GET /api/health` | no | 503 when unhealthy |
+| `POST /api/health/repair` | yes | Clears sticky failure state |
+| `GET /api/status` | yes | Scan interval, checkpoint, rate limits, server time |
+| `GET\|PUT /api/config` | yes | Full config; PUT broadcasts to running poller |
+| `GET /api/labels` | yes | Allowed label list |
+| `GET /api/decisions?limit=N` | yes | Audit trail |
+| `GET /api/logs?file=<name>.log&lines=<n>` | yes | Log tail |
+| `GET /api/logs/list` | yes | Log file inventory |
+| `GET\|POST /api/llama/auth` | yes | Ollama auth token management |
+| `POST /api/llama/test` | yes | Classify a test email |
+| `GET\|POST\|DELETE /api/imap/config` | yes | Encrypted IMAP credentials |
+| `POST /api/imap/test` | yes | Live IMAP connectivity check |
+| `GET\|PUT /api/tuning` | yes | TUNING.md read/write |
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|--------|
+| `CONFIG_DIR` | `/llama_lab/config` | Config and admin files |
+| `STATE_DIR` | `/llama_lab/state` | State JSON files |
+| `LOG_DIR` | `/llama_lab/logs` | Log file directory |
+| `SECRET_DIR` | `/llama_lab/private` | Encrypted secrets (IMAP key) |
+| `WEB_PORT` | `5866` | HTTP API listen port |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama service endpoint |
+| `OLLAMA_MODEL` | `nemotron-3-nano:4b` | Classification model name |
+| `TUNING_FILE` | `$CONFIG_DIR/TUNING.md` | Classification prompt template |
+| `IMAP_CONFIG_FILE` | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
+| `IMAP_CONFIG_KEY_FILE` | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
+| `LLAMA_AUTH_FILE` | `$CONFIG_DIR/llama-auth.json` | Ollama auth token storage |
+
+### Key Data Files
+
+| File | Purpose |
+|------|---------|
+| `$CONFIG_DIR/config.yaml` | Main application config |
+| `$CONFIG_DIR/admin.env` | Scrypt-hashed admin credentials |
+| `$CONFIG_DIR/TUNING.md` | Classification prompt template |
+| `$CONFIG_DIR/llama-auth.json` | Ollama auth token |
+| `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
+| `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
+| `$STATE_DIR/state.json` | Checkpoint + processed-set |
+| `$STATE_DIR/decisions.json` | Decision audit log |
+
+### Log Files
+
+| File | Written by | Content |
+|------|------------|--------|
+| `app.log` | Go backend Logger | Structured API/app events |
+| `api.log` / `api.err.log` | supervisord | stdout/stderr of the `api` process |
+| `daemon.log` / `daemon.err.log` | supervisord | stdout/stderr of the `daemon` process |
+| `llama.log` / `llama.err.log` | supervisord | Ollama runtime output |
+| `llama-server.log` | llama adapter | Classify/warmup trace lines |
+| `bootstrap.log` / `bootstrap.err.log` | supervisord | Bootstrap script output |
+| `supervisord.log` | supervisord | Process manager events |
 
 ## Work Guidance
 
-- Build: `cd backend && go build ./cmd/...`
+- Build: `cd backend && go build -buildvcs=false ./...`
 - Test: `cd backend && go test ./...`
 - Keep adapter packages free of direct state mutation; they communicate via interfaces and channels defined in `processor/`
 - PII redaction must be applied before any text is sent to Ollama
@@ -67,7 +120,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 
 ## Verification
 
-- `go build ./cmd/...` must succeed with zero errors
+- `go build -buildvcs=false ./...` must succeed with zero errors
 - `go vet ./...` must pass
 
 ## Child DOX Index

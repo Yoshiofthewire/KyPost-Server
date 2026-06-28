@@ -8,11 +8,7 @@ services:
     environment:
       WEB_PORT: 5866
       TZ: ${TZ:-America/New_York}
-      PROTON_API_HOST: ${PROTON_API_HOST:-}
-      PROTON_AUTH_FILE: ${PROTON_AUTH_FILE:-/llama_lab/config/proton-auth.json}
       SECRET_DIR: ${SECRET_DIR:-/llama_lab/private}
-      PROTON_PRIVATE_KEY_FILE: ${PROTON_PRIVATE_KEY_FILE:-/llama_lab/private/proton-private-key.asc}
-      PROTON_PRIVATE_KEY_PASSWORD_FILE: ${PROTON_PRIVATE_KEY_PASSWORD_FILE:-/llama_lab/private/proton-private-key-password}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-nemotron-3-nano:4b}
       TUNING_FILE: ${TUNING_FILE:-/llama_lab/config/TUNING.md}
