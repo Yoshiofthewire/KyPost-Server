@@ -78,14 +78,6 @@ export function App() {
         <div className="sidebar-logo">
           <img src="/llamalabel.png" alt="Llama Labels" style={{ width: "100%", maxWidth: 180, display: "block", margin: "0 auto 0.75rem" }} />
         </div>
-        {auth.authenticated ? (
-          <div className="session-meta">
-            <p>Signed in as {auth.username ?? "admin"}</p>
-            <button type="button" onClick={logout}>
-              Logout
-            </button>
-          </div>
-        ) : null}
         <nav>
           {primaryNavItems.map(([to, label]) => (
             <Link key={to} to={to}>
@@ -109,6 +101,11 @@ export function App() {
                   {to === "/login" && auth.authenticated ? "Change Password" : label}
                 </Link>
               ))}
+              {auth.authenticated ? (
+                <button type="button" className="nav-link-button" onClick={logout}>
+                  Logout
+                </button>
+              ) : null}
             </div>
           ) : null}
         </nav>
