@@ -4,7 +4,7 @@
 
 llama Labels is a Dockerized IMAP keyword auto-labeler.
 
-It polls unread inbox mail, classifies each message with an internal Ollama model (`gemma4:e4b` by default), and applies matching IMAP keywords.
+It polls unread inbox mail, classifies each message with an internal Ollama model (`nemotron-3-nano:4b` by default), and applies matching IMAP keywords.
 
 ## Overview
 
