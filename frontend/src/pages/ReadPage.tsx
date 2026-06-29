@@ -84,8 +84,7 @@ export function ReadPage() {
     <section className="panel">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div>
-          <h2 style={{ marginTop: 0, marginBottom: 6 }}>Read</h2>
-          <p style={{ margin: 0, opacity: 0.75 }}>Inbox grouped by allowed IMAP keywords.</p>
+          <h2 style={{ marginTop: 0, marginBottom: 6 }}>Inbox</h2>
         </div>
         <button type="button" onClick={loadInbox} disabled={loading}>
           {loading ? "Loading..." : "Refresh"}
@@ -233,7 +232,7 @@ export function ReadPage() {
                     key="raw"
                     style={{
                       margin: 0,
-                      maxHeight: "40vh",
+                      maxHeight: "60vh",
                       overflowY: "auto",
                       border: "1px solid var(--line)",
                       borderRadius: 8,
@@ -258,7 +257,7 @@ export function ReadPage() {
                         key="html"
                         style={{
                           margin: 0,
-                          maxHeight: "40vh",
+                          maxHeight: "60vh",
                           overflowY: "auto",
                           border: "1px solid var(--line)",
                           borderRadius: 8,
@@ -276,7 +275,7 @@ export function ReadPage() {
                         key="text"
                         style={{
                           margin: 0,
-                          maxHeight: "40vh",
+                          maxHeight: "60vh",
                           overflowY: "auto",
                           border: "1px solid var(--line)",
                           borderRadius: 8,
