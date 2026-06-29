@@ -55,6 +55,9 @@ export function App() {
   const [composeTextBody, setComposeTextBody] = useState("");
   const [composeHtmlBody, setComposeHtmlBody] = useState("");
   const [composeMarkupBody, setComposeMarkupBody] = useState("");
+  const [composeSending, setComposeSending] = useState(false);
+  const [composeError, setComposeError] = useState("");
+  const [composeSuccess, setComposeSuccess] = useState("");
   const htmlEditorRef = useRef<HTMLDivElement | null>(null);
 
   async function refreshAuth() {
@@ -114,9 +117,14 @@ export function App() {
     setComposeTextBody("");
     setComposeHtmlBody("");
     setComposeMarkupBody("");
+    setComposeSending(false);
+    setComposeError("");
+    setComposeSuccess("");
   }
 
   function openComposeWindow() {
+    setComposeError("");
+    setComposeSuccess("");
     setComposeOpen(true);
   }
 
@@ -143,22 +151,34 @@ export function App() {
     setComposeOpen(false);
   }
 
-  function sendComposeEmail() {
-    if (typeof window === "undefined") return;
+  async function sendComposeEmail() {
     const to = composeTo.trim();
     if (!to) {
+      setComposeError("TO is required.");
       return;
     }
-    const params = new URLSearchParams();
-    if (composeCc.trim()) params.set("cc", composeCc.trim());
-    if (composeBcc.trim()) params.set("bcc", composeBcc.trim());
-    if (composeSubject.trim()) params.set("subject", composeSubject.trim());
+    setComposeSending(true);
+    setComposeError("");
+    setComposeSuccess("");
     const body = getComposeBody(composeMode);
-    if (body.trim()) params.set("body", body);
-    const query = params.toString();
-    const mailtoURL = `mailto:${encodeURIComponent(to)}${query ? `?${query}` : ""}`;
-    window.location.href = mailtoURL;
-    setComposeOpen(false);
+    try {
+      await postJSON<{ ok: boolean }>("/api/mail/send", {
+        to,
+        cc: composeCc.trim(),
+        bcc: composeBcc.trim(),
+        subject: composeSubject,
+        body,
+        mode: composeMode
+      });
+      setComposeSuccess("Email sent.");
+      setComposeOpen(false);
+      resetComposeForm();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "failed to send email";
+      setComposeError(message);
+    } finally {
+      setComposeSending(false);
+    }
   }
 
   if (auth === null) {
@@ -275,11 +295,14 @@ export function App() {
           <section className="compose-window" onClick={(event) => event.stopPropagation()}>
             <div className="compose-topbar">
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button type="button" className="compose-send" onClick={sendComposeEmail}>Send</button>
-                <button type="button" className="compose-trash" onClick={trashComposeDraft}>Trash</button>
+                <button type="button" className="compose-send" onClick={() => void sendComposeEmail()} disabled={composeSending}>Send</button>
+                <button type="button" className="compose-trash" onClick={trashComposeDraft} disabled={composeSending}>Trash</button>
               </div>
-              <button type="button" className="compose-close" onClick={() => setComposeOpen(false)}>Close</button>
+              <button type="button" className="compose-close" onClick={() => setComposeOpen(false)} disabled={composeSending}>Close</button>
             </div>
+
+            {composeError ? <p className="notice notice-error" style={{ margin: 0 }}>Send failed: {composeError}</p> : null}
+            {composeSuccess ? <p className="notice notice-success" style={{ margin: 0 }}>{composeSuccess}</p> : null}
 
             <div className="compose-form-grid">
               <label className="compose-field-row">

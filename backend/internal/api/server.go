@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -13,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
+	"net/smtp"
 	"os"
 	"os/exec"
 	"path"
@@ -84,6 +87,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/llama/auth", s.withAuth(s.handleLlamaAuth))
 	mux.HandleFunc("/api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("/api/imap/test", s.withAuth(s.handleIMAPTest))
+	mux.HandleFunc("/api/mail/send", s.withAuth(s.handleMailSend))
 	mux.HandleFunc("/api/llama/test", s.withAuth(s.handleLlamaTest))
 	mux.HandleFunc("/api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("/api/setup", s.handleSetup)
@@ -263,6 +267,148 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": req.Host, "port": req.Port, "mailbox": req.Mailbox})
+}
+
+func parseRecipientList(raw string) ([]string, error) {
+	normalized := strings.TrimSpace(strings.ReplaceAll(raw, ";", ","))
+	if normalized == "" {
+		return []string{}, nil
+	}
+	addresses, err := mail.ParseAddressList(normalized)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(addresses))
+	for _, addr := range addresses {
+		if addr == nil {
+			continue
+		}
+		clean := strings.TrimSpace(addr.Address)
+		if clean == "" {
+			continue
+		}
+		out = append(out, clean)
+	}
+	return out, nil
+}
+
+func sanitizeHeaderValue(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+}
+
+func deriveSMTPHost(imapHost string) string {
+	host := strings.TrimSpace(imapHost)
+	if host == "" {
+		return ""
+	}
+	lower := strings.ToLower(host)
+	if strings.HasPrefix(lower, "imap.") {
+		return "smtp." + host[len("imap."):]
+	}
+	if strings.Contains(lower, ".imap.") {
+		return strings.Replace(host, ".imap.", ".smtp.", 1)
+	}
+	return host
+}
+
+func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		To      string `json:"to"`
+		CC      string `json:"cc"`
+		BCC     string `json:"bcc"`
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+		Mode    string `json:"mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	toList, err := parseRecipientList(req.To)
+	if err != nil || len(toList) == 0 {
+		http.Error(w, "valid TO recipient is required", http.StatusBadRequest)
+		return
+	}
+	ccList, err := parseRecipientList(req.CC)
+	if err != nil {
+		http.Error(w, "invalid CC recipients", http.StatusBadRequest)
+		return
+	}
+	bccList, err := parseRecipientList(req.BCC)
+	if err != nil {
+		http.Error(w, "invalid BCC recipients", http.StatusBadRequest)
+		return
+	}
+
+	payload, exists, err := readIMAPConfigPayload(s.imapConfigPath, s.imapConfigKeyPath)
+	if err != nil {
+		http.Error(w, "failed to read mail credentials", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "imap configuration is required before sending", http.StatusBadRequest)
+		return
+	}
+
+	smtpHost := strings.TrimSpace(envOrDefault("SMTP_HOST", ""))
+	if smtpHost == "" {
+		smtpHost = deriveSMTPHost(payload.Host)
+	}
+	if smtpHost == "" {
+		http.Error(w, "smtp host is not configured", http.StatusBadRequest)
+		return
+	}
+	smtpPort := envInt("SMTP_PORT", 587)
+	if smtpPort <= 0 {
+		smtpPort = 587
+	}
+	addr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
+
+	from := sanitizeHeaderValue(payload.Username)
+	if from == "" {
+		http.Error(w, "imap username is required for sender", http.StatusBadRequest)
+		return
+	}
+
+	subject := sanitizeHeaderValue(req.Subject)
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	contentType := "text/plain; charset=UTF-8"
+	switch mode {
+	case "html":
+		contentType = "text/html; charset=UTF-8"
+	case "markup":
+		contentType = "text/markdown; charset=UTF-8"
+	}
+
+	var msg bytes.Buffer
+	msg.WriteString("From: " + from + "\r\n")
+	msg.WriteString("To: " + strings.Join(toList, ", ") + "\r\n")
+	if len(ccList) > 0 {
+		msg.WriteString("Cc: " + strings.Join(ccList, ", ") + "\r\n")
+	}
+	msg.WriteString("Subject: " + subject + "\r\n")
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	msg.WriteString("Content-Type: " + contentType + "\r\n")
+	msg.WriteString("\r\n")
+	msg.WriteString(req.Body)
+
+	recipients := append([]string{}, toList...)
+	recipients = append(recipients, ccList...)
+	recipients = append(recipients, bccList...)
+
+	auth := smtp.PlainAuth("", payload.Username, payload.Password, smtpHost)
+	if err := smtp.SendMail(addr, auth, from, recipients, msg.Bytes()); err != nil {
+		http.Error(w, "failed to send email", http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func readIMAPConfigPayload(path, keyPath string) (imapConfigPayload, bool, error) {
