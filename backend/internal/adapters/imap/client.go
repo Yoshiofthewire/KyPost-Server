@@ -63,6 +63,7 @@ type Client interface {
 	ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error)
 	ListUnreadMessages(ctx context.Context, limit int) ([]UnreadMessage, error)
 	ListLabels(ctx context.Context) ([]string, error)
+	ListSubfolders(ctx context.Context, parent string) ([]string, error)
 	EnsureLabel(ctx context.Context, label string) error
 	ApplyLabel(ctx context.Context, messageID, label string) error
 	ApplyInboxAction(ctx context.Context, messageID, action string) error
@@ -79,6 +80,10 @@ func (s *StubClient) ListUnreadMessages(_ context.Context, _ int) ([]UnreadMessa
 }
 
 func (s *StubClient) ListLabels(_ context.Context) ([]string, error) {
+	return []string{}, nil
+}
+
+func (s *StubClient) ListSubfolders(_ context.Context, _ string) ([]string, error) {
 	return []string{}, nil
 }
 
@@ -456,6 +461,62 @@ func (c *APIClient) ListLabels(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(labels)
 	return labels, nil
+}
+
+func (c *APIClient) ListSubfolders(ctx context.Context, parent string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	parent = strings.TrimSpace(parent)
+	if parent == "" {
+		return nil, errors.New("parent folder is required")
+	}
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	folders, err := d.GetFolders()
+	if err != nil {
+		return nil, fmt.Errorf("imap list folders: %w", err)
+	}
+
+	parentLower := strings.ToLower(parent)
+	children := []string{}
+	seen := map[string]bool{}
+	for _, folder := range folders {
+		clean := strings.TrimSpace(folder)
+		if clean == "" {
+			continue
+		}
+		child := ""
+		for _, prefix := range []string{parent + "/", parent + ".", "INBOX/" + parent + "/", "INBOX." + parent + "."} {
+			if strings.HasPrefix(strings.ToLower(clean), strings.ToLower(prefix)) {
+				child = clean[len(prefix):]
+				break
+			}
+		}
+		if child == "" {
+			continue
+		}
+		if idx := strings.IndexAny(child, "/."); idx >= 0 {
+			child = child[:idx]
+		}
+		child = strings.TrimSpace(child)
+		if child == "" {
+			continue
+		}
+		key := strings.ToLower(child)
+		if key == parentLower || seen[key] {
+			continue
+		}
+		seen[key] = true
+		children = append(children, child)
+	}
+
+	sort.Strings(children)
+	return children, nil
 }
 
 func (c *APIClient) EnsureLabel(ctx context.Context, label string) error {

@@ -25,7 +25,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | Package | Responsibility |
 |---------|---------------|
 | `app/` | Mode flag parsing; bootstrap logger, config, poller, API server |
-| `api/` | 18 HTTP endpoints; scrypt session auth; config/IMAP/Ollama/health/decisions/logs/tuning |
+| `api/` | 19 HTTP endpoints; scrypt session auth; config/IMAP/Ollama/health/decisions/logs/tuning |
 | `adapters/imap/` | IMAP UID-based email fetching; credential decrypt |
 | `adapters/llama/` | Ollama `/api/generate` HTTP calls; 3s inter-request pacing; retry backoff |
 | `processor/` | Timed polling loop (~90s default); orchestrates fetch → redact → classify → label → persist |
@@ -62,6 +62,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `GET /api/labels` | yes | Allowed label list |
 | `GET /api/decisions?limit=N` | yes | Audit trail |
 | `GET /api/inbox?limit=N` | yes | Live unread IMAP inbox grouped by allowed keywords + Uncategorized |
+| `GET /api/inbox/folders?parent=Archive` | yes | Lists immediate child folders under an IMAP mailbox parent |
 | `POST /api/inbox/actions` | yes | Bulk inbox actions: `delete`, `archive`, `spam`, `read` by `messageIds[]` |
 | `GET /api/logs?file=<name>.log&lines=<n>` | yes | Log tail |
 | `GET /api/logs/list` | yes | Log file inventory |

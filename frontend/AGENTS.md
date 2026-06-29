@@ -30,6 +30,12 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 | `DecisionsPage.tsx` | `GET /api/decisions?limit=10` |
 | `LogsPage.tsx` | `GET /api/logs?file=<name>.log&lines=<n>`, `GET /api/logs/list` |
 
+### App Shell → API Mapping
+
+| Component | Endpoints used |
+|-----------|----------------|
+| `App.tsx` | `GET /api/auth/me`, `GET /api/inbox/folders?parent=Archive`, `POST /api/auth/logout` |
+
 ### Auth Flow
 
 1. App mounts → `App.useEffect` calls `GET /api/auth/me`

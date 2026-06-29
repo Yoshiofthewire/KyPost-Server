@@ -13,6 +13,12 @@ import { TuningPage } from "./pages/TuningPage";
 const primaryNavItems = [
   ["/read", "Inbox"]
 ] as const;
+const mailboxNavItems = [
+  ["/read?mailbox=Drafts", "Drafts"],
+  ["/read?mailbox=Sent", "Sent"],
+  ["/read?mailbox=Spam", "Spam"],
+  ["/read?mailbox=Trash", "Trash"]
+] as const;
 const settingsNavItems = [
   ["/login", "Login"],
   ["/status", "Status"],
@@ -27,8 +33,16 @@ type AuthState = {
   mustChangePassword?: boolean;
 };
 
+type InboxFoldersResponse = {
+  parent: string;
+  folders: string[];
+};
+
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveFolders, setArchiveFolders] = useState<string[]>([]);
+  const [archiveFoldersLoading, setArchiveFoldersLoading] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   async function refreshAuth() {
@@ -51,6 +65,27 @@ export function App() {
       setAuth({ authenticated: false });
     }
   }
+
+  async function loadArchiveFolders() {
+    if (!auth?.authenticated) {
+      setArchiveFolders([]);
+      return;
+    }
+    setArchiveFoldersLoading(true);
+    try {
+      const data = await getJSON<InboxFoldersResponse>("/api/inbox/folders?parent=Archive");
+      setArchiveFolders(data.folders ?? []);
+    } catch {
+      setArchiveFolders([]);
+    } finally {
+      setArchiveFoldersLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!archiveOpen) return;
+    void loadArchiveFolders();
+  }, [archiveOpen, auth?.authenticated]);
 
   if (auth === null) {
     return (
@@ -84,6 +119,38 @@ export function App() {
               {label}
             </Link>
           ))}
+
+          {mailboxNavItems.map(([to, label]) => (
+            <Link key={to} to={to}>
+              {label}
+            </Link>
+          ))}
+
+          <button
+            type="button"
+            className="nav-heading"
+            aria-expanded={archiveOpen}
+            onClick={() => setArchiveOpen((open) => !open)}
+          >
+            Archive {archiveOpen ? "-" : "+"}
+          </button>
+
+          {archiveOpen ? (
+            <div className="nav-group">
+              {archiveFoldersLoading ? <span>Loading folders...</span> : null}
+              {!archiveFoldersLoading && archiveFolders.length === 0 ? <span>No archive folders</span> : null}
+              {!archiveFoldersLoading
+                ? archiveFolders.map((folder) => {
+                    const mailboxPath = `Archive/${folder}`;
+                    return (
+                      <Link key={mailboxPath} to={`/read?mailbox=${encodeURIComponent(mailboxPath)}`}>
+                        {folder}
+                      </Link>
+                    );
+                  })
+                : null}
+            </div>
+          ) : null}
 
           <button
             type="button"

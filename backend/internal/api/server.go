@@ -77,6 +77,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("/api/decisions", s.withAuth(s.handleDecisions))
 	mux.HandleFunc("/api/inbox", s.withAuth(s.handleInbox))
+	mux.HandleFunc("/api/inbox/folders", s.withAuth(s.handleInboxFolders))
 	mux.HandleFunc("/api/inbox/actions", s.withAuth(s.handleInboxActions))
 	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
 	mux.HandleFunc("/api/logs/list", s.withAuth(s.handleLogsList))
@@ -591,6 +592,33 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 
 	tabs = append(tabs, uncategorizedTab)
 	writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
+}
+
+func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.mail == nil {
+		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	parent := strings.TrimSpace(r.URL.Query().Get("parent"))
+	if parent == "" {
+		parent = "Archive"
+	}
+
+	folders, err := s.mail.ListSubfolders(r.Context(), parent)
+	if err != nil {
+		http.Error(w, "failed to fetch inbox folders", http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"parent":  parent,
+		"folders": folders,
+	})
 }
 
 func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
