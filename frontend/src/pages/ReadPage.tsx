@@ -25,11 +25,19 @@ function formatTimestamp(value: string): string {
   return date.toLocaleString();
 }
 
+function processEmailHtml(html: string, showImages: boolean): string {
+  if (showImages) return html;
+  
+  // Replace img tags with [Image Blocked]
+  return html.replace(/<img[^>]*>/gi, "[Image Blocked]");
+}
+
 export function ReadPage() {
   const [tabs, setTabs] = useState<string[]>([]);
   const [byTab, setByTab] = useState<Record<string, InboxEmail[]>>({});
   const [activeTab, setActiveTab] = useState<string>("");
   const [selected, setSelected] = useState<InboxEmail | null>(null);
+  const [showImages, setShowImages] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -146,7 +154,10 @@ export function ReadPage() {
                   <td style={{ borderBottom: "1px solid var(--line)", padding: "8px" }}>
                     <button
                       type="button"
-                      onClick={() => setSelected(item)}
+                      onClick={() => {
+                        setSelected(item);
+                        setShowImages(false);
+                      }}
                       style={{
                         padding: 0,
                         border: 0,
@@ -197,7 +208,10 @@ export function ReadPage() {
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h3 style={{ margin: 0 }}>Email Details</h3>
-              <button type="button" onClick={() => setSelected(null)}>Close</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" onClick={() => { setShowImages(true); }}>Show Images</button>
+                <button type="button" onClick={() => setSelected(null)}>Close</button>
+              </div>
             </div>
 
             <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
@@ -227,7 +241,7 @@ export function ReadPage() {
                           color: "var(--ink-strong)",
                           wordBreak: "break-word"
                         }}
-                        dangerouslySetInnerHTML={{ __html: body }}
+                        dangerouslySetInnerHTML={{ __html: processEmailHtml(body, showImages) }}
                       />
                     );
                   } else {
