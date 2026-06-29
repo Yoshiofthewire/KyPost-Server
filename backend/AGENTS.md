@@ -61,9 +61,9 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `GET\|PUT /api/config` | yes | Full config; PUT broadcasts to running poller |
 | `GET /api/labels` | yes | Allowed label list |
 | `GET /api/decisions?limit=N` | yes | Audit trail |
-| `GET /api/inbox?limit=N` | yes | Live IMAP inbox (read + unread) grouped by allowed keywords + Uncategorized |
+| `GET /api/inbox?limit=N&mailbox=<name>` | yes | Live IMAP mailbox (read + unread) grouped by allowed keywords + Uncategorized |
 | `GET /api/inbox/folders?parent=Archive` | yes | Lists immediate child folders under an IMAP mailbox parent |
-| `POST /api/inbox/actions` | yes | Bulk inbox actions: `delete`, `archive`, `spam`, `read` by `messageIds[]` |
+| `POST /api/inbox/actions` | yes | Bulk inbox actions: `delete`, `archive`, `spam`, `read` by `messageIds[]`; `archive` moves to `Archive/<email sent year>` (fallback received year/current year) and creates folder if needed |
 | `GET /api/logs?file=<name>.log&lines=<n>` | yes | Log tail |
 | `GET /api/logs/list` | yes | Log file inventory |
 | `GET\|POST /api/llama/auth` | yes | Ollama auth token management |

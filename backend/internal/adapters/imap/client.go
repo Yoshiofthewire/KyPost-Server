@@ -62,7 +62,7 @@ func htmlToPlainText(htmlBody string) string {
 
 type Client interface {
 	ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error)
-	ListUnreadMessages(ctx context.Context, limit int) ([]UnreadMessage, error)
+	ListUnreadMessages(ctx context.Context, mailbox string, limit int) ([]UnreadMessage, error)
 	ListLabels(ctx context.Context) ([]string, error)
 	ListSubfolders(ctx context.Context, parent string) ([]string, error)
 	EnsureLabel(ctx context.Context, label string) error
@@ -76,7 +76,7 @@ func (s *StubClient) ListUnreadInbox(_ context.Context, _ string) ([]Message, st
 	return []Message{}, "", nil
 }
 
-func (s *StubClient) ListUnreadMessages(_ context.Context, _ int) ([]UnreadMessage, error) {
+func (s *StubClient) ListUnreadMessages(_ context.Context, _ string, _ int) ([]UnreadMessage, error) {
 	return []UnreadMessage{}, nil
 }
 
@@ -324,17 +324,23 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 	return out, next, nil
 }
 
-func (c *APIClient) ListUnreadMessages(ctx context.Context, limit int) ([]UnreadMessage, error) {
+func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limit int) ([]UnreadMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if limit <= 0 {
 		limit = 500
 	}
+	mailbox = strings.TrimSpace(mailbox)
 
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
 		return nil, err
+	}
+	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
+		if err := d.SelectFolder(mailbox); err != nil {
+			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
+		}
 	}
 
 	uids, err := d.GetLastNUIDs(limit)
@@ -594,8 +600,30 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action stri
 		}
 		return nil
 	case "archive":
-		if err := moveToFolder("Archive"); err != nil {
-			return fmt.Errorf("imap move uid %d to Archive: %w", uid, err)
+		year := time.Now().Year()
+		emails, err := d.GetEmails(uid)
+		if err == nil {
+			if email := emails[uid]; email != nil {
+				ts := email.Sent
+				if ts.IsZero() {
+					ts = email.Received
+				}
+				if !ts.IsZero() {
+					year = ts.UTC().Year()
+				}
+			}
+		}
+		archiveTargets := []string{fmt.Sprintf("Archive/%d", year), fmt.Sprintf("Archive.%d", year)}
+		var lastErr error
+		for _, folder := range archiveTargets {
+			if err := moveToFolder(folder); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		if lastErr != nil {
+			return fmt.Errorf("imap move uid %d to yearly archive: %w", uid, lastErr)
 		}
 		return nil
 	case "spam":

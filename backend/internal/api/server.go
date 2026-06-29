@@ -527,6 +527,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 			limit = v
 		}
 	}
+	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
 
 	s.mu.RLock()
 	cfg := s.cfg
@@ -559,9 +560,9 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unread, err := s.mail.ListUnreadMessages(r.Context(), limit)
+	unread, err := s.mail.ListUnreadMessages(r.Context(), mailbox, limit)
 	if err != nil {
-		http.Error(w, "failed to fetch unread inbox", http.StatusBadGateway)
+		http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
 		return
 	}
 

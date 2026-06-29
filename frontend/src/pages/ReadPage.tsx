@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { getJSON, postJSON } from "../api/client";
 
 type InboxEmail = {
@@ -45,6 +46,8 @@ function processEmailHtml(html: string, showImages: boolean): string {
 }
 
 export function ReadPage() {
+  const [searchParams] = useSearchParams();
+  const mailbox = (searchParams.get("mailbox") || "").trim();
   const [tabs, setTabs] = useState<string[]>([]);
   const [byTab, setByTab] = useState<Record<string, InboxEmail[]>>({});
   const [activeTab, setActiveTab] = useState<string>("");
@@ -61,7 +64,8 @@ export function ReadPage() {
     setLoading(true);
     setError("");
     try {
-      const data = await getJSON<InboxResponse>("/api/inbox?limit=500");
+      const mailboxQuery = mailbox ? `&mailbox=${encodeURIComponent(mailbox)}` : "";
+      const data = await getJSON<InboxResponse>(`/api/inbox?limit=500${mailboxQuery}`);
       const nextTabs = data.tabs ?? [];
       const nextByTab = data.byTab ?? {};
       setTabs(nextTabs);
@@ -91,10 +95,12 @@ export function ReadPage() {
   }
 
   useEffect(() => {
+    setSelected(null);
+    setSelectedMessageIds([]);
     loadInbox();
     const timer = setInterval(loadInbox, 15_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [mailbox]);
 
   const rows = useMemo(() => {
     if (!activeTab) return [];
@@ -228,7 +234,7 @@ export function ReadPage() {
     <section className="panel">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div>
-          <h2 style={{ marginTop: 0, marginBottom: 6 }}>Inbox</h2>
+          <h2 style={{ marginTop: 0, marginBottom: 6 }}>{mailbox ? mailbox : "Inbox"}</h2>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           <button
