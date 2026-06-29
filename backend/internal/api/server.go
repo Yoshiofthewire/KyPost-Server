@@ -455,6 +455,7 @@ type inboxEmail struct {
 	Sender    string `json:"sender"`
 	SentTo    string `json:"sentTo,omitempty"`
 	Subject   string `json:"subject"`
+	Body      string `json:"body,omitempty"`
 	Label     string `json:"label,omitempty"`
 	Status    string `json:"status"`
 	Detail    string `json:"detail,omitempty"`
@@ -580,6 +581,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
 			Subject:   msg.Subject,
+			Body:      msg.Body,
 			Label:     tab,
 			Status:    "unread",
 			AtUTC:     msg.AtUTC,

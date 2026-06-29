@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	stdhtml "html"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +35,28 @@ type UnreadMessage struct {
 	SentTo    string
 	Keywords  []string
 	AtUTC     string
+	Body      string
+}
+
+var htmlTagPattern = regexp.MustCompile(`(?s)<[^>]*>`)
+
+func htmlToPlainText(htmlBody string) string {
+	trimmed := strings.TrimSpace(htmlBody)
+	if trimmed == "" {
+		return ""
+	}
+	noTags := htmlTagPattern.ReplaceAllString(trimmed, " ")
+	unescaped := stdhtml.UnescapeString(noTags)
+	lines := strings.Split(unescaped, "\n")
+	cleaned := make([]string, 0, len(lines))
+	for _, line := range lines {
+		normalized := strings.Join(strings.Fields(line), " ")
+		if normalized == "" {
+			continue
+		}
+		cleaned = append(cleaned, normalized)
+	}
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
 }
 
 type Client interface {
@@ -362,6 +386,11 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, limit int) ([]Unread
 			atUTC = ts.UTC().Format(time.RFC3339)
 		}
 
+		body := strings.TrimSpace(e.Text)
+		if body == "" {
+			body = htmlToPlainText(e.HTML)
+		}
+
 		out = append(out, UnreadMessage{
 			MessageID: strconv.Itoa(uid),
 			Subject:   strings.TrimSpace(e.Subject),
@@ -369,6 +398,7 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, limit int) ([]Unread
 			SentTo:    strings.TrimSpace(e.To.String()),
 			Keywords:  keywords,
 			AtUTC:     atUTC,
+			Body:      body,
 		})
 	}
 

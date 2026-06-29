@@ -6,6 +6,7 @@ type InboxEmail = {
   sender: string;
   sentTo?: string;
   subject: string;
+  body?: string;
   label?: string;
   status: string;
   detail?: string;
@@ -207,6 +208,28 @@ export function ReadPage() {
               <p style={{ margin: 0 }}><strong>Status:</strong> {selected.status || "-"}</p>
               <p style={{ margin: 0 }}><strong>Time:</strong> {formatTimestamp(selected.atUtc)}</p>
               {selected.detail ? <p style={{ margin: 0 }}><strong>Detail:</strong> {selected.detail}</p> : null}
+              <div>
+                <p style={{ margin: "6px 0" }}><strong>Email Body:</strong></p>
+                <pre
+                  style={{
+                    margin: 0,
+                    maxHeight: "40vh",
+                    overflowY: "auto",
+                    border: "1px solid var(--line)",
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    background: "var(--bg)",
+                    color: "var(--ink-strong)",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word"
+                  }}
+                >
+                  {selected.body && selected.body.trim() !== "" ? selected.body : "No message body available."}
+                </pre>
+                <p style={{ margin: "6px 0 0", fontSize: "0.75rem", opacity: 0.7 }}>
+                  Remote images are not loaded by default.
+                </p>
+              </div>
             </div>
           </div>
         </div>
