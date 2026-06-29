@@ -40,6 +40,14 @@ type InboxFoldersResponse = {
   folders: string[];
 };
 
+type DraftComposePayload = {
+  sentTo?: string;
+  cc?: string;
+  bcc?: string;
+  subject?: string;
+  body?: string;
+};
+
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -53,6 +61,7 @@ export function App() {
   const [composeSubject, setComposeSubject] = useState("");
   const [composeHtmlBody, setComposeHtmlBody] = useState("");
   const [composeSending, setComposeSending] = useState(false);
+  const [composeSavingDraft, setComposeSavingDraft] = useState(false);
   const [composeError, setComposeError] = useState("");
   const [composeSuccess, setComposeSuccess] = useState("");
   const quillEditorRef = useRef<HTMLDivElement | null>(null);
@@ -140,6 +149,17 @@ export function App() {
     setComposeOpen(true);
   }
 
+  function openDraftInCompose(payload: DraftComposePayload) {
+    setComposeTo(payload.sentTo ?? "");
+    setComposeCc(payload.cc ?? "");
+    setComposeBcc(payload.bcc ?? "");
+    setComposeSubject(payload.subject ?? "");
+    setComposeHtmlBody(payload.body ?? "");
+    setComposeError("");
+    setComposeSuccess("");
+    setComposeOpen(true);
+  }
+
   function trashComposeDraft() {
     resetComposeForm();
     setComposeOpen(false);
@@ -172,6 +192,34 @@ export function App() {
       setComposeError(message);
     } finally {
       setComposeSending(false);
+    }
+  }
+
+  async function saveComposeDraft() {
+    const to = composeTo.trim();
+    if (!to) {
+      setComposeError("TO is required.");
+      return;
+    }
+    setComposeSavingDraft(true);
+    setComposeError("");
+    setComposeSuccess("");
+    const body = quillInstanceRef.current?.root.innerHTML ?? composeHtmlBody;
+    try {
+      await postJSON<{ ok: boolean }>("/api/mail/draft", {
+        to,
+        cc: composeCc.trim(),
+        bcc: composeBcc.trim(),
+        subject: composeSubject,
+        body,
+        mode: "html"
+      });
+      setComposeSuccess("Draft saved.");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "failed to save draft";
+      setComposeError(message);
+    } finally {
+      setComposeSavingDraft(false);
     }
   }
 
@@ -275,7 +323,7 @@ export function App() {
         <Routes>
             <Route path="/" element={<Navigate to={auth.authenticated ? "/read" : "/login"} replace />} />
           <Route path="/login" element={<LoginPage auth={auth} onAuthChanged={refreshAuth} />} />
-            <Route path="/read" element={protect(<ReadPage />)} />
+              <Route path="/read" element={protect(<ReadPage onOpenDraft={openDraftInCompose} />)} />
           <Route path="/status" element={protect(<StatusPage />)} />
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
@@ -289,10 +337,11 @@ export function App() {
           <section className="compose-window" onClick={(event) => event.stopPropagation()}>
             <div className="compose-topbar">
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button type="button" className="compose-send" onClick={() => void sendComposeEmail()} disabled={composeSending}>Send</button>
-                <button type="button" className="compose-trash" onClick={trashComposeDraft} disabled={composeSending}>Trash</button>
+                <button type="button" className="compose-send" onClick={() => void sendComposeEmail()} disabled={composeSending || composeSavingDraft}>Send</button>
+                <button type="button" className="compose-save-draft" onClick={() => void saveComposeDraft()} disabled={composeSending || composeSavingDraft}>Save Draft</button>
+                <button type="button" className="compose-trash" onClick={trashComposeDraft} disabled={composeSending || composeSavingDraft}>Trash</button>
               </div>
-              <button type="button" className="compose-close" onClick={() => setComposeOpen(false)} disabled={composeSending}>Close</button>
+              <button type="button" className="compose-close" onClick={() => setComposeOpen(false)} disabled={composeSending || composeSavingDraft}>Close</button>
             </div>
 
             {composeError ? <p className="notice notice-error" style={{ margin: 0 }}>Send failed: {composeError}</p> : null}

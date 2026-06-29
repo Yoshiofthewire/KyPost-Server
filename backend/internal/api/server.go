@@ -87,6 +87,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/llama/auth", s.withAuth(s.handleLlamaAuth))
 	mux.HandleFunc("/api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("/api/imap/test", s.withAuth(s.handleIMAPTest))
+	mux.HandleFunc("/api/mail/draft", s.withAuth(s.handleMailDraft))
 	mux.HandleFunc("/api/mail/send", s.withAuth(s.handleMailSend))
 	mux.HandleFunc("/api/llama/test", s.withAuth(s.handleLlamaTest))
 	mux.HandleFunc("/api/tuning", s.withAuth(s.handleTuning))
@@ -411,6 +412,60 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) handleMailDraft(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.mail == nil {
+		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		To      string `json:"to"`
+		CC      string `json:"cc"`
+		BCC     string `json:"bcc"`
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+		Mode    string `json:"mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	toList, err := parseRecipientList(req.To)
+	if err != nil || len(toList) == 0 {
+		http.Error(w, "valid TO recipient is required", http.StatusBadRequest)
+		return
+	}
+	ccList, err := parseRecipientList(req.CC)
+	if err != nil {
+		http.Error(w, "invalid CC recipients", http.StatusBadRequest)
+		return
+	}
+	bccList, err := parseRecipientList(req.BCC)
+	if err != nil {
+		http.Error(w, "invalid BCC recipients", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.mail.SaveDraft(r.Context(), imapadapter.DraftMessage{
+		To:      toList,
+		CC:      ccList,
+		BCC:     bccList,
+		Subject: req.Subject,
+		Body:    req.Body,
+		Mode:    req.Mode,
+	}); err != nil {
+		http.Error(w, "failed to save draft", http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func readIMAPConfigPayload(path, keyPath string) (imapConfigPayload, bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -602,6 +657,8 @@ type inboxEmail struct {
 	MessageID string `json:"messageId"`
 	Sender    string `json:"sender"`
 	SentTo    string `json:"sentTo,omitempty"`
+	CC        string `json:"cc,omitempty"`
+	BCC       string `json:"bcc,omitempty"`
 	Subject   string `json:"subject"`
 	Body      string `json:"body,omitempty"`
 	Label     string `json:"label,omitempty"`
@@ -734,6 +791,8 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 			MessageID: msg.MessageID,
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
+			CC:        msg.CC,
+			BCC:       msg.BCC,
 			Subject:   msg.Subject,
 			Body:      msg.Body,
 			Label:     tab,

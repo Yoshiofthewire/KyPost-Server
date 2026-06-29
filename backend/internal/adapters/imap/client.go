@@ -33,10 +33,21 @@ type UnreadMessage struct {
 	Subject   string
 	Sender    string
 	SentTo    string
+	CC        string
+	BCC       string
 	Keywords  []string
 	AtUTC     string
 	Body      string
 	Status    string
+}
+
+type DraftMessage struct {
+	To      []string
+	CC      []string
+	BCC     []string
+	Subject string
+	Body    string
+	Mode    string
 }
 
 var htmlTagPattern = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -68,6 +79,7 @@ type Client interface {
 	EnsureLabel(ctx context.Context, label string) error
 	ApplyLabel(ctx context.Context, messageID, label string) error
 	ApplyInboxAction(ctx context.Context, messageID, action string) error
+	SaveDraft(ctx context.Context, draft DraftMessage) error
 }
 
 type StubClient struct{}
@@ -97,6 +109,10 @@ func (s *StubClient) ApplyLabel(_ context.Context, _ string, _ string) error {
 }
 
 func (s *StubClient) ApplyInboxAction(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (s *StubClient) SaveDraft(_ context.Context, _ DraftMessage) error {
 	return nil
 }
 
@@ -427,6 +443,8 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 			Subject:   strings.TrimSpace(e.Subject),
 			Sender:    strings.TrimSpace(e.From.String()),
 			SentTo:    strings.TrimSpace(e.To.String()),
+			CC:        strings.TrimSpace(e.CC.String()),
+			BCC:       strings.TrimSpace(e.BCC.String()),
 			Keywords:  keywords,
 			AtUTC:     atUTC,
 			Body:      body,
@@ -658,6 +676,74 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action stri
 	default:
 		return fmt.Errorf("unsupported inbox action %q", action)
 	}
+}
+
+func sanitizeDraftHeaderValue(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+}
+
+func (c *APIClient) SaveDraft(ctx context.Context, draft DraftMessage) error {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(draft.To) == 0 {
+		return errors.New("at least one TO recipient is required")
+	}
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return err
+	}
+
+	subject := sanitizeDraftHeaderValue(draft.Subject)
+	from := sanitizeDraftHeaderValue(c.username)
+	mode := strings.ToLower(strings.TrimSpace(draft.Mode))
+	contentType := "text/plain; charset=UTF-8"
+	if mode == "html" {
+		contentType = "text/html; charset=UTF-8"
+	}
+
+	message := strings.Builder{}
+	message.WriteString("From: " + from + "\r\n")
+	message.WriteString("To: " + strings.Join(draft.To, ", ") + "\r\n")
+	if len(draft.CC) > 0 {
+		message.WriteString("Cc: " + strings.Join(draft.CC, ", ") + "\r\n")
+	}
+	if len(draft.BCC) > 0 {
+		message.WriteString("Bcc: " + strings.Join(draft.BCC, ", ") + "\r\n")
+	}
+	message.WriteString("Subject: " + subject + "\r\n")
+	message.WriteString("MIME-Version: 1.0\r\n")
+	message.WriteString("Content-Type: " + contentType + "\r\n")
+	message.WriteString("\r\n")
+	message.WriteString(draft.Body)
+
+	appendToFolder := func(folder string) error {
+		if err := d.Append(folder, []string{"\\Draft"}, time.Now(), []byte(message.String())); err == nil {
+			return nil
+		}
+		if err := d.CreateFolder(folder); err != nil {
+			return err
+		}
+		return d.Append(folder, []string{"\\Draft"}, time.Now(), []byte(message.String()))
+	}
+
+	targets := []string{"Drafts", "INBOX/Drafts", "INBOX.Drafts"}
+	var lastErr error
+	for _, folder := range targets {
+		if err := appendToFolder(folder); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to save draft: %w", lastErr)
+	}
+	return errors.New("failed to save draft")
 }
 
 func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {

@@ -6,12 +6,18 @@ type InboxEmail = {
   messageId: string;
   sender: string;
   sentTo?: string;
+  cc?: string;
+  bcc?: string;
   subject: string;
   body?: string;
   label?: string;
   status: string;
   detail?: string;
   atUtc: string;
+};
+
+type ReadPageProps = {
+  onOpenDraft?: (payload: { sentTo?: string; cc?: string; bcc?: string; subject?: string; body?: string }) => void;
 };
 
 type InboxResponse = {
@@ -45,7 +51,7 @@ function processEmailHtml(html: string, showImages: boolean): string {
   return content.replace(/<img[^>]*>/gi, "[Image Blocked]");
 }
 
-export function ReadPage() {
+export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [searchParams] = useSearchParams();
   const mailbox = (searchParams.get("mailbox") || "").trim();
   const [tabs, setTabs] = useState<string[]>([]);
@@ -59,6 +65,7 @@ export function ReadPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const isDraftMailbox = mailbox.toLowerCase().includes("drafts");
 
   async function loadInbox() {
     setLoading(true);
@@ -170,6 +177,16 @@ export function ReadPage() {
   }
 
   async function openEmailDetails(item: InboxEmail) {
+    if (isDraftMailbox && onOpenDraft) {
+      onOpenDraft({
+        sentTo: item.sentTo,
+        cc: item.cc,
+        bcc: item.bcc,
+        subject: item.subject,
+        body: item.body
+      });
+      return;
+    }
     setSelected(item);
     setShowImages(false);
     setShowRawEmail(false);

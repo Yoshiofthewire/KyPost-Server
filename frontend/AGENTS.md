@@ -35,7 +35,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 | Component | Endpoints used |
 |-----------|----------------|
-| `App.tsx` | `GET /api/auth/me`, `GET /api/inbox/folders?parent=Archive`, `POST /api/auth/logout`, `POST /api/mail/send` |
+| `App.tsx` | `GET /api/auth/me`, `GET /api/inbox/folders?parent=Archive`, `POST /api/auth/logout`, `POST /api/mail/send`, `POST /api/mail/draft` |
 
 ### Auth Flow
 

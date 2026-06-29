@@ -348,6 +348,12 @@ pre {
   font-weight: 700;
 }
 
+.compose-save-draft {
+  background: #f0f5d7;
+  border-color: #9fb26a;
+  color: #2f3a00;
+}
+
 .compose-trash,
 .compose-close {
   background: transparent;

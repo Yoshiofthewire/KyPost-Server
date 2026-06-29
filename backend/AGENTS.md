@@ -25,7 +25,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | Package | Responsibility |
 |---------|---------------|
 | `app/` | Mode flag parsing; bootstrap logger, config, poller, API server |
-| `api/` | 20 HTTP endpoints; scrypt session auth; config/IMAP/Ollama/health/decisions/logs/tuning/mail-send |
+| `api/` | 21 HTTP endpoints; scrypt session auth; config/IMAP/Ollama/health/decisions/logs/tuning/mail-send/draft-save |
 | `adapters/imap/` | IMAP UID-based email fetching; credential decrypt |
 | `adapters/llama/` | Ollama `/api/generate` HTTP calls; 3s inter-request pacing; retry backoff |
 | `processor/` | Timed polling loop (~90s default); orchestrates fetch → redact → classify → label → persist |
@@ -70,6 +70,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `POST /api/llama/test` | yes | Classify a test email |
 | `GET\|POST\|DELETE /api/imap/config` | yes | Encrypted IMAP credentials |
 | `POST /api/imap/test` | yes | Live IMAP connectivity check |
+| `POST /api/mail/draft` | yes | Saves compose content to the IMAP Drafts folder |
 | `POST /api/mail/send` | yes | Sends compose email via SMTP using configured credentials |
 | `GET\|PUT /api/tuning` | yes | TUNING.md read/write |
 
