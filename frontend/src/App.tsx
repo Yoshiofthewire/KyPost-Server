@@ -385,6 +385,15 @@ export function App() {
     return parts[parts.length - 1] ?? clean;
   }
 
+  function standardMailboxKey(path: string): string {
+    const value = mailboxLabel(path).trim().toLowerCase();
+    if (!value) return "custom";
+    if (["inbox", "draft", "drafts", "junk", "spam", "sent", "trash"].includes(value)) {
+      return value;
+    }
+    return "custom";
+  }
+
   async function sendComposeEmail() {
     const to = composeTo.trim();
     if (!to) {
@@ -541,7 +550,7 @@ export function App() {
             {mailboxFoldersLoading ? <span>Loading folders...</span> : null}
             {!mailboxFoldersLoading
               ? mailboxFolders.map((folder) => (
-                  <div key={folder.path} className="sidebar-folder-row">
+                  <div key={folder.path} className="sidebar-folder-row" data-folder-kind={standardMailboxKey(folder.path)}>
                     <Link
                       to={`/read?mailbox=${encodeURIComponent(folder.path)}`}
                       className={dragOverFolder === folder.path ? "drop-target-active" : ""}

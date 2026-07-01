@@ -487,15 +487,14 @@ body {
   display: grid;
   gap: 8px;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .email-reader-body-block {
   margin: 0;
-  max-height: 60vh;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
+  max-height: none;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 12px;
@@ -986,6 +985,17 @@ pre {
     line-height: 1;
   }
 
+  .inbox-nav-row,
+  .sidebar-folder-row[data-folder-kind="inbox"],
+  .sidebar-folder-row[data-folder-kind="draft"],
+  .sidebar-folder-row[data-folder-kind="drafts"],
+  .sidebar-folder-row[data-folder-kind="junk"],
+  .sidebar-folder-row[data-folder-kind="spam"],
+  .sidebar-folder-row[data-folder-kind="sent"],
+  .sidebar-folder-row[data-folder-kind="trash"] {
+    display: none;
+  }
+
   .inbox-expand-button,
   .archive-toggle,
   .archive-group,
@@ -1136,34 +1146,43 @@ pre {
 
   .email-reader-content {
     flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .email-reader-body-block {
-    max-height: none;
-    flex: 1;
     min-height: 0;
     overflow: auto;
     -webkit-overflow-scrolling: touch;
   }
 
+  .email-reader-body-block {
+    max-height: none;
+    min-height: auto;
+  }
+
   .compose-backdrop {
     padding: 0;
+    display: block;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .compose-window {
     width: 100vw;
     min-height: 100dvh;
+    height: 100dvh;
     border-radius: 0;
     border: 0;
     padding: 10px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
 
   .compose-topbar {
     align-items: flex-start;
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--panel);
+    padding-top: max(10px, env(safe-area-inset-top));
   }
 
   .compose-topbar > div {
@@ -1180,11 +1199,12 @@ pre {
   }
 
   .compose-editor {
-    min-height: min(52dvh, 420px);
+    min-height: min(44dvh, 340px);
+    flex: 1;
   }
 
   .compose-editor-html .ql-container.ql-snow,
   .compose-editor-html .ql-editor {
-    min-height: min(46dvh, 360px);
+    min-height: min(38dvh, 300px);
   }
 }
