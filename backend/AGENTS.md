@@ -62,7 +62,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `GET /api/labels` | yes | Allowed label list |
 | `GET /api/decisions?limit=N` | yes | Audit trail |
 | `GET /api/inbox?limit=N&mailbox=<name>` | yes | Live IMAP mailbox (read + unread) grouped by allowed keywords + Uncategorized |
-| `GET /api/inbox/folders?parent=<name>` | yes | Lists immediate child folders under an IMAP mailbox parent; omit `parent` to list top-level non-Archive mailbox links for the inbox nav |
+| `GET\|POST\|DELETE /api/inbox/folders` | yes | `GET` lists immediate child folders under an IMAP mailbox parent and marks which folders are deletable in the UI; omit `parent` to list top-level non-Archive mailbox links for the inbox nav. `POST` creates a single child folder under the requested parent (Inbox UI uses `parent=INBOX`). `DELETE` removes a custom child folder after moving its messages to the parent mailbox; built-in folders are rejected |
 | `POST /api/inbox/actions` | yes | Bulk inbox actions: `delete`, `archive`, `spam`, `read` by `messageIds[]` and optional `mailbox`; actions execute in the selected mailbox, and `archive` moves to `Archive/<email sent year>` (fallback received year/current year) and creates folder if needed |
 | `GET /api/logs?file=<name>.log&lines=<n>` | yes | Log tail |
 | `GET /api/logs/list` | yes | Log file inventory |

@@ -34,13 +34,13 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 | Component | Endpoints used |
 |-----------|----------------|
-| `App.tsx` | `GET /api/auth/me`, `GET /api/inbox/folders`, `GET /api/inbox/folders?parent=Archive`, `POST /api/auth/logout`, `POST /api/mail/send`, `POST /api/mail/draft` |
+| `App.tsx` | `GET /api/auth/me`, `GET /api/inbox/folders`, `POST /api/inbox/folders` (create child folder under Inbox), `DELETE /api/inbox/folders?folder=<path>` (delete custom Inbox child folder after moving messages to its parent), `GET /api/inbox/folders?parent=Archive`, `POST /api/auth/logout`, `POST /api/mail/send`, `POST /api/mail/draft` |
 
 ### Auth Flow
 
 1. App mounts → `App.useEffect` calls `GET /api/auth/me`
 2. 401 → redirect to `LoginPage`
-3. Successful login → session cookie set → redirect to `HealthPage`
+3. Successful login → session cookie set → redirect to `ReadPage`
 4. First login with temporary password → `mustChangePassword` flag → redirect to password-change form
 
 ## Work Guidance
@@ -50,6 +50,8 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 - Do not add direct `fetch` calls outside `src/api/client.ts`
 - Add new pages to the router in `App.tsx` and the nav layout in the same file
 - Left nav inbox links are driven by `GET /api/inbox/folders` for top-level non-Archive folders and `GET /api/inbox/folders?parent=Archive` for archive buckets
+- Inbox sidebar folder creation uses `POST /api/inbox/folders` with `parent=INBOX`; folder names are single-level only so the server can choose the correct IMAP hierarchy delimiter
+- Inbox sidebar delete buttons render only for server-marked custom folders; delete moves messages to the parent mailbox first and built-in IMAP folders must not render as deletable
 
 ## Verification
 

@@ -76,6 +76,8 @@ type Client interface {
 	ListUnreadMessages(ctx context.Context, mailbox string, limit int) ([]UnreadMessage, error)
 	ListLabels(ctx context.Context) ([]string, error)
 	ListSubfolders(ctx context.Context, parent string) ([]string, error)
+	CreateFolder(ctx context.Context, parent, name string) (string, error)
+	DeleteFolder(ctx context.Context, folder string) error
 	EnsureLabel(ctx context.Context, label string) error
 	ApplyLabel(ctx context.Context, messageID, label string) error
 	ApplyInboxAction(ctx context.Context, messageID, action, mailbox string) error
@@ -98,6 +100,25 @@ func (s *StubClient) ListLabels(_ context.Context) ([]string, error) {
 
 func (s *StubClient) ListSubfolders(_ context.Context, _ string) ([]string, error) {
 	return []string{}, nil
+}
+
+func (s *StubClient) CreateFolder(_ context.Context, parent, name string) (string, error) {
+	parent = strings.TrimSpace(parent)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("folder name is required")
+	}
+	if parent == "" {
+		return name, nil
+	}
+	return parent + "/" + name, nil
+}
+
+func (s *StubClient) DeleteFolder(_ context.Context, folder string) error {
+	if strings.TrimSpace(folder) == "" {
+		return errors.New("folder is required")
+	}
+	return nil
 }
 
 func (s *StubClient) EnsureLabel(_ context.Context, _ string) error {
@@ -615,6 +636,167 @@ func (c *APIClient) ListSubfolders(ctx context.Context, parent string) ([]string
 
 	sort.Strings(children)
 	return children, nil
+}
+
+func containsMailboxPath(folders []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, folder := range folders {
+		if strings.EqualFold(strings.TrimSpace(folder), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func preferredMailboxDelimiters(parent string, folders []string) []string {
+	clean := strings.TrimSpace(parent)
+	if strings.Contains(clean, "/") {
+		return []string{"/", "."}
+	}
+	if strings.Contains(clean, ".") {
+		return []string{".", "/"}
+	}
+	for _, folder := range folders {
+		trimmed := strings.TrimSpace(folder)
+		if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(clean+"/")) {
+			return []string{"/", "."}
+		}
+		if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(clean+".")) {
+			return []string{".", "/"}
+		}
+	}
+	if strings.EqualFold(clean, "INBOX") {
+		return []string{"/", "."}
+	}
+	return []string{"/", "."}
+}
+
+func mailboxParent(path string) string {
+	clean := strings.TrimSpace(path)
+	idx := strings.LastIndexAny(clean, "/.")
+	if idx <= 0 {
+		return ""
+	}
+	return clean[:idx]
+}
+
+func (c *APIClient) CreateFolder(ctx context.Context, parent, name string) (string, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	parent = strings.TrimSpace(parent)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("folder name is required")
+	}
+	if strings.ContainsAny(name, "/.") {
+		return "", errors.New("folder name must be a single level without / or .")
+	}
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return "", err
+	}
+
+	folders, err := d.GetFolders()
+	if err != nil {
+		return "", fmt.Errorf("imap list folders: %w", err)
+	}
+
+	if parent == "" {
+		if containsMailboxPath(folders, name) {
+			return name, nil
+		}
+		if err := d.CreateFolder(name); err != nil {
+			return "", fmt.Errorf("imap create folder %q: %w", name, err)
+		}
+		return name, nil
+	}
+
+	var lastErr error
+	for _, delimiter := range preferredMailboxDelimiters(parent, folders) {
+		candidate := parent + delimiter + name
+		if containsMailboxPath(folders, candidate) {
+			return candidate, nil
+		}
+		if err := d.CreateFolder(candidate); err == nil {
+			return candidate, nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("imap create folder %q under %q: %w", name, parent, lastErr)
+	}
+	return "", fmt.Errorf("imap create folder %q under %q failed", name, parent)
+}
+
+func (c *APIClient) DeleteFolder(ctx context.Context, folder string) error {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	folder = strings.TrimSpace(folder)
+	if folder == "" {
+		return errors.New("folder is required")
+	}
+	parent := mailboxParent(folder)
+	if parent == "" {
+		return errors.New("folder must have a parent mailbox")
+	}
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return err
+	}
+
+	folders, err := d.GetFolders()
+	if err != nil {
+		return fmt.Errorf("imap list folders: %w", err)
+	}
+	for _, existing := range folders {
+		clean := strings.TrimSpace(existing)
+		if strings.EqualFold(clean, folder) {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(clean), strings.ToLower(folder+"/")) || strings.HasPrefix(strings.ToLower(clean), strings.ToLower(folder+".")) {
+			return errors.New("folder has subfolders and cannot be deleted yet")
+		}
+	}
+
+	if err := d.SelectFolder(folder); err != nil {
+		return fmt.Errorf("imap select folder %q: %w", folder, err)
+	}
+	uids, err := d.GetUIDs("ALL")
+	if err != nil {
+		return fmt.Errorf("imap list folder messages %q: %w", folder, err)
+	}
+	for _, uid := range uids {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := d.MoveEmail(uid, parent); err != nil {
+			return fmt.Errorf("imap move uid %d from %q to %q: %w", uid, folder, parent, err)
+		}
+	}
+	if err := d.SelectFolder(parent); err != nil {
+		return fmt.Errorf("imap select parent folder %q: %w", parent, err)
+	}
+	if err := d.DeleteFolder(folder); err != nil {
+		return fmt.Errorf("imap delete folder %q: %w", folder, err)
+	}
+	return nil
 }
 
 func (c *APIClient) EnsureLabel(ctx context.Context, label string) error {

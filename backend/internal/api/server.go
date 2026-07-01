@@ -686,6 +686,56 @@ type inboxEmail struct {
 	AtUTC     string `json:"atUtc"`
 }
 
+type inboxFolder struct {
+	Path      string `json:"path"`
+	Deletable bool   `json:"deletable"`
+}
+
+func mailboxLeaf(path string) string {
+	clean := strings.TrimSpace(path)
+	if clean == "" {
+		return ""
+	}
+	if idx := strings.LastIndexAny(clean, "/."); idx >= 0 && idx+1 < len(clean) {
+		return strings.TrimSpace(clean[idx+1:])
+	}
+	return clean
+}
+
+func mailboxParentPath(path string) string {
+	clean := strings.TrimSpace(path)
+	idx := strings.LastIndexAny(clean, "/.")
+	if idx <= 0 {
+		return ""
+	}
+	return clean[:idx]
+}
+
+func isBuiltinMailbox(path string) bool {
+	leaf := strings.ToLower(mailboxLeaf(path))
+	switch leaf {
+	case "inbox", "archive", "drafts", "draft", "sent", "sent items", "spam", "junk", "trash", "deleted items":
+		return true
+	default:
+		return false
+	}
+}
+
+func toInboxFolders(paths []string) []inboxFolder {
+	folders := make([]inboxFolder, 0, len(paths))
+	for _, folder := range paths {
+		clean := strings.TrimSpace(folder)
+		if clean == "" {
+			continue
+		}
+		folders = append(folders, inboxFolder{
+			Path:      clean,
+			Deletable: mailboxParentPath(clean) != "" && !isBuiltinMailbox(clean),
+		})
+	}
+	return folders
+}
+
 func firstMatchingKeyword(keywords []string, allowed []string) string {
 	if len(keywords) == 0 || len(allowed) == 0 {
 		return ""
@@ -825,27 +875,79 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.mail == nil {
 		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
 		return
 	}
 
-	parent := strings.TrimSpace(r.URL.Query().Get("parent"))
+	switch r.Method {
+	case http.MethodGet:
+		parent := strings.TrimSpace(r.URL.Query().Get("parent"))
 
-	folders, err := s.mail.ListSubfolders(r.Context(), parent)
-	if err != nil {
-		http.Error(w, "failed to fetch inbox folders", http.StatusBadGateway)
-		return
+		folders, err := s.mail.ListSubfolders(r.Context(), parent)
+		if err != nil {
+			http.Error(w, "failed to fetch inbox folders", http.StatusBadGateway)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"parent":  parent,
+			"folders": toInboxFolders(folders),
+		})
+	case http.MethodPost:
+		var req struct {
+			Parent string `json:"parent"`
+			Name   string `json:"name"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		parent := strings.TrimSpace(req.Parent)
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			http.Error(w, "folder name is required", http.StatusBadRequest)
+			return
+		}
+
+		folder, err := s.mail.CreateFolder(r.Context(), parent, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"parent": parent,
+			"name":   name,
+			"folder": folder,
+		})
+	case http.MethodDelete:
+		folder := strings.TrimSpace(r.URL.Query().Get("folder"))
+		if folder == "" {
+			http.Error(w, "folder is required", http.StatusBadRequest)
+			return
+		}
+		if isBuiltinMailbox(folder) {
+			http.Error(w, "built-in folders cannot be deleted", http.StatusBadRequest)
+			return
+		}
+		if mailboxParentPath(folder) == "" {
+			http.Error(w, "folder must have a parent mailbox", http.StatusBadRequest)
+			return
+		}
+		if err := s.mail.DeleteFolder(r.Context(), folder); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"folder": folder,
+			"parent": mailboxParentPath(folder),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"parent":  parent,
-		"folders": folders,
-	})
 }
 
 func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {

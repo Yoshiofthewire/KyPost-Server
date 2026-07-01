@@ -117,6 +117,44 @@ body {
   padding-left: 10px;
 }
 
+.sidebar-folder-form {
+  display: grid;
+  gap: 8px;
+}
+
+.sidebar-folder-form input,
+.sidebar-folder-form button {
+  width: 100%;
+}
+
+.sidebar-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.sidebar-folder-row a {
+  min-width: 0;
+}
+
+.sidebar-folder-delete {
+  width: auto;
+  padding: 10px 12px;
+  border-color: rgba(255, 180, 171, 0.45);
+  background: rgba(255, 180, 171, 0.14);
+  color: #ffd8d3;
+}
+
+.sidebar-folder-delete:hover {
+  background: rgba(255, 180, 171, 0.22);
+}
+
+.sidebar-folder-error {
+  color: #ffb4ab;
+  border-color: rgba(255, 180, 171, 0.35);
+}
+
 .sidebar .nav-group span {
   border: 1px solid var(--line);
   border-radius: 10px;

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
-import { getJSON, postJSON } from "./api/client";
+import { deleteJSON, getJSON, postJSON } from "./api/client";
 import { ConfigPage } from "./pages/ConfigPage";
 import { DecisionsPage } from "./pages/DecisionsPage";
 import { HealthPage } from "./pages/HealthPage";
@@ -26,9 +26,27 @@ type AuthState = {
   mustChangePassword?: boolean;
 };
 
+type InboxFolder = {
+  path: string;
+  deletable: boolean;
+};
+
 type InboxFoldersResponse = {
   parent: string;
-  folders: string[];
+  folders: InboxFolder[];
+};
+
+type CreateFolderResponse = {
+  ok: boolean;
+  parent: string;
+  name: string;
+  folder: string;
+};
+
+type DeleteFolderResponse = {
+  ok: boolean;
+  parent: string;
+  folder: string;
 };
 
 type DraftComposePayload = {
@@ -40,12 +58,19 @@ type DraftComposePayload = {
 };
 
 export function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [auth, setAuth] = useState<AuthState | null>(null);
-  const [mailboxFolders, setMailboxFolders] = useState<string[]>([]);
+  const [mailboxFolders, setMailboxFolders] = useState<InboxFolder[]>([]);
   const [mailboxFoldersLoading, setMailboxFoldersLoading] = useState(false);
+  const [createFolderName, setCreateFolderName] = useState("");
+  const [createFolderLoading, setCreateFolderLoading] = useState(false);
+  const [createFolderError, setCreateFolderError] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [archiveFolders, setArchiveFolders] = useState<string[]>([]);
+  const [archiveFolders, setArchiveFolders] = useState<InboxFolder[]>([]);
   const [archiveFoldersLoading, setArchiveFoldersLoading] = useState(false);
+  const [deleteFolderLoading, setDeleteFolderLoading] = useState("");
+  const [deleteFolderError, setDeleteFolderError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeTo, setComposeTo] = useState("");
@@ -99,6 +124,30 @@ export function App() {
     }
   }
 
+  async function createInboxFolder() {
+    const name = createFolderName.trim();
+    if (!name) {
+      setCreateFolderError("Folder name is required.");
+      return;
+    }
+    setCreateFolderLoading(true);
+    setCreateFolderError("");
+    setDeleteFolderError("");
+    try {
+      await postJSON<CreateFolderResponse>("/api/inbox/folders", {
+        parent: "INBOX",
+        name
+      });
+      setCreateFolderName("");
+      await loadMailboxFolders();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "failed to create folder";
+      setCreateFolderError(message);
+    } finally {
+      setCreateFolderLoading(false);
+    }
+  }
+
   async function loadArchiveFolders() {
     if (!auth?.authenticated) {
       setArchiveFolders([]);
@@ -115,9 +164,37 @@ export function App() {
     }
   }
 
+  async function deleteInboxFolder(folder: InboxFolder) {
+    if (!folder.deletable || deleteFolderLoading) return;
+    const confirmed = typeof window === "undefined"
+      ? true
+      : window.confirm(`Delete ${mailboxLabel(folder.path)} and move its emails to ${mailboxLabel(folder.path.slice(0, Math.max(folder.path.lastIndexOf("/"), folder.path.lastIndexOf(".")))) || "the parent folder"}?`);
+    if (!confirmed) return;
+
+    setDeleteFolderLoading(folder.path);
+    setDeleteFolderError("");
+    setCreateFolderError("");
+    try {
+      await deleteJSON<DeleteFolderResponse>(`/api/inbox/folders?folder=${encodeURIComponent(folder.path)}`);
+      const params = new URLSearchParams(location.search);
+      if (location.pathname === "/read" && params.get("mailbox") === folder.path) {
+        navigate("/read", { replace: true });
+      }
+      await loadMailboxFolders();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "failed to delete folder";
+      setDeleteFolderError(message);
+    } finally {
+      setDeleteFolderLoading("");
+    }
+  }
+
   useEffect(() => {
     if (!auth?.authenticated) {
       setMailboxFolders([]);
+      setCreateFolderError("");
+      setCreateFolderName("");
+      setDeleteFolderError("");
       return;
     }
     void loadMailboxFolders();
@@ -291,12 +368,44 @@ export function App() {
         <nav>
           <Link to="/read">Inbox</Link>
           <div className="nav-group">
+            <form
+              className="sidebar-folder-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createInboxFolder();
+              }}
+            >
+              <input
+                type="text"
+                value={createFolderName}
+                onChange={(event) => setCreateFolderName(event.target.value)}
+                placeholder="New folder under Inbox"
+                disabled={createFolderLoading}
+              />
+              <button type="submit" disabled={createFolderLoading}>
+                {createFolderLoading ? "Creating..." : "Create Folder"}
+              </button>
+            </form>
+            {createFolderError ? <span className="sidebar-folder-error">{createFolderError}</span> : null}
+            {deleteFolderError ? <span className="sidebar-folder-error">{deleteFolderError}</span> : null}
             {mailboxFoldersLoading ? <span>Loading folders...</span> : null}
             {!mailboxFoldersLoading
               ? mailboxFolders.map((folder) => (
-                  <Link key={folder} to={`/read?mailbox=${encodeURIComponent(folder)}`}>
-                    {mailboxLabel(folder)}
-                  </Link>
+                  <div key={folder.path} className="sidebar-folder-row">
+                    <Link to={`/read?mailbox=${encodeURIComponent(folder.path)}`}>
+                      {mailboxLabel(folder.path)}
+                    </Link>
+                    {folder.deletable ? (
+                      <button
+                        type="button"
+                        className="sidebar-folder-delete"
+                        onClick={() => void deleteInboxFolder(folder)}
+                        disabled={deleteFolderLoading === folder.path}
+                      >
+                        {deleteFolderLoading === folder.path ? "Deleting..." : "Delete"}
+                      </button>
+                    ) : null}
+                  </div>
                 ))
               : null}
           </div>
@@ -316,8 +425,8 @@ export function App() {
               {!archiveFoldersLoading && archiveFolders.length === 0 ? <span>No archive folders</span> : null}
               {!archiveFoldersLoading
                 ? archiveFolders.map((folder) => (
-                    <Link key={folder} to={`/read?mailbox=${encodeURIComponent(folder)}`}>
-                      {mailboxLabel(folder)}
+                    <Link key={folder.path} to={`/read?mailbox=${encodeURIComponent(folder.path)}`}>
+                      {mailboxLabel(folder.path)}
                     </Link>
                   ))
                 : null}
