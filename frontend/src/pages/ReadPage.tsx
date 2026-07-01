@@ -36,6 +36,7 @@ type InboxActionResponse = {
 
 type SortKey = "time" | "subject" | "sender";
 type SortDirection = "asc" | "desc";
+const EMAILS_PER_PAGE = 20;
 
 function formatTimestamp(value: string): string {
   if (!value) return "-";
@@ -126,6 +127,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [actionError, setActionError] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("time");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [currentPage, setCurrentPage] = useState(1);
   const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
   const [clockTick, setClockTick] = useState(0);
   const isDraftMailbox = mailbox.toLowerCase().includes("drafts");
@@ -230,11 +232,27 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     [sortedRows, selectedMessageIds]
   );
 
-  const allRowsSelected = sortedRows.length > 0 && selectedInTab.length === sortedRows.length;
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / EMAILS_PER_PAGE));
+  const pageRows = useMemo(() => {
+    const start = (currentPage - 1) * EMAILS_PER_PAGE;
+    return sortedRows.slice(start, start + EMAILS_PER_PAGE);
+  }, [currentPage, sortedRows]);
+
+  const allRowsSelected = pageRows.length > 0 && pageRows.every((row) => selectedMessageIds.includes(row.messageId));
   const updatedLabel = useMemo(
     () => formatUpdatedLabel(lastLoadedAt, Date.now()),
     [clockTick, lastLoadedAt]
   );
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [mailbox, activeTab, sortKey, sortDirection]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   function updateSort(nextKey: SortKey) {
     if (sortKey === nextKey) {
@@ -472,89 +490,111 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       {sortedRows.length === 0 ? (
         <p style={{ opacity: 0.75 }}>{isInboxMailbox ? "No emails in this tab yet." : "No emails yet."}</p>
       ) : (
-        <div className="inbox-table-wrap">
-          <table className="inbox-table">
-            <thead>
-              <tr>
-                <th className="inbox-col-select">
-                  <input
-                    type="checkbox"
-                    checked={allRowsSelected}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        const ids = sortedRows.map((row) => row.messageId);
-                        setSelectedMessageIds((current) => {
-                          const merged = new Set(current);
-                          ids.forEach((id) => merged.add(id));
-                          return Array.from(merged);
-                        });
-                        return;
-                      }
-                      const tabIDs = new Set(sortedRows.map((row) => row.messageId));
-                      setSelectedMessageIds((current) => current.filter((id) => !tabIDs.has(id)));
-                    }}
-                    aria-label="Select all emails in tab"
-                  />
-                </th>
-                <th className="inbox-col-heading">
-                  <button type="button" onClick={() => updateSort("subject")} className="inbox-sort-button">
-                    {sortLabel("subject", "Subject")}
-                  </button>
-                </th>
-                <th className="inbox-col-heading">
-                  <button type="button" onClick={() => updateSort("sender")} className="inbox-sort-button">
-                    {sortLabel("sender", "Sender")}
-                  </button>
-                </th>
-                <th className="inbox-col-heading inbox-col-time">
-                  <button type="button" onClick={() => updateSort("time")} className="inbox-sort-button">
-                    {sortLabel("time", "Time")}
-                  </button>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedRows.map((item) => {
-                const isRead = item.status === "read";
-                return (
-                <tr
-                  key={`${item.messageId}-${item.atUtc}`}
-                  draggable
-                  onDragStart={(event) => {
-                    event.dataTransfer.setData("application/x-llama-mailbox", dragMessagePayload(item));
-                    event.dataTransfer.effectAllowed = "move";
-                  }}
-                  className={`inbox-row ${isRead ? "" : "inbox-row-unread"}`}
+        <div className="inbox-list-region">
+          {totalPages > 1 ? (
+            <div className="inbox-page-tabs" role="tablist" aria-label="Email pages">
+              {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((page) => (
+                <button
+                  key={page}
+                  type="button"
+                  role="tab"
+                  aria-selected={currentPage === page}
+                  onClick={() => setCurrentPage(page)}
+                  className={`inbox-page-tab ${currentPage === page ? "active" : ""}`}
                 >
-                  <td className="inbox-cell inbox-col-select">
-                    <input
-                      type="checkbox"
-                      checked={selectedMessageIds.includes(item.messageId)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedMessageIds((current) => (current.includes(item.messageId) ? current : [...current, item.messageId]));
-                          return;
-                        }
-                        setSelectedMessageIds((current) => current.filter((id) => id !== item.messageId));
+                  {page}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <div className="inbox-table-wrap">
+            <div className="inbox-table-scroll">
+              <table className="inbox-table">
+                <thead>
+                  <tr>
+                    <th className="inbox-col-select inbox-col-heading">
+                      <input
+                        type="checkbox"
+                        className="inbox-checkbox"
+                        checked={allRowsSelected}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            const ids = pageRows.map((row) => row.messageId);
+                            setSelectedMessageIds((current) => {
+                              const merged = new Set(current);
+                              ids.forEach((id) => merged.add(id));
+                              return Array.from(merged);
+                            });
+                            return;
+                          }
+                          const pageIDs = new Set(pageRows.map((row) => row.messageId));
+                          setSelectedMessageIds((current) => current.filter((id) => !pageIDs.has(id)));
+                        }}
+                        aria-label="Select all emails in page"
+                      />
+                    </th>
+                    <th className="inbox-col-heading">
+                      <button type="button" onClick={() => updateSort("subject")} className="inbox-sort-button">
+                        {sortLabel("subject", "Subject")}
+                      </button>
+                    </th>
+                    <th className="inbox-col-heading">
+                      <button type="button" onClick={() => updateSort("sender")} className="inbox-sort-button">
+                        {sortLabel("sender", "Sender")}
+                      </button>
+                    </th>
+                    <th className="inbox-col-heading inbox-col-time">
+                      <button type="button" onClick={() => updateSort("time")} className="inbox-sort-button">
+                        {sortLabel("time", "Time")}
+                      </button>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageRows.map((item) => {
+                    const isRead = item.status === "read";
+                    return (
+                    <tr
+                      key={`${item.messageId}-${item.atUtc}`}
+                      draggable
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData("application/x-llama-mailbox", dragMessagePayload(item));
+                        event.dataTransfer.effectAllowed = "move";
                       }}
-                      aria-label={`Select email ${item.subject || item.messageId}`}
-                    />
-                  </td>
-                  <td className="inbox-cell">
-                    <button
-                      type="button"
-                      onClick={() => void openEmailDetails(item)}
-                      className={`inbox-subject-button ${isRead ? "" : "inbox-subject-unread"}`}
+                      className={`inbox-row ${isRead ? "" : "inbox-row-unread"}`}
                     >
-                      {item.subject || "(no subject)"}
-                    </button>
-                  </td>
-                  <td className="inbox-cell inbox-sender-cell">{item.sender || "-"}</td>
-                  <td className="inbox-cell inbox-time-cell">{formatInboxListTime(item.atUtc)}</td>
-                </tr>
-              )})}
-            </tbody>
-          </table>
+                      <td className="inbox-cell inbox-col-select">
+                        <input
+                          type="checkbox"
+                          className="inbox-checkbox"
+                          checked={selectedMessageIds.includes(item.messageId)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedMessageIds((current) => (current.includes(item.messageId) ? current : [...current, item.messageId]));
+                              return;
+                            }
+                            setSelectedMessageIds((current) => current.filter((id) => id !== item.messageId));
+                          }}
+                          aria-label={`Select email ${item.subject || item.messageId}`}
+                        />
+                      </td>
+                      <td className="inbox-cell">
+                        <button
+                          type="button"
+                          onClick={() => void openEmailDetails(item)}
+                          className={`inbox-subject-button ${isRead ? "" : "inbox-subject-unread"}`}
+                        >
+                          {item.subject || "(no subject)"}
+                        </button>
+                      </td>
+                      <td className="inbox-cell inbox-sender-cell">{item.sender || "-"}</td>
+                      <td className="inbox-cell inbox-time-cell">{formatInboxListTime(item.atUtc)}</td>
+                    </tr>
+                  )})}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
 

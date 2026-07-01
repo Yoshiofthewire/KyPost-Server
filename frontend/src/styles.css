@@ -256,16 +256,54 @@ body {
 }
 
 .read-page-panel {
-  min-height: calc(100vh - 74px);
+  height: calc(100vh - 74px);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+.inbox-list-region {
+  margin-top: 10px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+
+.inbox-page-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.inbox-page-tab {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-strong);
+  font-size: 0.78rem;
+}
+
+.inbox-page-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .inbox-table-wrap {
-  overflow-x: auto;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+  min-height: 0;
+  flex: 1;
+}
+
+.inbox-table-scroll {
+  overflow: auto;
+  max-height: 100%;
 }
 
 .inbox-table {
@@ -275,7 +313,7 @@ body {
 
 .inbox-col-select {
   width: 42px;
-  text-align: left;
+  text-align: center;
 }
 
 .inbox-col-heading {
@@ -283,6 +321,10 @@ body {
   border-bottom: 1px solid var(--line);
   padding: 9px 10px;
   white-space: nowrap;
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .inbox-col-time {
@@ -315,6 +357,11 @@ body {
   border-bottom: 1px solid var(--line);
   padding: 10px;
   vertical-align: top;
+}
+
+.inbox-checkbox {
+  margin: 0;
+  vertical-align: middle;
 }
 
 .inbox-subject-button {
@@ -737,6 +784,19 @@ pre {
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
+  }
+
+  .read-page-panel {
+    height: auto;
+    overflow: visible;
+  }
+
+  .inbox-list-region {
+    min-height: 320px;
+  }
+
+  .inbox-table-wrap {
+    flex: none;
   }
 
   .sidebar {
