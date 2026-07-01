@@ -1,10 +1,11 @@
 <img src="./llamalabel.png" alt="Llama Labels" />
 
-# llama Labels
+# llama Mail
 
-llama Labels is a Dockerized IMAP keyword auto-labeler.
+llama Mail is a Dockerized IMAP Email Client and keyword auto-labeler.
 
 It polls unread inbox mail, classifies each message with an internal Ollama model (`gemma4:e4b` by default), and applies matching IMAP keywords.
+It also includes a web compose flow with SMTP sending, draft save support, and inbox folder management.
 
 ## Overview
 
@@ -13,7 +14,7 @@ Runtime is a single container managed by `supervisord`, running:
 - API server (`llama-lab --mode server`)
 - Polling daemon (`llama-lab --mode daemon`)
 - Internal Ollama service (`ollama serve`)
-- One-shot model pull worker (`ollama pull qwen3:1.7b`)
+- One-shot model pull worker (`ollama pull gemma4:e4b`)
 
 Classification flow:
 
@@ -63,7 +64,7 @@ docker compose up --build -d
 
 Password change is required on first login.
 
-6. In Config, save IMAP settings (host, port, username, password/app-password, mailbox) and run IMAP test.
+6. In Config, save IMAP and SMTP settings (host, port, username, password/app-password, mailbox) and run IMAP test.
 
 7. In Tuning, sync/build labels and save `TUNING.md`.
 
@@ -72,7 +73,7 @@ Password change is required on first login.
 Primary variables:
 
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (default `qwen3:1.7b`)
+- `OLLAMA_MODEL` (default `gemma4:e4b`)
 - `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`, host path bind-mounted for persistent model cache)
 - `IMAP_HOST` (optional default source; UI-saved config is preferred)
 - `IMAP_PORT` (default `993`)
@@ -123,6 +124,7 @@ Important files:
 ## UI Pages
 
 - Login
+- Read
 - Config
 - Tuning
 - Labels
@@ -157,6 +159,20 @@ IMAP:
 
 - `GET|POST|DELETE /api/imap/config`
 - `POST /api/imap/test`
+
+Inbox:
+
+- `GET /api/inbox?limit=500&mailbox=<name>`
+- `POST /api/inbox/actions` (archive, mark read/unread, move)
+- `GET /api/inbox/folders`
+- `POST /api/inbox/folders`
+- `PUT /api/inbox/folders`
+- `DELETE /api/inbox/folders?folder=<path>`
+
+Mail compose:
+
+- `POST /api/mail/send`
+- `POST /api/mail/draft`
 
 Llama/auth:
 
@@ -217,7 +233,7 @@ Log UI reads from `/api/logs` and `/api/logs/list`.
 docker compose logs -f llama-lab
 ```
 
-- Verify model pull happened (`qwen3:1.7b`).
+- Verify model pull happened (`gemma4:e4b`).
 - If needed, restart services:
 
 ```bash
@@ -230,6 +246,13 @@ docker compose restart
 - Verify host, port, username, password, and mailbox values.
 - Use the IMAP test action in Config (`POST /api/imap/test`).
 - Check `daemon.log` and `app.log` for auth, TLS, and keyword errors.
+
+### SMTP send issues
+
+- Confirm SMTP host and port are set in Config.
+- For providers using port 465, implicit TLS is required and supported by the app.
+- Use app-specific passwords when required by your provider.
+- Check `app.log` for `mail send failed` entries and returned error details.
 
 ### No labels applied
 
