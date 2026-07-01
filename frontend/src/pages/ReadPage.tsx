@@ -44,6 +44,28 @@ function formatTimestamp(value: string): string {
   return date.toLocaleString();
 }
 
+function formatInboxListTime(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const emailStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.floor((todayStart.getTime() - emailStart.getTime()) / 86_400_000);
+
+  if (diffDays === 0) {
+    return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  if (diffDays === 1) {
+    return "Yesterday";
+  }
+  if (diffDays > 1 && diffDays <= 6) {
+    return date.toLocaleDateString([], { weekday: "long" });
+  }
+  return date.toLocaleDateString();
+}
+
 function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
   if (!lastLoadedAt) return "Updated Never";
   const elapsedMs = now - lastLoadedAt.getTime();
@@ -450,11 +472,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       {sortedRows.length === 0 ? (
         <p style={{ opacity: 0.75 }}>{isInboxMailbox ? "No emails in this tab yet." : "No emails yet."}</p>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="inbox-table-wrap">
+          <table className="inbox-table">
             <thead>
               <tr>
-                <th style={{ textAlign: "left", borderBottom: "1px solid var(--line)", padding: "8px", width: 42 }}>
+                <th className="inbox-col-select">
                   <input
                     type="checkbox"
                     checked={allRowsSelected}
@@ -474,18 +496,18 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     aria-label="Select all emails in tab"
                   />
                 </th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid var(--line)", padding: "8px" }}>
-                  <button type="button" onClick={() => updateSort("subject")} style={{ padding: 0, border: 0, background: "transparent", color: "inherit", font: "inherit", cursor: "pointer" }}>
+                <th className="inbox-col-heading">
+                  <button type="button" onClick={() => updateSort("subject")} className="inbox-sort-button">
                     {sortLabel("subject", "Subject")}
                   </button>
                 </th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid var(--line)", padding: "8px" }}>
-                  <button type="button" onClick={() => updateSort("sender")} style={{ padding: 0, border: 0, background: "transparent", color: "inherit", font: "inherit", cursor: "pointer" }}>
+                <th className="inbox-col-heading">
+                  <button type="button" onClick={() => updateSort("sender")} className="inbox-sort-button">
                     {sortLabel("sender", "Sender")}
                   </button>
                 </th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid var(--line)", padding: "8px" }}>
-                  <button type="button" onClick={() => updateSort("time")} style={{ padding: 0, border: 0, background: "transparent", color: "inherit", font: "inherit", cursor: "pointer" }}>
+                <th className="inbox-col-heading inbox-col-time">
+                  <button type="button" onClick={() => updateSort("time")} className="inbox-sort-button">
                     {sortLabel("time", "Time")}
                   </button>
                 </th>
@@ -502,9 +524,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     event.dataTransfer.setData("application/x-llama-mailbox", dragMessagePayload(item));
                     event.dataTransfer.effectAllowed = "move";
                   }}
-                  style={{ cursor: "grab" }}
+                  className={`inbox-row ${isRead ? "" : "inbox-row-unread"}`}
                 >
-                  <td style={{ borderBottom: "1px solid var(--line)", padding: "8px" }}>
+                  <td className="inbox-cell inbox-col-select">
                     <input
                       type="checkbox"
                       checked={selectedMessageIds.includes(item.messageId)}
@@ -518,27 +540,17 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                       aria-label={`Select email ${item.subject || item.messageId}`}
                     />
                   </td>
-                  <td style={{ borderBottom: "1px solid var(--line)", padding: "8px" }}>
+                  <td className="inbox-cell">
                     <button
                       type="button"
                       onClick={() => void openEmailDetails(item)}
-                      style={{
-                        padding: 0,
-                        border: 0,
-                        background: "transparent",
-                        color: isRead ? "var(--ink)" : "var(--ink-strong)",
-                        textAlign: "left",
-                        cursor: "pointer",
-                        textDecoration: "underline",
-                        fontWeight: isRead ? 400 : 600,
-                        opacity: isRead ? 0.7 : 1
-                      }}
+                      className={`inbox-subject-button ${isRead ? "" : "inbox-subject-unread"}`}
                     >
                       {item.subject || "(no subject)"}
                     </button>
                   </td>
-                  <td style={{ borderBottom: "1px solid var(--line)", padding: "8px", opacity: isRead ? 0.7 : 1 }}>{item.sender || "-"}</td>
-                  <td style={{ borderBottom: "1px solid var(--line)", padding: "8px", opacity: isRead ? 0.7 : 1 }}>{formatTimestamp(item.atUtc)}</td>
+                  <td className="inbox-cell inbox-sender-cell">{item.sender || "-"}</td>
+                  <td className="inbox-cell inbox-time-cell">{formatInboxListTime(item.atUtc)}</td>
                 </tr>
               )})}
             </tbody>
