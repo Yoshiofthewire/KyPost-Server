@@ -472,6 +472,22 @@ export function App() {
           New Email
         </button>
         <nav>
+          <div className="mobile-quick-nav" aria-label="Mobile mailboxes">
+            <Link to="/read">Inbox</Link>
+            <Link to="/read?mailbox=Drafts">Drafts</Link>
+            <Link to="/read?mailbox=Junk">Junk</Link>
+            <Link to="/read?mailbox=Sent">Sent</Link>
+            <Link to="/read?mailbox=Trash">Trash</Link>
+            <button
+              type="button"
+              className="mobile-settings-toggle"
+              aria-label="Toggle settings"
+              title="Settings"
+              onClick={() => setSettingsOpen((open) => !open)}
+            >
+              ⚙
+            </button>
+          </div>
           <div className="inbox-nav-row">
             <Link
               to="/read"
@@ -578,7 +594,7 @@ export function App() {
 
           <button
             type="button"
-            className="nav-heading"
+            className="nav-heading archive-toggle"
             aria-expanded={archiveOpen}
             onClick={() => setArchiveOpen((open) => !open)}
           >
@@ -586,7 +602,7 @@ export function App() {
           </button>
 
           {archiveOpen ? (
-            <div className="nav-group">
+            <div className="nav-group archive-group">
               {archiveFoldersLoading ? <span>Loading folders...</span> : null}
               {!archiveFoldersLoading && archiveFolders.length === 0 ? <span>No archive folders</span> : null}
               {!archiveFoldersLoading
@@ -613,7 +629,7 @@ export function App() {
 
           <button
             type="button"
-            className="nav-heading"
+            className="nav-heading settings-heading"
             aria-expanded={settingsOpen}
             onClick={() => setSettingsOpen((open) => !open)}
           >

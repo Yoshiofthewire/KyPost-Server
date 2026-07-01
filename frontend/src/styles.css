@@ -242,6 +242,14 @@ body {
   background: var(--accent-soft);
 }
 
+.mobile-quick-nav {
+  display: none;
+}
+
+.mobile-settings-toggle {
+  width: auto;
+}
+
 .content {
   padding: 28px;
 }
@@ -269,6 +277,22 @@ body {
   flex-direction: column;
   gap: 10px;
   flex: 1;
+}
+
+.inbox-empty-state {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.inbox-empty-state p {
+  margin: 0;
+  opacity: 0.75;
 }
 
 .inbox-page-tabs {
@@ -894,8 +918,21 @@ pre {
 }
 
 @media (max-width: 900px) and (max-aspect-ratio: 10/9) {
+  .shell {
+    height: 100dvh;
+    min-height: 100dvh;
+    grid-template-rows: auto 1fr;
+  }
+
   .content {
     padding: 10px;
+    min-height: 0;
+    display: flex;
+  }
+
+  .content > * {
+    flex: 1;
+    min-height: 0;
   }
 
   .panel {
@@ -905,7 +942,7 @@ pre {
 
   .sidebar {
     padding: 8px 10px;
-    max-height: 30vh;
+    max-height: 24vh;
     overflow: auto;
   }
 
@@ -919,6 +956,41 @@ pre {
     margin-bottom: 8px;
     padding: 8px;
     font-size: 0.82rem;
+  }
+
+  .mobile-quick-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-bottom: 6px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mobile-quick-nav a,
+  .mobile-settings-toggle {
+    flex: 0 0 auto;
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 0.75rem;
+    text-decoration: none;
+    color: var(--ink-strong);
+    background: color-mix(in srgb, var(--panel) 70%, transparent);
+  }
+
+  .mobile-settings-toggle {
+    min-width: 34px;
+    text-align: center;
+    line-height: 1;
+  }
+
+  .inbox-expand-button,
+  .archive-toggle,
+  .archive-group,
+  .settings-heading {
+    display: none;
   }
 
   .sidebar nav,
@@ -936,7 +1008,7 @@ pre {
   }
 
   .sidebar .inbox-nav-row {
-    grid-template-columns: auto auto;
+    grid-template-columns: auto;
   }
 
   .sidebar .nav-group {
@@ -965,21 +1037,25 @@ pre {
   }
 
   .read-page-panel {
-    height: auto;
-    overflow: visible;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .inbox-list-region {
     min-height: 0;
+    flex: 1;
   }
 
   .inbox-table-wrap {
-    flex: none;
-    max-height: 54vh;
+    flex: 1;
+    max-height: none;
+    min-height: 0;
   }
 
   .inbox-table-scroll {
-    max-height: 54vh;
+    height: 100%;
+    max-height: none;
     -webkit-overflow-scrolling: touch;
   }
 

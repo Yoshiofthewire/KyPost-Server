@@ -505,7 +505,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       ) : null}
 
       {sortedRows.length === 0 ? (
-        <p style={{ opacity: 0.75 }}>{isInboxMailbox ? "No emails in this tab yet." : "No emails yet."}</p>
+        <div className="inbox-list-region">
+          <div className="inbox-empty-state">
+            <p>{isInboxMailbox ? "No emails in this tab yet." : "No emails yet."}</p>
+          </div>
+        </div>
       ) : (
         <div className="inbox-list-region">
           {totalPages > 1 ? (
