@@ -255,6 +255,12 @@ body {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
 }
 
+.read-page-panel {
+  min-height: calc(100vh - 74px);
+  display: flex;
+  flex-direction: column;
+}
+
 h1, h2, h3, h4 {
   color: var(--ink-strong);
 }
@@ -432,7 +438,7 @@ pre {
 .compose-window {
   width: min(920px, 96vw);
   min-height: min(760px, 90vh);
-  background: #1f1f24;
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
   color: var(--ink-strong);
@@ -479,7 +485,7 @@ pre {
 .compose-form-grid {
   display: grid;
   gap: 8px;
-  background: #252530;
+  background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px;
@@ -498,7 +504,7 @@ pre {
 }
 
 .compose-field-row input {
-  background: #1a1a1e;
+  background: var(--bg);
   color: var(--ink-strong);
   border: 1px solid var(--line);
 }
@@ -554,13 +560,13 @@ pre {
   min-height: min(360px, 46vh);
   font-family: var(--sans);
   font-size: 0.95rem;
-  background: var(--panel);
+  background: var(--bg);
   color: var(--ink-strong);
 }
 
 .compose-editor-html .ql-editor {
   min-height: min(360px, 46vh);
-  background: var(--panel);
+  background: var(--bg);
   color: var(--ink-strong);
 }
 
@@ -588,13 +594,13 @@ pre {
 }
 
 .compose-editor-html .ql-picker-options {
-  background: #252530;
+  background: var(--panel);
   color: var(--ink-strong);
   border: 1px solid var(--line);
 }
 
 .compose-editor-html .ql-editor.ql-blank::before {
-  color: rgba(232, 221, 245, 0.55);
+  color: color-mix(in srgb, var(--ink-strong) 55%, transparent);
   font-style: normal;
 }
 
@@ -614,7 +620,8 @@ pre {
 }
 
 .inbox-updated-footer {
-  margin-top: 16px;
+  margin-top: auto;
+  padding-top: 16px;
   display: flex;
   justify-content: center;
 }

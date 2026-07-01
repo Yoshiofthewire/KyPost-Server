@@ -331,7 +331,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   }
 
   return (
-    <section className="panel">
+    <section className="panel read-page-panel">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div>
           <h2 style={{ marginTop: 0, marginBottom: 6 }}>{mailbox ? mailbox : "Inbox"}</h2>
