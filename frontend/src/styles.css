@@ -1616,4 +1616,10 @@ pre {
     padding: 6px 11px;
     font-size: 0.8rem;
   }
+
+  .config-page {
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 16px;
+  }
 }
