@@ -6,11 +6,14 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +40,7 @@ import (
 	"llama-lab/backend/internal/state"
 
 	goimap "github.com/BrianLeishman/go-imap"
+	"github.com/SherClockHolmes/webpush-go"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -93,6 +97,9 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/mail/send", s.withAuth(s.handleMailSend))
 	mux.HandleFunc("/api/llama/test", s.withAuth(s.handleLlamaTest))
 	mux.HandleFunc("/api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("/api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
+	mux.HandleFunc("/api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("/api/notifications/test", s.withAuth(s.handleNotificationTest))
 	mux.HandleFunc("/api/setup", s.handleSetup)
 	mux.HandleFunc("/", s.handleFrontend)
 
@@ -759,6 +766,203 @@ func sanitizeConfigForClient(cfg config.Config) config.Config {
 	cfg.Notifications.PublicKey = ""
 	cfg.Notifications.PrivateKeyPath = ""
 	return cfg
+}
+
+type notificationSubscriptionPayload struct {
+	Endpoint string `json:"endpoint"`
+	Keys     struct {
+		Auth   string `json:"auth"`
+		P256DH string `json:"p256dh"`
+	} `json:"keys"`
+}
+
+type notificationTestPayload struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+func (s *Server) handleNotificationVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	publicKey := strings.TrimSpace(s.cfg.Notifications.PublicKey)
+	s.mu.RUnlock()
+	if publicKey == "" {
+		http.Error(w, "notification public key not configured", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"publicKey": publicKey})
+}
+
+func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var payload notificationSubscriptionPayload
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "invalid subscription payload", http.StatusBadRequest)
+			return
+		}
+		payload.Endpoint = strings.TrimSpace(payload.Endpoint)
+		payload.Keys.Auth = strings.TrimSpace(payload.Keys.Auth)
+		payload.Keys.P256DH = strings.TrimSpace(payload.Keys.P256DH)
+		if payload.Endpoint == "" || payload.Keys.Auth == "" || payload.Keys.P256DH == "" {
+			http.Error(w, "endpoint and keys are required", http.StatusBadRequest)
+			return
+		}
+
+		sub := state.NotificationSubscription{
+			Endpoint:  payload.Endpoint,
+			Auth:      payload.Keys.Auth,
+			P256DH:    payload.Keys.P256DH,
+			UserAgent: strings.TrimSpace(r.Header.Get("User-Agent")),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := s.store.UpsertNotificationSubscription(sub); err != nil {
+			http.Error(w, "failed to persist notification subscription", http.StatusInternalServerError)
+			return
+		}
+		count := len(s.store.ListNotificationSubscriptions())
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subscriptions": count})
+	case http.MethodDelete:
+		var payload struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "invalid unsubscribe payload", http.StatusBadRequest)
+			return
+		}
+		endpoint := strings.TrimSpace(payload.Endpoint)
+		if endpoint == "" {
+			http.Error(w, "endpoint is required", http.StatusBadRequest)
+			return
+		}
+		removed, err := s.store.RemoveNotificationSubscription(endpoint)
+		if err != nil {
+			http.Error(w, "failed to remove notification subscription", http.StatusInternalServerError)
+			return
+		}
+		count := len(s.store.ListNotificationSubscriptions())
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "subscriptions": count})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload notificationTestPayload
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload)
+	title := strings.TrimSpace(payload.Title)
+	body := strings.TrimSpace(payload.Body)
+	if title == "" {
+		title = "Llama Mail Test Notification"
+	}
+	if body == "" {
+		body = "Push delivery is working across all subscribed devices."
+	}
+
+	message := map[string]any{
+		"title": title,
+		"body":  body,
+		"url":   "/notifications",
+		"tag":   "llama-mail-test",
+	}
+	payloadBytes, err := json.Marshal(message)
+	if err != nil {
+		http.Error(w, "failed to serialize notification payload", http.StatusInternalServerError)
+		return
+	}
+
+	privateKey, err := loadVAPIDPrivateKey(s.cfg.Notifications.PrivateKeyPath)
+	if err != nil {
+		http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
+		return
+	}
+
+	subs := s.store.ListNotificationSubscriptions()
+	if len(subs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subscriptions": 0, "sent": 0, "failed": 0})
+		return
+	}
+
+	options := &webpush.Options{
+		Subscriber:      "mailto:noreply@localhost",
+		VAPIDPublicKey:  s.cfg.Notifications.PublicKey,
+		VAPIDPrivateKey: privateKey,
+		TTL:             60,
+	}
+
+	sent := 0
+	failed := 0
+	staleEndpoints := []string{}
+	for _, sub := range subs {
+		resp, err := webpush.SendNotification(payloadBytes, &webpush.Subscription{
+			Endpoint: sub.Endpoint,
+			Keys: webpush.Keys{
+				Auth:   sub.Auth,
+				P256dh: sub.P256DH,
+			},
+		}, options)
+		if err != nil {
+			failed++
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusCreated {
+			sent++
+			continue
+		}
+		failed++
+		if resp.StatusCode == http.StatusGone || resp.StatusCode == http.StatusNotFound {
+			staleEndpoints = append(staleEndpoints, sub.Endpoint)
+		}
+	}
+
+	removed := 0
+	for _, endpoint := range staleEndpoints {
+		ok, err := s.store.RemoveNotificationSubscription(endpoint)
+		if err == nil && ok {
+			removed++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                  failed == 0,
+		"subscriptions":       len(subs),
+		"sent":                sent,
+		"failed":              failed,
+		"removedStale":        removed,
+		"activeSubscriptions": len(s.store.ListNotificationSubscriptions()),
+	})
+}
+
+func loadVAPIDPrivateKey(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return "", errors.New("vapid pem block missing")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	return encodeVAPIDPrivateKey(key), nil
+}
+
+func encodeVAPIDPrivateKey(key *ecdsa.PrivateKey) string {
+	scalar := key.D.Bytes()
+	out := make([]byte, 32)
+	copy(out[32-len(scalar):], scalar)
+	return base64.RawURLEncoding.EncodeToString(out)
 }
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {

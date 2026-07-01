@@ -13,11 +13,12 @@ import (
 )
 
 type Store struct {
-	mu           sync.Mutex
-	baseDir      string
-	checkpoint   string
-	processedSet map[string]time.Time
-	decisions    []Decision
+	mu            sync.Mutex
+	baseDir       string
+	checkpoint    string
+	processedSet  map[string]time.Time
+	decisions     []Decision
+	notifications []NotificationSubscription
 
 	aiCreditsExhausted   bool
 	aiCreditsExhaustedAt string
@@ -34,11 +35,20 @@ type Decision struct {
 	AtUTC     string `json:"atUtc"`
 }
 
+type NotificationSubscription struct {
+	Endpoint  string `json:"endpoint"`
+	Auth      string `json:"auth"`
+	P256DH    string `json:"p256dh"`
+	UserAgent string `json:"userAgent,omitempty"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
 type stateFile struct {
-	LastCheckpoint       string            `json:"lastCheckpoint"`
-	Processed            map[string]string `json:"processed"`
-	AICreditsExhausted   bool              `json:"aiCreditsExhausted,omitempty"`
-	AICreditsExhaustedAt string            `json:"aiCreditsExhaustedAt,omitempty"`
+	LastCheckpoint       string                     `json:"lastCheckpoint"`
+	Processed            map[string]string          `json:"processed"`
+	Notifications        []NotificationSubscription `json:"notifications,omitempty"`
+	AICreditsExhausted   bool                       `json:"aiCreditsExhausted,omitempty"`
+	AICreditsExhaustedAt string                     `json:"aiCreditsExhaustedAt,omitempty"`
 }
 
 func New(baseDir string) (*Store, error) {
@@ -78,6 +88,7 @@ func (s *Store) load() error {
 	s.checkpoint = sf.LastCheckpoint
 	s.aiCreditsExhausted = sf.AICreditsExhausted
 	s.aiCreditsExhaustedAt = sf.AICreditsExhaustedAt
+	s.notifications = append([]NotificationSubscription{}, sf.Notifications...)
 	for id, ts := range sf.Processed {
 		t, err := time.Parse(time.RFC3339, ts)
 		if err != nil {
@@ -185,6 +196,7 @@ func (s *Store) persistLocked() error {
 	b, err := json.MarshalIndent(stateFile{
 		LastCheckpoint:       s.checkpoint,
 		Processed:            processed,
+		Notifications:        s.notifications,
 		AICreditsExhausted:   s.aiCreditsExhausted,
 		AICreditsExhaustedAt: s.aiCreditsExhaustedAt,
 	}, "", "  ")
@@ -195,6 +207,43 @@ func (s *Store) persistLocked() error {
 		return fmt.Errorf("write state: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) ListNotificationSubscriptions() []NotificationSubscription {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]NotificationSubscription, len(s.notifications))
+	copy(out, s.notifications)
+	return out
+}
+
+func (s *Store) UpsertNotificationSubscription(sub NotificationSubscription) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.notifications {
+		if existing.Endpoint == sub.Endpoint {
+			s.notifications[i] = sub
+			return s.persistLocked()
+		}
+	}
+	s.notifications = append(s.notifications, sub)
+	return s.persistLocked()
+}
+
+func (s *Store) RemoveNotificationSubscription(endpoint string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sub := range s.notifications {
+		if sub.Endpoint != endpoint {
+			continue
+		}
+		s.notifications = append(s.notifications[:i], s.notifications[i+1:]...)
+		if err := s.persistLocked(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // SetAICreditsExhausted marks that Llama reported the weekly chat limit / out of

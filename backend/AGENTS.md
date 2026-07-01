@@ -73,6 +73,9 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `POST /api/mail/draft` | yes | Saves compose content to the IMAP Drafts folder |
 | `POST /api/mail/send` | yes | Sends compose email via SMTP using configured credentials, logs send attempts/results, applies a send timeout, and appends successful sends to Sent mailbox (response can include warning when Sent append fails) |
 | `GET\|PUT /api/tuning` | yes | TUNING.md read/write |
+| `GET /api/notifications/vapid-public-key` | yes | VAPID public key for browser push subscription setup |
+| `POST\|DELETE /api/notifications/subscriptions` | yes | Upsert or remove a browser push subscription for the signed-in user/device |
+| `POST /api/notifications/test` | yes | Sends a test push notification to all stored subscriptions for the signed-in user and prunes stale endpoints |
 
 ### Environment Variables
 
@@ -101,7 +104,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `$CONFIG_DIR/llama-auth.json` | Ollama auth token |
 | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
 | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
-| `$STATE_DIR/state.json` | Checkpoint + processed-set |
+| `$STATE_DIR/state.json` | Checkpoint + processed-set + persisted browser push subscriptions |
 | `$STATE_DIR/decisions.json` | Decision audit log |
 
 ### Log Files

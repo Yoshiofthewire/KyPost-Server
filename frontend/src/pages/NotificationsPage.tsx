@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getJSON, putJSON } from "../api/client";
+import { deleteJSON, getJSON, postJSON, putJSON } from "../api/client";
 
 type AppConfig = {
   timezone: string;
@@ -17,6 +17,19 @@ type AppConfig = {
 type LabelsResponse = {
   configured: string[];
   imap: string[];
+};
+
+type NotificationVapidResponse = {
+  publicKey: string;
+};
+
+type NotificationTestResponse = {
+  ok: boolean;
+  subscriptions: number;
+  sent: number;
+  failed: number;
+  removedStale?: number;
+  activeSubscriptions?: number;
 };
 
 function uniqueLabels(labels: string[]): string[] {
@@ -63,6 +76,8 @@ export function NotificationsPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [availableKeywords, setAvailableKeywords] = useState<string[]>([]);
   const [status, setStatus] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const [unsubscribeBusy, setUnsubscribeBusy] = useState(false);
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
@@ -113,6 +128,94 @@ export function NotificationsPage() {
       setStatus("Notification settings saved.");
     } catch {
       setStatus("Failed to save notification settings.");
+    }
+  }
+
+  function base64URLToUint8Array(base64URL: string): Uint8Array {
+    const normalized = base64URL.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const raw = window.atob(padded);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) {
+      out[i] = raw.charCodeAt(i);
+    }
+    return out;
+  }
+
+  async function registerDeviceForPush(): Promise<void> {
+    if (!("Notification" in window)) {
+      throw new Error("Notifications are not supported by this browser.");
+    }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      throw new Error("Push notifications are not supported by this browser.");
+    }
+
+    let permission = Notification.permission;
+    if (permission === "default") {
+      permission = await Notification.requestPermission();
+    }
+    if (permission !== "granted") {
+      throw new Error("Notification permission was not granted.");
+    }
+
+    const vapid = await getJSON<NotificationVapidResponse>("/api/notifications/vapid-public-key");
+    const registration = await navigator.serviceWorker.register("/sw.js");
+    const readyRegistration = await navigator.serviceWorker.ready;
+    const target = readyRegistration ?? registration;
+
+    let subscription = await target.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await target.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: base64URLToUint8Array(vapid.publicKey)
+      });
+    }
+
+    await postJSON<{ ok: boolean; subscriptions: number }>("/api/notifications/subscriptions", subscription.toJSON());
+  }
+
+  async function sendTestNotification() {
+    setTestBusy(true);
+    try {
+      await registerDeviceForPush();
+      const result = await postJSON<NotificationTestResponse>("/api/notifications/test", {
+        title: "Llama Mail Test Notification",
+        body: "This test notification was sent to all of your subscribed devices."
+      });
+      setStatus(`Test sent: ${result.sent}/${result.subscriptions} device(s) delivered.`);
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : "unknown error";
+      setStatus(`Failed to send test notification: ${detail}`);
+    } finally {
+      setTestBusy(false);
+    }
+  }
+
+  async function unsubscribeThisDevice() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setStatus("Failed to unsubscribe this device: push notifications are not supported by this browser.");
+      return;
+    }
+
+    setUnsubscribeBusy(true);
+    try {
+      const readyRegistration = await navigator.serviceWorker.ready;
+      const subscription = await readyRegistration.pushManager.getSubscription();
+      if (!subscription) {
+        setStatus("This device is not currently subscribed.");
+        return;
+      }
+
+      await deleteJSON<{ ok: boolean; removed: boolean; subscriptions: number }>("/api/notifications/subscriptions", {
+        endpoint: subscription.endpoint
+      });
+      await subscription.unsubscribe();
+      setStatus("Unsubscribed this device from push notifications.");
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : "unknown error";
+      setStatus(`Failed to unsubscribe this device: ${detail}`);
+    } finally {
+      setUnsubscribeBusy(false);
     }
   }
 
@@ -237,6 +340,12 @@ export function NotificationsPage() {
       </div>
 
       <div className="notifications-footer">
+        <button type="button" className="notifications-ghost" onClick={() => void unsubscribeThisDevice()} disabled={unsubscribeBusy || testBusy}>
+          {unsubscribeBusy ? "Unsubscribing..." : "Unsubscribe This Device"}
+        </button>
+        <button type="button" className="notifications-ghost" onClick={() => void sendTestNotification()} disabled={testBusy}>
+          {testBusy ? "Sending Test..." : "Send Test Notification"}
+        </button>
         <button type="button" className="notifications-save" onClick={() => void save()}>Save Notifications</button>
       </div>
 
