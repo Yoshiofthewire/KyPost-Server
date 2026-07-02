@@ -337,6 +337,26 @@ body {
   gap: 8px;
 }
 
+.inbox-haptics-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 0.76rem;
+  color: var(--ink-strong);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+
+.inbox-haptics-toggle input {
+  margin: 0;
+}
+
+.inbox-haptics-toggle span {
+  line-height: 1;
+}
+
 .inbox-action-button {
   display: inline-flex;
   align-items: center;
@@ -402,11 +422,78 @@ body {
 
 .inbox-row {
   cursor: grab;
-  transition: background-color 140ms ease;
+  transition: transform 240ms cubic-bezier(0.22, 0.72, 0.28, 1), background-color 140ms ease;
+  touch-action: pan-y;
 }
 
 .inbox-row:hover {
   background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+}
+
+.inbox-row-swipe-dragging {
+  transition: none;
+}
+
+.inbox-row-swipe-snapback {
+  transition: transform 320ms cubic-bezier(0.2, 0.88, 0.32, 1.16), background-color 140ms ease;
+}
+
+.inbox-row-swipe-dismiss {
+  transition: transform 260ms cubic-bezier(0.24, 0.72, 0.3, 1.02), opacity 220ms ease;
+  opacity: 0.28;
+}
+
+.inbox-row-swipe-delete-hint > .inbox-cell {
+  background: color-mix(in srgb, #ff5f5f 16%, transparent);
+}
+
+.inbox-row-swipe-archive-hint > .inbox-cell {
+  background: color-mix(in srgb, #ffd64d 20%, transparent);
+}
+
+.inbox-row-swipe-armed.inbox-row-swipe-delete-hint > .inbox-cell {
+  background: color-mix(in srgb, #ff3e3e 24%, transparent);
+}
+
+.inbox-row-swipe-armed.inbox-row-swipe-archive-hint > .inbox-cell {
+  background: color-mix(in srgb, #ffcc1f 30%, transparent);
+}
+
+.inbox-swipe-notice {
+  margin: 8px 10px 0;
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.inbox-swipe-notice.delete {
+  background: rgba(255, 86, 86, 0.22);
+  border-color: rgba(255, 86, 86, 0.48);
+  color: #ffdede;
+}
+
+.inbox-swipe-notice.archive {
+  background: rgba(255, 210, 74, 0.24);
+  border-color: rgba(255, 210, 74, 0.45);
+  color: #2f2400;
+}
+
+.inbox-body-refill-0 .inbox-row,
+.inbox-body-refill-1 .inbox-row {
+  animation: inbox-row-refill 220ms ease;
+}
+
+@keyframes inbox-row-refill {
+  from {
+    transform: translateY(8px);
+    opacity: 0.7;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
 }
 
 .inbox-row-unread {
@@ -1465,6 +1552,13 @@ pre {
     align-items: center;
   }
 
+  .inbox-haptics-toggle {
+    height: 34px;
+    padding: 0 8px;
+    font-size: 0.72rem;
+    border-radius: 9px;
+  }
+
   .inbox-action-icon {
     font-size: 0.95rem;
   }
@@ -1494,6 +1588,12 @@ pre {
   .inbox-page-tab {
     padding: 4px 8px;
     font-size: 0.72rem;
+  }
+
+  .inbox-swipe-notice {
+    margin: 6px 8px 0;
+    font-size: 0.74rem;
+    padding: 5px 8px;
   }
 
   .email-reader-backdrop {

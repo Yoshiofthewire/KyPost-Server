@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { getJSON, postJSON } from "../api/client";
 
@@ -37,6 +37,20 @@ type InboxActionResponse = {
 type SortKey = "time" | "subject" | "sender";
 type SortDirection = "asc" | "desc";
 const EMAILS_PER_PAGE = 20;
+const SWIPE_HINT_THRESHOLD = 0.15;
+const SWIPE_ACTIVATE_THRESHOLD = 0.5;
+const SWIPE_DISMISS_RATIO = 1.08;
+const SWIPE_MAX_OFFSET_RATIO = 0.92;
+const SWIPE_HAPTICS_STORAGE_KEY = "llama-read-swipe-haptics-enabled";
+
+type SwipeTone = "archive" | "delete";
+type SwipeRowState = {
+  offset: number;
+  phase: "dragging" | "snapback" | "dismiss";
+  tone: SwipeTone;
+  showHint: boolean;
+  armed: boolean;
+};
 
 function formatTimestamp(value: string): string {
   if (!value) return "-";
@@ -130,8 +144,86 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
   const [clockTick, setClockTick] = useState(0);
+  const [swipeRows, setSwipeRows] = useState<Record<string, SwipeRowState>>({});
+  const [swipeRemovedIds, setSwipeRemovedIds] = useState<string[]>([]);
+  const [swipeNotice, setSwipeNotice] = useState<{ tone: SwipeTone; armed: boolean } | null>(null);
+  const [swipeHapticsEnabled, setSwipeHapticsEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+    try {
+      return window.localStorage.getItem(SWIPE_HAPTICS_STORAGE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const [refillAnimationTick, setRefillAnimationTick] = useState(0);
   const isDraftMailbox = mailbox.toLowerCase().includes("drafts");
   const sourceMailbox = mailbox || "INBOX";
+  const swipeSessionRef = useRef<{
+    messageId: string;
+    startX: number;
+    startY: number;
+    width: number;
+    shouldSwipe: boolean;
+    didSwipe: boolean;
+    tone: SwipeTone;
+    hintBuzzed: boolean;
+    armedBuzzed: boolean;
+  } | null>(null);
+  const swipeLiveRef = useRef<Record<string, Omit<SwipeRowState, "phase">>>({});
+  const swipeClickSuppressRef = useRef<Set<string>>(new Set());
+  const isTouchSwipeEnabled =
+    typeof window !== "undefined" &&
+    window.matchMedia("(pointer: coarse)").matches &&
+    !isDraftMailbox;
+  const hapticsSupported =
+    typeof navigator !== "undefined" &&
+    typeof (navigator as Navigator & { vibrate?: (pulse: number | number[]) => boolean }).vibrate === "function";
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.localStorage.setItem(SWIPE_HAPTICS_STORAGE_KEY, swipeHapticsEnabled ? "true" : "false");
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [swipeHapticsEnabled]);
+
+  function triggerHaptic(pattern: number | number[]) {
+    if (!isTouchSwipeEnabled || !swipeHapticsEnabled || typeof navigator === "undefined") {
+      return;
+    }
+    const target = navigator as Navigator & {
+      vibrate?: (pulse: number | number[]) => boolean;
+    };
+    if (typeof target.vibrate !== "function") {
+      return;
+    }
+    try {
+      target.vibrate(pattern);
+    } catch {
+      // Ignore unsupported vibration API failures.
+    }
+  }
+
+  function computeSwipeOffset(deltaX: number, width: number): number {
+    const direction = Math.sign(deltaX) || 1;
+    const absolute = Math.abs(deltaX);
+    const activatePx = width * SWIPE_ACTIVATE_THRESHOLD;
+
+    if (absolute <= activatePx) {
+      return deltaX * 1.14;
+    }
+
+    const beyond = absolute - activatePx;
+    const base = activatePx * 1.14;
+    const resisted = base + beyond * 0.4;
+    const maxOffset = width * SWIPE_MAX_OFFSET_RATIO;
+    return direction * Math.min(resisted, maxOffset);
+  }
 
   async function loadInbox() {
     setLoading(true);
@@ -148,6 +240,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         if (current && nextTabs.includes(current)) return current;
         return nextTabs[0] ?? "";
       });
+      setSwipeRows({});
+      setSwipeRemovedIds([]);
+      setSwipeNotice(null);
       setSelectedMessageIds((current) => {
         if (current.length === 0) return current;
         const nextIDSet = new Set<string>();
@@ -227,16 +322,24 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     return next;
   }, [rows, sortDirection, sortKey]);
 
+  const visibleRows = useMemo(() => {
+    if (swipeRemovedIds.length === 0) {
+      return sortedRows;
+    }
+    const removed = new Set(swipeRemovedIds);
+    return sortedRows.filter((row) => !removed.has(row.messageId));
+  }, [sortedRows, swipeRemovedIds]);
+
   const selectedInTab = useMemo(
-    () => sortedRows.filter((row) => selectedMessageIds.includes(row.messageId)),
-    [sortedRows, selectedMessageIds]
+    () => visibleRows.filter((row) => selectedMessageIds.includes(row.messageId)),
+    [visibleRows, selectedMessageIds]
   );
 
-  const totalPages = Math.max(1, Math.ceil(sortedRows.length / EMAILS_PER_PAGE));
+  const totalPages = Math.max(1, Math.ceil(visibleRows.length / EMAILS_PER_PAGE));
   const pageRows = useMemo(() => {
     const start = (currentPage - 1) * EMAILS_PER_PAGE;
-    return sortedRows.slice(start, start + EMAILS_PER_PAGE);
-  }, [currentPage, sortedRows]);
+    return visibleRows.slice(start, start + EMAILS_PER_PAGE);
+  }, [currentPage, visibleRows]);
 
   const allRowsSelected = pageRows.length > 0 && pageRows.every((row) => selectedMessageIds.includes(row.messageId));
   const updatedLabel = useMemo(
@@ -314,8 +417,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     });
   }
 
-  async function applyInboxAction(action: InboxAction, messageIds: string[], options?: { closeModal?: boolean }) {
-    if (messageIds.length === 0 || actionLoading) return;
+  async function applyInboxAction(action: InboxAction, messageIds: string[], options?: { closeModal?: boolean }): Promise<boolean> {
+    if (messageIds.length === 0 || actionLoading) return false;
     setActionLoading(true);
     setActionError("");
     try {
@@ -350,12 +453,198 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       if (options?.closeModal) {
         setSelected(null);
       }
+      return true;
     } catch (e) {
       const message = e instanceof Error ? e.message : "failed to apply inbox action";
       setActionError(message);
+      return false;
     } finally {
       setActionLoading(false);
     }
+  }
+
+  function updateSwipeState(messageId: string, offset: number, width: number, ratioOverride?: number) {
+    const tone: SwipeTone = offset < 0 ? "archive" : "delete";
+    const ratio = ratioOverride ?? Math.abs(offset) / Math.max(width, 1);
+    const showHint = ratio >= SWIPE_HINT_THRESHOLD;
+    const armed = ratio >= SWIPE_ACTIVATE_THRESHOLD;
+    swipeLiveRef.current[messageId] = { offset, tone, showHint, armed };
+    setSwipeRows((current) => ({
+      ...current,
+      [messageId]: {
+        offset,
+        phase: "dragging",
+        tone,
+        showHint,
+        armed
+      }
+    }));
+    if (showHint) {
+      setSwipeNotice({ tone, armed });
+    } else {
+      setSwipeNotice(null);
+    }
+  }
+
+  function clearSwipeRow(messageId: string) {
+    setSwipeRows((current) => {
+      if (!current[messageId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[messageId];
+      return next;
+    });
+    delete swipeLiveRef.current[messageId];
+  }
+
+  function markSwipeRemoved(messageId: string, removed: boolean) {
+    setSwipeRemovedIds((current) => {
+      if (removed) {
+        if (current.includes(messageId)) {
+          return current;
+        }
+        return [...current, messageId];
+      }
+      return current.filter((id) => id !== messageId);
+    });
+  }
+
+  function handleSwipeStart(messageId: string, event: TouchEvent<HTMLTableRowElement>) {
+    if (!isTouchSwipeEnabled || actionLoading) {
+      return;
+    }
+    const touch = event.touches[0];
+    swipeSessionRef.current = {
+      messageId,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      width: Math.max(event.currentTarget.clientWidth, 1),
+      shouldSwipe: false,
+      didSwipe: false,
+      tone: "delete",
+      hintBuzzed: false,
+      armedBuzzed: false
+    };
+  }
+
+  function handleSwipeMove(event: TouchEvent<HTMLTableRowElement>) {
+    const session = swipeSessionRef.current;
+    if (!isTouchSwipeEnabled || !session || event.touches.length !== 1) {
+      return;
+    }
+    const touch = event.touches[0];
+    const deltaX = touch.clientX - session.startX;
+    const deltaY = touch.clientY - session.startY;
+
+    if (!session.shouldSwipe) {
+      if (Math.abs(deltaX) < 10) {
+        return;
+      }
+      if (Math.abs(deltaX) <= Math.abs(deltaY)) {
+        swipeSessionRef.current = null;
+        return;
+      }
+      session.shouldSwipe = true;
+    }
+
+    event.preventDefault();
+    session.didSwipe = true;
+    const swipeRatio = Math.abs(deltaX) / Math.max(session.width, 1);
+    const tone: SwipeTone = deltaX < 0 ? "archive" : "delete";
+    if (tone !== session.tone) {
+      session.tone = tone;
+      session.hintBuzzed = false;
+      session.armedBuzzed = false;
+    }
+
+    if (swipeRatio >= SWIPE_HINT_THRESHOLD && !session.hintBuzzed) {
+      triggerHaptic(9);
+      session.hintBuzzed = true;
+    }
+    if (swipeRatio < SWIPE_HINT_THRESHOLD) {
+      session.hintBuzzed = false;
+    }
+
+    if (swipeRatio >= SWIPE_ACTIVATE_THRESHOLD && !session.armedBuzzed) {
+      triggerHaptic([12, 18, 16]);
+      session.armedBuzzed = true;
+    }
+    if (swipeRatio < SWIPE_ACTIVATE_THRESHOLD) {
+      session.armedBuzzed = false;
+    }
+
+    const resisted = computeSwipeOffset(deltaX, session.width);
+    updateSwipeState(session.messageId, resisted, session.width, swipeRatio);
+  }
+
+  async function handleSwipeEnd() {
+    const session = swipeSessionRef.current;
+    swipeSessionRef.current = null;
+    if (!isTouchSwipeEnabled || !session) {
+      return;
+    }
+
+    const state = swipeLiveRef.current[session.messageId];
+    setSwipeNotice(null);
+
+    if (!state || !session.shouldSwipe) {
+      return;
+    }
+
+    if (session.didSwipe) {
+      swipeClickSuppressRef.current.add(session.messageId);
+      window.setTimeout(() => {
+        swipeClickSuppressRef.current.delete(session.messageId);
+      }, 280);
+    }
+
+    if (!state.armed) {
+      setSwipeRows((current) => ({
+        ...current,
+        [session.messageId]: {
+          ...state,
+          offset: 0,
+          phase: "snapback"
+        }
+      }));
+      window.setTimeout(() => clearSwipeRow(session.messageId), 320);
+      return;
+    }
+
+    const dismissOffset = state.tone === "delete" ? session.width * SWIPE_DISMISS_RATIO : -session.width * SWIPE_DISMISS_RATIO;
+    triggerHaptic([16, 14, 20]);
+    setSwipeRows((current) => ({
+      ...current,
+      [session.messageId]: {
+        ...state,
+        offset: dismissOffset,
+        phase: "dismiss"
+      }
+    }));
+
+    window.setTimeout(() => {
+      markSwipeRemoved(session.messageId, true);
+      setRefillAnimationTick((tick) => tick + 1);
+    }, 170);
+
+    const action: InboxAction = state.tone === "delete" ? "delete" : "archive";
+    const ok = await applyInboxAction(action, [session.messageId]);
+    if (!ok) {
+      markSwipeRemoved(session.messageId, false);
+      setSwipeRows((current) => ({
+        ...current,
+        [session.messageId]: {
+          ...state,
+          offset: 0,
+          phase: "snapback"
+        }
+      }));
+      window.setTimeout(() => clearSwipeRow(session.messageId), 320);
+      return;
+    }
+
+    window.setTimeout(() => clearSwipeRow(session.messageId), 260);
   }
 
   async function openEmailDetails(item: InboxEmail) {
@@ -436,6 +725,17 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
           <h2 style={{ marginTop: 0, marginBottom: 6 }}>{mailbox ? mailbox : "Inbox"}</h2>
         </div>
         <div className="inbox-action-bar">
+          {isTouchSwipeEnabled ? (
+            <label className="inbox-haptics-toggle" title={hapticsSupported ? "Enable or disable swipe haptics on this browser profile" : "Haptics are not supported by this browser"}>
+              <input
+                type="checkbox"
+                checked={swipeHapticsEnabled}
+                onChange={(event) => setSwipeHapticsEnabled(event.target.checked)}
+                disabled={!hapticsSupported}
+              />
+              <span>Haptics</span>
+            </label>
+          ) : null}
           {batchActions.map((action) => (
             <button
               key={action.key}
@@ -504,7 +804,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         </div>
       ) : null}
 
-      {sortedRows.length === 0 ? (
+      {visibleRows.length === 0 ? (
         <div className="inbox-list-region">
           <div className="inbox-empty-state">
             <p>{isInboxMailbox ? "No emails in this tab yet." : "No emails yet."}</p>
@@ -529,6 +829,17 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             </div>
           ) : null}
           <div className="inbox-table-wrap">
+            {swipeNotice ? (
+              <div className={`inbox-swipe-notice ${swipeNotice.tone === "delete" ? "delete" : "archive"}`} role="status" aria-live="polite">
+                {swipeNotice.armed
+                  ? swipeNotice.tone === "delete"
+                    ? "Release to delete"
+                    : "Release to archive"
+                  : swipeNotice.tone === "delete"
+                    ? "Delete ready at 50%"
+                    : "Archive ready at 50%"}
+              </div>
+            ) : null}
             <div className="inbox-table-scroll">
               <table className="inbox-table">
                 <thead>
@@ -571,19 +882,36 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     </th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className={`inbox-body-refill-${refillAnimationTick % 2}`}>
                   {pageRows.map((item) => {
                     const isRead = item.status === "read";
                     const displayTime = formatInboxListTime(item.atUtc);
+                    const swipeState = swipeRows[item.messageId];
+                    const swipeClass = swipeState
+                      ? [
+                          swipeState.phase === "dragging" ? "inbox-row-swipe-dragging" : "",
+                          swipeState.phase === "snapback" ? "inbox-row-swipe-snapback" : "",
+                          swipeState.phase === "dismiss" ? "inbox-row-swipe-dismiss" : "",
+                          swipeState.showHint ? (swipeState.tone === "delete" ? "inbox-row-swipe-delete-hint" : "inbox-row-swipe-archive-hint") : "",
+                          swipeState.armed ? "inbox-row-swipe-armed" : ""
+                        ]
+                          .filter(Boolean)
+                          .join(" ")
+                      : "";
                     return (
                     <tr
                       key={`${item.messageId}-${item.atUtc}`}
-                      draggable
+                      draggable={!isTouchSwipeEnabled}
                       onDragStart={(event) => {
                         event.dataTransfer.setData("application/x-llama-mailbox", dragMessagePayload(item));
                         event.dataTransfer.effectAllowed = "move";
                       }}
-                      className={`inbox-row ${isRead ? "" : "inbox-row-unread"}`}
+                      onTouchStart={(event) => handleSwipeStart(item.messageId, event)}
+                      onTouchMove={handleSwipeMove}
+                      onTouchEnd={() => void handleSwipeEnd()}
+                      onTouchCancel={() => void handleSwipeEnd()}
+                      className={`inbox-row ${isRead ? "" : "inbox-row-unread"} ${swipeClass}`.trim()}
+                      style={swipeState ? { transform: `translateX(${swipeState.offset}px)` } : undefined}
                     >
                       <td className="inbox-cell inbox-col-select">
                         <input
@@ -603,7 +931,12 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                       <td className="inbox-cell">
                         <button
                           type="button"
-                          onClick={() => void openEmailDetails(item)}
+                          onClick={() => {
+                            if (swipeClickSuppressRef.current.has(item.messageId)) {
+                              return;
+                            }
+                            void openEmailDetails(item);
+                          }}
                           className={`inbox-subject-button ${isRead ? "" : "inbox-subject-unread"}`}
                         >
                           {item.subject || "(no subject)"}

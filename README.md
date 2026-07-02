@@ -2,96 +2,45 @@
 
 # llama Mail
 
-llama Mail is a Dockerized IMAP Email Client and keyword auto-labeler.
+llama Mail is a self-hosted IMAP web client with automatic keyword labeling powered by a local Ollama model.
 
-It polls unread inbox mail, classifies each message with an internal Ollama model (`gemma4:e4b` by default), and applies matching IMAP keywords.
-It also includes a web compose flow with SMTP sending, draft save support, and inbox folder management.
+It polls unread mail, classifies messages, applies IMAP keywords, and includes a full browser UI for reading, configuration, notifications, logs, and compose (send + draft).
 
-Note on theming:
-Some Browsers (Samsung) will change the theme to match the system mode Light / Dark.
-To Prevent this set the app to always display in Light mode.
+## Features
 
-## Overview
+- Docker-first single-container runtime managed by supervisord
+- IMAP inbox reader with folder management and drag/drop move actions
+- Automatic keyword labeling for unread mail
+- Built-in compose flow with SMTP send and IMAP draft save
+- Browser push notifications (all mail or keyword-only)
+- Config UI for IMAP, SMTP, model auth, tuning, logs, health, and decisions
+- A dozen Theme presets 
 
-Runtime is a single container managed by `supervisord`, running:
+## Architecture
 
-- API server (`llama-lab --mode server`)
-- Polling daemon (`llama-lab --mode daemon`)
-- Internal Ollama service (`ollama serve`)
-- One-shot model pull worker (`ollama pull gemma4:e4b`)
+The container runs these processes:
 
-## Container Details
-
-This project runs as one Docker Compose service:
-
-- Service name: `llama-lab`
-- Container name: `llama-lab`
-- Image source: built from local `Dockerfile`
-- Internal process supervisor: `supervisord`
-
-### In-Container Processes
-
-The container starts and supervises these long-running processes:
-
-- API server process: `llama-lab --mode server`
-- Poller process: `llama-lab --mode daemon`
-- Ollama server process: `ollama serve`
-
-Startup also runs a one-shot model pull task for the configured model.
-
-### Ports
-
-- `5866` exposed for web UI and backend API
-- `11434` mapped in Compose for Ollama API access (currently enabled in `docker-compose.yml`)
-
-### Persistent Data vs Ephemeral Data
-
-Named Docker volumes persist application data across container rebuild/recreate:
-
-- `llama_config` -> `/llama_lab/config`
-- `llama_private` -> `/llama_lab/private`
-- `llama_logs` -> `/llama_lab/logs`
-- `llama_state` -> `/llama_lab/state`
-
-Host bind mount persists Ollama model blobs:
-
-- `${OLLAMA_MODELS_HOST_DIR:-./share/ollama/models}` -> `/llama_lab/ollama-models`
-
-Important persistence notes:
-
-- `docker compose up --build` keeps named volumes by default
-- `docker compose down -v` deletes named volumes and stored app data
-- Notification VAPID key defaults to `/llama_lab/config/notifications-vapid-private.pem`
-- Notification subscriptions are persisted in `/llama_lab/state/state.json`
-
-### Quick Container Checks
-
-Use these commands to inspect runtime and data persistence:
-
-```bash
-docker compose ps
-docker compose logs -f llama-lab
-docker exec -it llama-lab ps aux
-docker exec -it llama-lab ls -la /llama_lab/config /llama_lab/state
-docker volume ls | grep llama
-```
+- API server: `llama-lab --mode server`
+- Polling daemon: `llama-lab --mode daemon`
+- Ollama service: `ollama serve`
+- One-shot startup pull: `ollama pull <configured model>`
 
 Classification flow:
 
-1. Fetch unread inbox messages from IMAP (`INBOX` by default).
-2. Redact configured sensitive content.
-3. Build a prompt from sender/subject/body plus tuning context.
-4. Send prompt to Ollama (`/api/generate`).
-5. Match model output against allowed labels.
-6. Apply the label as an IMAP keyword.
-7. Persist checkpoint and decisions to avoid unnecessary reprocessing.
+1. Fetch unread messages from IMAP (`INBOX` by default).
+2. Redact sensitive patterns.
+3. Build prompt from sender, subject, body, and tuning context.
+4. Call Ollama `/api/generate`.
+5. Match output against allowed labels.
+6. Apply IMAP keyword(s).
+7. Persist checkpoint and decision history.
 
 ## Requirements
 
 - Docker
 - Docker Compose
 
-Optional (local development outside Docker):
+Optional for local development (outside Docker):
 
 - Go 1.26+
 - Node.js 20+
@@ -100,71 +49,76 @@ Optional (local development outside Docker):
 ## Quick Start
 
 1. Clone the repository.
-
-2. (Optional) copy env defaults:
+2. Optional: copy environment defaults.
 
 ```bash
 cp .env.example .env
 ```
 
-3. Build and run:
+3. Build and start.
 
 ```bash
 docker compose up --build -d
 ```
 
-4. Open UI:
+4. Open the UI:
 
 - http://localhost:5866
 
-5. Login with bootstrap account:
+5. Sign in with bootstrap credentials:
 
 - Username: `admin`
 - Password: `ChangeMeNow123!`
 
-Password change is required on first login.
+6. Change the password when prompted.
+7. In Config, save IMAP and SMTP settings and run IMAP Test.
+8. In Tuning, update labels/prompt and save.
 
-6. In Config, save IMAP and SMTP settings (host, port, username, password/app-password, mailbox) and run IMAP test.
+## Session Behavior
 
-7. In Tuning, sync/build labels and save `TUNING.md`.
+- Login sessions expire after 24 hours of inactivity.
+- Session expiry is sliding (each authenticated request extends TTL by 24h).
+- Logout invalidates the server-side session and clears the cookie.
+
+## Ports
+
+- `5866`: web UI + backend API
+- `11434`: Ollama API (not exposed by default in `docker-compose.yml`)
 
 ## Environment Variables
 
-Primary variables:
+Common variables:
 
+- `WEB_PORT` (default `5866`)
+- `TZ` (default `America/New_York`)
+- `SECRET_DIR` (default `/llama_lab/private`)
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (default `gemma4:e4b`)
-- `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`, host path bind-mounted for persistent model cache)
-- `IMAP_HOST` (optional default source; UI-saved config is preferred)
-- `IMAP_PORT` (default `993`)
-- `IMAP_USERNAME`
-- `IMAP_PASSWORD`
-- `IMAP_MAILBOX` (default `INBOX`)
+- `OLLAMA_MODEL` (Compose default `gemma4:e4b`)
+- `TUNING_FILE` (default `/llama_lab/config/TUNING.md`)
+- `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`)
 - `IMAP_CONFIG_FILE` (default `/llama_lab/private/imap-config.json`)
 - `IMAP_CONFIG_KEY_FILE` (default `/llama_lab/private/imap-config.key`)
-- `TUNING_FILE` (default `/llama_lab/config/TUNING.md`)
-- `TZ` (default `America/New_York`)
 
 Notes:
 
+- `Dockerfile` sets a fallback model of `nemotron-3-nano:4b`.
+- `docker-compose.yml` overrides model default to `gemma4:e4b` unless you set `OLLAMA_MODEL`.
 - The image sets `OLLAMA_MODELS=/llama_lab/ollama-models`.
-- `docker-compose.yml` bind-mounts `${OLLAMA_MODELS_HOST_DIR:-./share/ollama/models}` to that path so models persist across container rebuilds and recreates.
-- Ollama API can be exposed by uncommenting `11434:11434` in `docker-compose.yml`.
 
-Create the shared models directory once before first run:
+Create model cache directory once before first run:
 
 ```bash
 mkdir -p share/ollama/models
 ```
 
-## Data and Volumes
+## Persistence
 
-Named volumes map to:
+Named volumes:
 
-- `/llama_lab/config`
-- `/llama_lab/private`
-- `/llama_lab/logs`
-- `/llama_lab/state`
+- `llama_config` -> `/llama_lab/config`
+- `llama_private` -> `/llama_lab/private`
+- `llama_logs` -> `/llama_lab/logs`
+- `llama_state` -> `/llama_lab/state`
 
 Host bind mount:
 
@@ -174,70 +128,53 @@ Important files:
 
 - `/llama_lab/config/config.yaml`
 - `/llama_lab/config/admin.env`
+- `/llama_lab/config/TUNING.md`
+- `/llama_lab/config/notifications-vapid-private.pem`
 - `/llama_lab/private/imap-config.json`
 - `/llama_lab/private/imap-config.key`
-- `/llama_lab/config/TUNING.md`
 - `/llama_lab/state/state.json`
 - `/llama_lab/state/decisions.json`
-- `/llama_lab/ollama-models/*`
 
-## UI Pages
+## API Highlights
 
-- Login
-- Read
-- Config
-- Tuning
-- Labels
-- Decisions
-- Logs
-- Health
-- Status
-
-## API Endpoints (high-use)
-
-Auth/session:
+Auth:
 
 - `POST /api/auth/login`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
 - `POST /api/auth/password`
 
-Runtime/status:
+Runtime:
 
 - `GET /api/status`
 - `GET /api/health`
 - `POST /api/health/repair`
 
-Config/data:
+Config and data:
 
 - `GET|PUT /api/config`
 - `GET /api/labels`
 - `GET /api/decisions`
 - `GET|PUT /api/tuning`
 
-IMAP:
+IMAP and inbox:
 
 - `GET|POST|DELETE /api/imap/config`
 - `POST /api/imap/test`
-
-Inbox:
-
 - `GET /api/inbox?limit=500&mailbox=<name>`
-- `POST /api/inbox/actions` (archive, mark read/unread, move)
-- `GET /api/inbox/folders`
-- `POST /api/inbox/folders`
-- `PUT /api/inbox/folders`
-- `DELETE /api/inbox/folders?folder=<path>`
+- `POST /api/inbox/actions`
+- `GET|POST|PUT|DELETE /api/inbox/folders`
 
-Mail compose:
+Mail:
 
 - `POST /api/mail/send`
 - `POST /api/mail/draft`
 
-Llama/auth:
+Notifications:
 
-- `GET|POST /api/llama/auth`
-- `POST /api/llama/test`
+- `GET /api/notifications/vapid-public-key`
+- `POST|DELETE /api/notifications/subscriptions`
+- `POST /api/notifications/test`
 
 Logs:
 
@@ -262,69 +199,60 @@ npm install
 npm run build
 ```
 
-## Logging
+## Operations
 
-Main logs:
+Useful runtime checks:
 
-- `app.log` - API/app-level events
-- `daemon.log` - poller lifecycle and tick summaries
-- `llama.log` - model/runtime activity and output lines
-- `llama.err.log` - model/runtime error lines
-- `llama-server.log` - classify/warmup trace lines
+```bash
+docker compose ps
+docker compose logs -f llama-lab
+docker exec -it llama-lab ps aux
+docker exec -it llama-lab ls -la /llama_lab/config /llama_lab/state
+docker volume ls | grep llama
+```
 
-Log UI reads from `/api/logs` and `/api/logs/list`.
+Persistence behavior:
 
-## Operational Notes
-
-- Poller tick timeout is long enough for large inbox sweeps.
-- Classify calls are serialized and paced to reduce model busy/flaky responses.
-- AI-credits exhaustion is tracked as a sticky health/state flag and auto-clears on successful classify.
-- IMAP configuration is encrypted at rest using files under `/llama_lab/private`.
-- Use app-specific passwords when your mail provider requires them.
-- Keywords are created by applying them; provider support for custom IMAP keywords can vary.
+- `docker compose up --build` keeps named volumes.
+- `docker compose down -v` removes named volumes and stored app data.
 
 ## Troubleshooting
 
-### Ollama/model issues
+### Ollama or model issues
 
-- Check logs:
-
-```bash
-docker compose logs -f llama-lab
-```
-
-- Verify model pull happened (`gemma4:e4b`).
-- If needed, restart services:
-
-```bash
-docker compose restart
-```
+- Check logs with `docker compose logs -f llama-lab`.
+- Confirm model pull completed for your configured `OLLAMA_MODEL`.
+- Restart if needed: `docker compose restart`.
 
 ### IMAP connectivity issues
 
-- Confirm IMAP settings are saved in Config.
-- Verify host, port, username, password, and mailbox values.
-- Use the IMAP test action in Config (`POST /api/imap/test`).
-- Check `daemon.log` and `app.log` for auth, TLS, and keyword errors.
+- Verify host, port, username, password, and mailbox in Config.
+- Run IMAP Test in Config.
+- Check `daemon.log` and `app.log` for auth/TLS/keyword failures.
 
 ### SMTP send issues
 
-- Confirm SMTP host and port are set in Config.
-- For providers using port 465, implicit TLS is required and supported by the app.
-- Use app-specific passwords when required by your provider.
-- Check `app.log` for `mail send failed` entries and returned error details.
+- Verify SMTP host and port in Config.
+- Port 465 requires implicit TLS (supported).
+- Use app passwords if your provider requires them.
+- Check `app.log` for `mail send failed` details.
 
-### No labels applied
+### Labels not being applied
 
-- Confirm labels are present in allowlist/tuning.
+- Confirm labels exist in allowlist/tuning.
 - Confirm unread inbox has eligible messages.
-- Check Decisions page and `daemon.log` tick summary counts.
+- Check Decisions page and poller logs.
+
+### PWA install on Firefox
+
+- Firefox may not emit the same install prompt event as Chromium browsers.
+- Service worker and manifest are still provided, but install UX can differ by browser.
 
 ## Project Structure
 
-- `backend/` - Go API server, poller, adapters, state/health
-- `frontend/` - React + Vite UI
-- `scripts/` - runtime/bootstrap helpers
-- `Dockerfile` - single image (backend, frontend, Ollama runtime)
-- `docker-compose.yml` - local orchestration
-- `supervisord.conf` - in-container process supervision
+- `backend/`: Go API, poller, adapters, config, state, health
+- `frontend/`: React + Vite UI
+- `scripts/`: bootstrap and test helpers
+- `Dockerfile`: single image build (backend, frontend, Ollama runtime)
+- `docker-compose.yml`: local orchestration
+- `supervisord.conf`: in-container process supervision
