@@ -85,17 +85,60 @@ func (s *Store) load() error {
 	if err := json.Unmarshal(b, &sf); err != nil {
 		return err
 	}
+	s.applyStateFile(sf)
+	return nil
+}
+
+func (s *Store) applyStateFile(sf stateFile) {
 	s.checkpoint = sf.LastCheckpoint
 	s.aiCreditsExhausted = sf.AICreditsExhausted
 	s.aiCreditsExhaustedAt = sf.AICreditsExhaustedAt
 	s.notifications = append([]NotificationSubscription{}, sf.Notifications...)
+
+	processed := make(map[string]time.Time, len(sf.Processed))
 	for id, ts := range sf.Processed {
 		t, err := time.Parse(time.RFC3339, ts)
 		if err != nil {
 			continue
 		}
-		s.processedSet[id] = t
+		processed[id] = t
 	}
+	s.processedSet = processed
+}
+
+func (s *Store) refreshStateFromDiskLocked() error {
+	b, err := os.ReadFile(s.path())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var sf stateFile
+	if err := json.Unmarshal(b, &sf); err != nil {
+		return err
+	}
+	s.applyStateFile(sf)
+	return nil
+}
+
+func (s *Store) refreshNotificationsFromDiskLocked() error {
+	b, err := os.ReadFile(s.path())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var sf struct {
+		Notifications []NotificationSubscription `json:"notifications,omitempty"`
+	}
+	if err := json.Unmarshal(b, &sf); err != nil {
+		return err
+	}
+	s.notifications = append([]NotificationSubscription{}, sf.Notifications...)
 	return nil
 }
 
@@ -212,6 +255,7 @@ func (s *Store) persistLocked() error {
 func (s *Store) ListNotificationSubscriptions() []NotificationSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.refreshNotificationsFromDiskLocked()
 	out := make([]NotificationSubscription, len(s.notifications))
 	copy(out, s.notifications)
 	return out
@@ -220,6 +264,9 @@ func (s *Store) ListNotificationSubscriptions() []NotificationSubscription {
 func (s *Store) UpsertNotificationSubscription(sub NotificationSubscription) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return err
+	}
 	for i, existing := range s.notifications {
 		if existing.Endpoint == sub.Endpoint {
 			s.notifications[i] = sub
@@ -233,6 +280,9 @@ func (s *Store) UpsertNotificationSubscription(sub NotificationSubscription) err
 func (s *Store) RemoveNotificationSubscription(endpoint string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return false, err
+	}
 	for i, sub := range s.notifications {
 		if sub.Endpoint != endpoint {
 			continue

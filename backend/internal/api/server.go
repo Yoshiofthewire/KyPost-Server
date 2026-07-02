@@ -895,7 +895,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		Subscriber:      "mailto:noreply@localhost",
 		VAPIDPublicKey:  s.cfg.Notifications.PublicKey,
 		VAPIDPrivateKey: privateKey,
-		TTL:             60,
+		TTL:             3600,
 	}
 
 	sent := 0

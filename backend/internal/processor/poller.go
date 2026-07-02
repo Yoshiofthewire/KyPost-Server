@@ -27,6 +27,8 @@ import (
 	"github.com/SherClockHolmes/webpush-go"
 )
 
+const notificationTTL = 1 * time.Hour
+
 type Poller struct {
 	cfg       config.Config
 	cfgMu     sync.RWMutex
