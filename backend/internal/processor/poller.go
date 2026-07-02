@@ -324,11 +324,25 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 func (p *Poller) maybeSendPushNotification(msg imapadapter.Message, selectedLabel string, messageKeywords []string) {
 	cfg := p.currentConfig()
 	if !shouldSendNotification(cfg.Notifications, selectedLabel, messageKeywords) {
+		p.log.Info(
+			"new-email push notification skipped",
+			"reason", "notification mode/keywords did not match",
+			"message_id", msg.ID,
+			"mode", strings.ToLower(strings.TrimSpace(cfg.Notifications.Mode)),
+			"selected_label", strings.TrimSpace(selectedLabel),
+			"message_keywords", strings.Join(messageKeywords, ","),
+			"configured_keywords", strings.Join(cfg.Notifications.Keywords, ","),
+		)
 		return
 	}
 
 	subs := p.store.ListNotificationSubscriptions()
 	if len(subs) == 0 {
+		p.log.Info(
+			"new-email push notification skipped",
+			"reason", "no active push subscriptions",
+			"message_id", msg.ID,
+		)
 		return
 	}
 
