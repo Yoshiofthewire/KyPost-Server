@@ -181,18 +181,20 @@ export function ConfigPage() {
 
   const timezoneOptions = useMemo(() => {
     const all = getTimezoneOptions();
-    if (!cfg.timezone || all.includes(cfg.timezone)) {
+    const timezone = cfg?.timezone;
+    if (!timezone || all.includes(timezone)) {
       return all;
     }
-    return [cfg.timezone, ...all];
-  }, [cfg.timezone]);
+    return [timezone, ...all];
+  }, [cfg?.timezone]);
 
   const logLevelOptions = useMemo(() => {
-    if (!cfg.logLevel || LOG_LEVEL_OPTIONS.includes(cfg.logLevel)) {
+    const logLevel = cfg?.logLevel;
+    if (!logLevel || LOG_LEVEL_OPTIONS.includes(logLevel)) {
       return LOG_LEVEL_OPTIONS;
     }
-    return [cfg.logLevel, ...LOG_LEVEL_OPTIONS];
-  }, [cfg.logLevel]);
+    return [logLevel, ...LOG_LEVEL_OPTIONS];
+  }, [cfg?.logLevel]);
 
   async function refreshLabels() {
     const labelsData = await getJSON<LabelsResponse>("/api/labels");
