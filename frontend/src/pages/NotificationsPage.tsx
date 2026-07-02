@@ -220,7 +220,18 @@ export function NotificationsPage() {
   }
 
   function setMode(mode: AppConfig["notifications"]["mode"]) {
-    setCfg((prev) => (prev ? { ...prev, notifications: { ...prev.notifications, mode } } : prev));
+    setCfg((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+      if (prev.notifications.mode === "none" && mode !== "none" && isMobile) {
+        window.alert("To help insure notifications work, please remove your browser from sleep state.");
+      }
+
+      return { ...prev, notifications: { ...prev.notifications, mode } };
+    });
   }
 
   function setAllKeywords() {
