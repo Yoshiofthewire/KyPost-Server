@@ -7,7 +7,7 @@ export const THEME_OPTIONS = [
   "Tropic Night",
   "Ocean",
   "Coffee",
-  "Cliffs",
+  "White Cliffs",
   "Cyber Punk",
   "Neon Purple",
   "Space",
@@ -146,23 +146,23 @@ const themes: Record<ThemeName, ThemeVars> = {
     buttonText: "#220f08",
     linkBorder: "#8f7a6d"
   },
-  Cliffs: {
-    bg: "#241c18",
-    panel: "#302723",
-    ink: "#d8c7ba",
-    inkStrong: "#f2e5db",
-    accent: "#c78f6e",
-    accentSoft: "#6b4637",
-    line: "#56443c",
-    glow: "rgba(176, 121, 87, 0.24)",
-    sidebarStart: "#2a201c",
-    sidebarEnd: "#3a2b25",
-    newEmailBorder: "#9d6e55",
-    newEmailStart: "#c78f6e",
-    newEmailEnd: "#9d6e55",
-    newEmailText: "#27140c",
-    buttonText: "#27140c",
-    linkBorder: "#a9958a"
+  "White Cliffs": {
+    bg: "#f7f9fb",
+    panel: "#ffffff",
+    ink: "#2e4c63",
+    inkStrong: "#163246",
+    accent: "#5ea8d8",
+    accentSoft: "#dff1fb",
+    line: "#8fc3df",
+    glow: "rgba(94, 168, 216, 0.2)",
+    sidebarStart: "#f1f8fd",
+    sidebarEnd: "#e7f3fb",
+    newEmailBorder: "#2f7fb0",
+    newEmailStart: "#4f9bc8",
+    newEmailEnd: "#58b65a",
+    newEmailText: "#103246",
+    buttonText: "#103246",
+    linkBorder: "#58b65a"
   },
   "Cyber Punk": {
     bg: "#120918",
@@ -321,6 +321,9 @@ export function getStoredTheme(): ThemeName {
     }
     if (saved === "Old Dark") {
       return "Tropic Night";
+    }
+    if (saved === "Cliffs") {
+      return "White Cliffs";
     }
     return "Dark Matter";
   } catch {

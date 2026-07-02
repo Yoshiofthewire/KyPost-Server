@@ -7,6 +7,10 @@ llama Mail is a Dockerized IMAP Email Client and keyword auto-labeler.
 It polls unread inbox mail, classifies each message with an internal Ollama model (`gemma4:e4b` by default), and applies matching IMAP keywords.
 It also includes a web compose flow with SMTP sending, draft save support, and inbox folder management.
 
+Note on theming:
+Some Browsers (Samsung) will change the theme to match the system mode Light / Dark.
+To Prevent this set the app to always display in Light mode.
+
 ## Overview
 
 Runtime is a single container managed by `supervisord`, running:

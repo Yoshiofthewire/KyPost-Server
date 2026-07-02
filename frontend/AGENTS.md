@@ -43,7 +43,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 - Client theme selection is local-only and persisted in browser storage (`localStorage` key `llama-lab-theme`)
 - Theme presets are owned by `src/theme.ts`
-- Preset names include: Dark Matter, Light Matter, Tropics, Tropic Night, Ocean, Coffee, Cliffs, Cyber Punk, Neon Purple, Space, Sky, Forest, Sun
+- Preset names include: Dark Matter, Light Matter, Tropics, Tropic Night, Ocean, Coffee, White Cliffs, Cyber Punk, Neon Purple, Space, Sky, Forest, Sun
 - Theme initialization runs in `main.tsx` before rendering via `applyStoredTheme()`
 - Config page includes a Theme selector and Apply Theme button in Application settings
 
