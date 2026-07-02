@@ -68,7 +68,6 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `POST /api/inbox/actions` | yes | Bulk inbox actions: `delete`, `archive`, `spam`, `read`, `move` by `messageIds[]`, optional `mailbox`, and `targetMailbox` for `move`; actions execute in the selected mailbox, and `archive` moves to `Archive/<email sent year>` (fallback received year/current year) and creates folder if needed |
 | `GET /api/logs?file=<name>.log&lines=<n>` | yes | Log tail |
 | `GET /api/logs/list` | yes | Log file inventory |
-| `GET\|POST /api/llama/auth` | yes | Ollama auth token management |
 | `POST /api/llama/test` | yes | Classify a test email |
 | `GET\|POST\|DELETE /api/imap/config` | yes | Encrypted IMAP credentials plus optional SMTP host/port override used by `/api/mail/send` |
 | `POST /api/imap/test` | yes | Live IMAP connectivity check |
@@ -93,7 +92,6 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `TUNING_FILE` | `$CONFIG_DIR/TUNING.md` | Classification prompt template |
 | `IMAP_CONFIG_FILE` | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
 | `IMAP_CONFIG_KEY_FILE` | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
-| `LLAMA_AUTH_FILE` | `$CONFIG_DIR/llama-auth.json` | Ollama auth token storage |
 
 ### Key Data Files
 
@@ -103,7 +101,6 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `$CONFIG_DIR/admin.env` | Scrypt-hashed admin credentials |
 | `$CONFIG_DIR/TUNING.md` | Classification prompt template |
 | `$CONFIG_DIR/notifications-vapid-private.pem` | Generated browser push private key for notification subscriptions |
-| `$CONFIG_DIR/llama-auth.json` | Ollama auth token |
 | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
 | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
 | `$STATE_DIR/state.json` | Checkpoint + processed-set + persisted browser push subscriptions |

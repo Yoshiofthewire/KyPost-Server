@@ -28,7 +28,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 | `LoginPage.tsx` | `POST /api/auth/login`, `POST /api/auth/password` (`/login` sign-in plus protected `/password` change-password mode) |
 | `ReadPage.tsx` | `GET /api/inbox?limit=500&mailbox=<name>`, `POST /api/inbox/actions` (bulk inbox actions + read/unread state updates, includes current mailbox context; move actions are triggered by drag-drop from this page) |
 | `HealthPage.tsx` | `GET /api/health`, `GET /api/status` (includes `emailsProcessedLastHour`), `POST /api/health/repair` |
-| `ConfigPage.tsx` | `GET/POST /api/imap/config` (also carries SMTP host/port for sending), `POST /api/imap/test`, `GET|POST /api/llama/auth` |
+| `ConfigPage.tsx` | `GET/POST /api/imap/config` (also carries SMTP host/port for sending), `POST /api/imap/test` |
 | `NotificationsPage.tsx` | `GET /api/config`, `GET /api/labels`, `PUT /api/config`, `GET /api/notifications/vapid-public-key`, `POST /api/notifications/subscriptions`, `POST /api/notifications/test` (push notification mode, all-email toggle, IMAP keyword selection, device subscription, and test push broadcast to all user devices) |
 | `TuningPage.tsx` | `GET/PUT /api/tuning` |
 | `LabelsPage.tsx` | `GET /api/labels` |

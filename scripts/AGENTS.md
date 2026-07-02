@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Container initialization, process orchestration, Ollama model management, mail auth utilities, and Playwright E2E tests.
+Container initialization, process orchestration, and Ollama model management.
 
 ## Ownership
 
-All files under `scripts/`. CI config lives in `.github/workflows/playwright.yml` (also owned here).
+All files under `scripts/`.
 
 ## Local Contracts
 
@@ -29,23 +29,13 @@ All files under `scripts/`. CI config lives in `.github/workflows/playwright.yml
 | ollama | daemon | 10 |
 | ollama-model | one-shot | 10 |
 
-### E2E Tests
-
-- Framework: Playwright (`package.json`, `playwright.config.ts`)
-- Tests: `tests/example.spec.ts`
-- CI: `.github/workflows/playwright.yml` triggers on push/PR
-
 ## Work Guidance
 
 - Do not change the startup priority of `bootstrap` relative to `api`/`daemon` — credentials must exist before services start
 - `pull-ollama-model.sh` is idempotent; safe to re-run
-- Add new E2E tests under `tests/`; keep `example.spec.ts` as a smoke-test baseline
-- Install Playwright deps: `cd scripts && npm install`
-- Run tests: `cd scripts && npx playwright test`
 
 ## Verification
 
-- `npx playwright test` must pass in CI
 - `bootstrap.sh` must produce a valid `admin.env` with a non-empty scrypt hash
 
 ## Child DOX Index

@@ -115,7 +115,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 - `backend/` — Go 1.26.4 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction; produces the `llama-lab` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested child: `backend/internal/adapters/`.
 - `frontend/` — React 18 / TypeScript SPA for config, monitoring, decision audit, and log streaming. See [frontend/AGENTS.md](frontend/AGENTS.md).
-- `scripts/` — Container initialization, process orchestration (supervisord), Ollama model management, and Playwright E2E tests. See [scripts/AGENTS.md](scripts/AGENTS.md).
+- `scripts/` — Container initialization, process orchestration (supervisord), and Ollama model management. See [scripts/AGENTS.md](scripts/AGENTS.md).
 - `share/` — Persistent Ollama model blob cache bind-mounted from the host; never committed to git. See [share/AGENTS.md](share/AGENTS.md).
 
 # AI Governance v2 Ultra-Lite

@@ -55,7 +55,6 @@ type Server struct {
 	logPath           string
 	adminPath         string
 	tuningPath        string
-	llamaAuthPath     string
 	imapConfigPath    string
 	imapConfigKeyPath string
 	mail              imapadapter.Client
@@ -67,10 +66,9 @@ func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, he
 	logPath := filepath.Join(envOrDefault("LOG_DIR", "/llama_lab/logs"), "app.log")
 	adminPath := filepath.Join(envOrDefault("CONFIG_DIR", "/llama_lab/config"), "admin.env")
 	tuningPath := resolveTuningPath()
-	llamaAuthPath := envOrDefault("LLAMA_AUTH_FILE", "/llama_lab/config/llama-auth.json")
 	imapConfigPath := envOrDefault("IMAP_CONFIG_FILE", "/llama_lab/private/imap-config.json")
 	imapConfigKeyPath := envOrDefault("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key")
-	return &Server{cfg: cfg, onConfigUpdated: onConfigUpdated, logger: logger, store: store, health: healthSvc, configPath: configPath, logPath: logPath, adminPath: adminPath, tuningPath: tuningPath, llamaAuthPath: llamaAuthPath, imapConfigPath: imapConfigPath, imapConfigKeyPath: imapConfigKeyPath, mail: mailClient, sessions: map[string]time.Time{}}
+	return &Server{cfg: cfg, onConfigUpdated: onConfigUpdated, logger: logger, store: store, health: healthSvc, configPath: configPath, logPath: logPath, adminPath: adminPath, tuningPath: tuningPath, imapConfigPath: imapConfigPath, imapConfigKeyPath: imapConfigKeyPath, mail: mailClient, sessions: map[string]time.Time{}}
 }
 
 func (s *Server) Run() error {
@@ -90,7 +88,6 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/inbox/actions", s.withAuth(s.handleInboxActions))
 	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
 	mux.HandleFunc("/api/logs/list", s.withAuth(s.handleLogsList))
-	mux.HandleFunc("/api/llama/auth", s.withAuth(s.handleLlamaAuth))
 	mux.HandleFunc("/api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("/api/imap/test", s.withAuth(s.handleIMAPTest))
 	mux.HandleFunc("/api/mail/draft", s.withAuth(s.handleMailDraft))
@@ -1432,89 +1429,6 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 			llama.ResetWarmupState()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": s.tuningPath, "restartOk": restartOk, "restartError": restartError})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleLlamaAuth(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		info, err := os.Stat(s.llamaAuthPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				writeJSON(w, http.StatusOK, map[string]any{
-					"exists":       false,
-					"path":         s.llamaAuthPath,
-					"localEnabled": strings.EqualFold(envOrDefault("LLAMA_LOCAL_ENABLED", "true"), "true"),
-				})
-				return
-			}
-			http.Error(w, "failed to read llama auth status", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"exists":       true,
-			"path":         s.llamaAuthPath,
-			"size":         info.Size(),
-			"modifiedAt":   info.ModTime().UTC().Format(time.RFC3339),
-			"localEnabled": strings.EqualFold(envOrDefault("LLAMA_LOCAL_ENABLED", "true"), "true"),
-		})
-	case http.MethodPost:
-		if err := r.ParseMultipartForm(8 << 20); err != nil {
-			http.Error(w, "invalid multipart request", http.StatusBadRequest)
-			return
-		}
-		file, header, err := r.FormFile("authFile")
-		if err != nil {
-			http.Error(w, "authFile is required", http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
-
-		payload, err := io.ReadAll(io.LimitReader(file, 8<<20))
-		if err != nil {
-			http.Error(w, "failed to read auth file", http.StatusBadRequest)
-			return
-		}
-		if len(strings.TrimSpace(string(payload))) == 0 {
-			http.Error(w, "auth file is empty", http.StatusBadRequest)
-			return
-		}
-		var parsed map[string]any
-		if err := json.Unmarshal(payload, &parsed); err != nil {
-			http.Error(w, "auth file is not valid json", http.StatusBadRequest)
-			return
-		}
-		if len(parsed) == 0 {
-			http.Error(w, "auth file json is empty", http.StatusBadRequest)
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(s.llamaAuthPath), 0o755); err != nil {
-			http.Error(w, "failed to create auth directory", http.StatusInternalServerError)
-			return
-		}
-		if err := os.WriteFile(s.llamaAuthPath, payload, 0o600); err != nil {
-			http.Error(w, "failed to save auth file", http.StatusInternalServerError)
-			return
-		}
-		if err := restartLlamaProcess(r.Context()); err != nil {
-			writeJSON(w, http.StatusAccepted, map[string]any{
-				"ok":           true,
-				"path":         s.llamaAuthPath,
-				"filename":     header.Filename,
-				"restartOk":    false,
-				"restartError": err.Error(),
-			})
-			return
-		}
-		llama.ResetWarmupState()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":        true,
-			"path":      s.llamaAuthPath,
-			"filename":  header.Filename,
-			"restartOk": true,
-		})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

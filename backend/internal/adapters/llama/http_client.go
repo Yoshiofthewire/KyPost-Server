@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -592,8 +591,4 @@ func buildWarmupPrompt(name, content string) string {
 		payload = "(empty)"
 	}
 	return fmt.Sprintf("Please acknowledge loading this %s context and reply with READY.\n\n%s", title, payload)
-}
-
-func _legacyPayloadForDebug(prompt string) []byte {
-	return []byte(fmt.Sprintf("{\"prompt\":%s}", strconv.Quote(prompt)))
 }
