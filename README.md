@@ -16,6 +16,62 @@ Runtime is a single container managed by `supervisord`, running:
 - Internal Ollama service (`ollama serve`)
 - One-shot model pull worker (`ollama pull gemma4:e4b`)
 
+## Container Details
+
+This project runs as one Docker Compose service:
+
+- Service name: `llama-lab`
+- Container name: `llama-lab`
+- Image source: built from local `Dockerfile`
+- Internal process supervisor: `supervisord`
+
+### In-Container Processes
+
+The container starts and supervises these long-running processes:
+
+- API server process: `llama-lab --mode server`
+- Poller process: `llama-lab --mode daemon`
+- Ollama server process: `ollama serve`
+
+Startup also runs a one-shot model pull task for the configured model.
+
+### Ports
+
+- `5866` exposed for web UI and backend API
+- `11434` mapped in Compose for Ollama API access (currently enabled in `docker-compose.yml`)
+
+### Persistent Data vs Ephemeral Data
+
+Named Docker volumes persist application data across container rebuild/recreate:
+
+- `llama_config` -> `/llama_lab/config`
+- `llama_private` -> `/llama_lab/private`
+- `llama_logs` -> `/llama_lab/logs`
+- `llama_state` -> `/llama_lab/state`
+
+Host bind mount persists Ollama model blobs:
+
+- `${OLLAMA_MODELS_HOST_DIR:-./share/ollama/models}` -> `/llama_lab/ollama-models`
+
+Important persistence notes:
+
+- `docker compose up --build` keeps named volumes by default
+- `docker compose down -v` deletes named volumes and stored app data
+- Notification VAPID key defaults to `/llama_lab/config/notifications-vapid-private.pem`
+- Notification subscriptions are persisted in `/llama_lab/state/state.json`
+
+### Quick Container Checks
+
+Use these commands to inspect runtime and data persistence:
+
+```bash
+docker compose ps
+docker compose logs -f llama-lab
+docker exec -it llama-lab ps aux
+docker exec -it llama-lab ls -la /llama_lab/config /llama_lab/state
+docker volume ls | grep llama
+```
+
 Classification flow:
 
 1. Fetch unread inbox messages from IMAP (`INBOX` by default).
