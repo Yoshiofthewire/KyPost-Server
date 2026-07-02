@@ -44,6 +44,17 @@ type IMAPForm = {
   smtpPort: number;
 };
 
+const LOG_LEVEL_OPTIONS = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
+const FALLBACK_TIMEZONE_OPTIONS = ["UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Europe/London", "Europe/Paris", "Asia/Tokyo", "Asia/Kolkata", "Australia/Sydney"];
+
+function getTimezoneOptions(): string[] {
+  const intlWithSupportedValues = Intl as typeof Intl & {
+    supportedValuesOf?: (key: "timeZone") => string[];
+  };
+  const supported = intlWithSupportedValues.supportedValuesOf?.("timeZone");
+  return Array.isArray(supported) && supported.length > 0 ? supported : FALLBACK_TIMEZONE_OPTIONS;
+}
+
 function normalizeKeywordMappings(input: unknown): Record<string, string[]> {
   if (!input || typeof input !== "object") return {};
   const source = input as Record<string, unknown>;
@@ -167,6 +178,21 @@ export function ConfigPage() {
     const cfgLabels = textToLabels(allowlistText);
     return uniqueLabels([...cfgLabels]);
   }, [allowlistText]);
+
+  const timezoneOptions = useMemo(() => {
+    const all = getTimezoneOptions();
+    if (!cfg.timezone || all.includes(cfg.timezone)) {
+      return all;
+    }
+    return [cfg.timezone, ...all];
+  }, [cfg.timezone]);
+
+  const logLevelOptions = useMemo(() => {
+    if (!cfg.logLevel || LOG_LEVEL_OPTIONS.includes(cfg.logLevel)) {
+      return LOG_LEVEL_OPTIONS;
+    }
+    return [cfg.logLevel, ...LOG_LEVEL_OPTIONS];
+  }, [cfg.logLevel]);
 
   async function refreshLabels() {
     const labelsData = await getJSON<LabelsResponse>("/api/labels");
@@ -364,11 +390,23 @@ export function ConfigPage() {
           <div className="config-grid config-grid-two">
             <label>
               <div>Timezone</div>
-              <input value={cfg.timezone} onChange={(event) => updateConfig("timezone", event.target.value)} />
+              <select value={cfg.timezone} onChange={(event) => updateConfig("timezone", event.target.value)}>
+                {timezoneOptions.map((timezone) => (
+                  <option key={timezone} value={timezone}>
+                    {timezone}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               <div>Log Level</div>
-              <input value={cfg.logLevel} onChange={(event) => updateConfig("logLevel", event.target.value)} />
+              <select value={cfg.logLevel} onChange={(event) => updateConfig("logLevel", event.target.value)}>
+                {logLevelOptions.map((level) => (
+                  <option key={level} value={level}>
+                    {level}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               <div>Scan Interval (seconds)</div>
