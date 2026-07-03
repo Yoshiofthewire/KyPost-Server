@@ -98,6 +98,10 @@ Common variables:
 - `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`)
 - `IMAP_CONFIG_FILE` (default `/llama_lab/private/imap-config.json`)
 - `IMAP_CONFIG_KEY_FILE` (default `/llama_lab/private/imap-config.key`)
+- `NOVU_SECRET_KEY` (required for mobile push pairing and Novu event trigger)
+- `NOVU_WORKFLOW_ID` (required Novu workflow identifier, for example `new-email-push-notification`)
+- `NOVU_APPLICATION_IDENTIFIER` (required public Novu app id encoded in desktop pairing QR)
+- `NOVU_API_BASE` (default `https://api.novu.co`; set EU endpoint only if your Novu project is in EU region)
 
 Notes:
 
@@ -110,6 +114,28 @@ Create model cache directory once before first run:
 ```bash
 mkdir -p share/ollama/models
 ```
+
+## Mobile App Pairing (Novu)
+
+If you use the mobile app pairing flow, each deployment/client must provide its own Novu credentials.
+
+- Do not reuse or share Novu keys across organizations/environments.
+- This repo does not ship default Novu secrets.
+- The backend keeps `NOVU_SECRET_KEY` server-side and never sends it to clients.
+
+Required Novu setup per client/deployment:
+
+1. Create your own Novu project.
+2. Create a workflow and set `NOVU_WORKFLOW_ID` to that workflow's identifier.
+3. Copy your Novu application identifier into `NOVU_APPLICATION_IDENTIFIER`.
+4. Set `NOVU_SECRET_KEY` from your Novu environment.
+5. Ensure your mobile app is configured for that same Novu project and its own Firebase/FCM project.
+
+Desktop pairing behavior:
+
+- Notifications page renders a QR link with `app`, `sub`, `hash`, and `api`.
+- Mobile app scans QR and registers directly with Novu.
+- Mobile app never calls this backend.
 
 ## Persistence
 
