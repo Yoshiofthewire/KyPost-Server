@@ -8,9 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	stdhtml "html"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,27 +48,6 @@ type DraftMessage struct {
 	Mode    string
 }
 
-var htmlTagPattern = regexp.MustCompile(`(?s)<[^>]*>`)
-
-func htmlToPlainText(htmlBody string) string {
-	trimmed := strings.TrimSpace(htmlBody)
-	if trimmed == "" {
-		return ""
-	}
-	noTags := htmlTagPattern.ReplaceAllString(trimmed, " ")
-	unescaped := stdhtml.UnescapeString(noTags)
-	lines := strings.Split(unescaped, "\n")
-	cleaned := make([]string, 0, len(lines))
-	for _, line := range lines {
-		normalized := strings.Join(strings.Fields(line), " ")
-		if normalized == "" {
-			continue
-		}
-		cleaned = append(cleaned, normalized)
-	}
-	return strings.TrimSpace(strings.Join(cleaned, "\n"))
-}
-
 type Client interface {
 	ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error)
 	ListUnreadMessages(ctx context.Context, mailbox string, limit int) ([]UnreadMessage, error)
@@ -84,79 +61,6 @@ type Client interface {
 	ApplyInboxAction(ctx context.Context, messageID, action, mailbox, targetMailbox string) error
 	SaveDraft(ctx context.Context, draft DraftMessage) error
 	SaveSent(ctx context.Context, draft DraftMessage) error
-}
-
-type StubClient struct{}
-
-func (s *StubClient) ListUnreadInbox(_ context.Context, _ string) ([]Message, string, error) {
-	return []Message{}, "", nil
-}
-
-func (s *StubClient) ListUnreadMessages(_ context.Context, _ string, _ int) ([]UnreadMessage, error) {
-	return []UnreadMessage{}, nil
-}
-
-func (s *StubClient) ListLabels(_ context.Context) ([]string, error) {
-	return []string{}, nil
-}
-
-func (s *StubClient) ListSubfolders(_ context.Context, _ string) ([]string, error) {
-	return []string{}, nil
-}
-
-func (s *StubClient) CreateFolder(_ context.Context, parent, name string) (string, error) {
-	parent = strings.TrimSpace(parent)
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", errors.New("folder name is required")
-	}
-	if parent == "" {
-		return name, nil
-	}
-	return parent + "/" + name, nil
-}
-
-func (s *StubClient) RenameFolder(_ context.Context, folder, name string) (string, error) {
-	folder = strings.TrimSpace(folder)
-	name = strings.TrimSpace(name)
-	if folder == "" {
-		return "", errors.New("folder is required")
-	}
-	if name == "" {
-		return "", errors.New("folder name is required")
-	}
-	parent := mailboxParent(folder)
-	if parent == "" {
-		return name, nil
-	}
-	return parent + "/" + name, nil
-}
-
-func (s *StubClient) DeleteFolder(_ context.Context, folder string) error {
-	if strings.TrimSpace(folder) == "" {
-		return errors.New("folder is required")
-	}
-	return nil
-}
-
-func (s *StubClient) EnsureLabel(_ context.Context, _ string) error {
-	return nil
-}
-
-func (s *StubClient) ApplyLabel(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
-func (s *StubClient) ApplyInboxAction(_ context.Context, _ string, _ string, _ string, _ string) error {
-	return nil
-}
-
-func (s *StubClient) SaveDraft(_ context.Context, _ DraftMessage) error {
-	return nil
-}
-
-func (s *StubClient) SaveSent(_ context.Context, _ DraftMessage) error {
-	return nil
 }
 
 type APIClient struct {
@@ -941,13 +845,9 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 	}
 
 	moveToFolder := func(folder string) error {
-		if err := d.MoveEmail(uid, folder); err == nil {
-			return nil
-		}
-		if err := d.CreateFolder(folder); err != nil {
-			return err
-		}
-		return d.MoveEmail(uid, folder)
+		return ensureFolderThenRun(d, folder, func(folder string) error {
+			return d.MoveEmail(uid, folder)
+		})
 	}
 
 	isTrashMailbox := func(name string) bool {
@@ -1033,7 +933,19 @@ func sanitizeDraftHeaderValue(value string) string {
 	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
 }
 
-func (c *APIClient) SaveDraft(ctx context.Context, draft DraftMessage) error {
+// ensureFolderThenRun runs try against folder, creating the folder and retrying
+// once if the first attempt fails (the folder commonly doesn't exist yet).
+func ensureFolderThenRun(d *goimap.Dialer, folder string, try func(folder string) error) error {
+	if err := try(folder); err == nil {
+		return nil
+	}
+	if err := d.CreateFolder(folder); err != nil {
+		return err
+	}
+	return try(folder)
+}
+
+func (c *APIClient) saveMessage(ctx context.Context, draft DraftMessage, targets []string, flags []string, failureVerb string) error {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
 
@@ -1071,94 +983,31 @@ func (c *APIClient) SaveDraft(ctx context.Context, draft DraftMessage) error {
 	message.WriteString("Content-Type: " + contentType + "\r\n")
 	message.WriteString("\r\n")
 	message.WriteString(draft.Body)
+	raw := []byte(message.String())
 
-	appendToFolder := func(folder string, flags []string) error {
-		if err := d.Append(folder, flags, time.Now(), []byte(message.String())); err == nil {
-			return nil
-		}
-		if err := d.CreateFolder(folder); err != nil {
-			return err
-		}
-		return d.Append(folder, flags, time.Now(), []byte(message.String()))
-	}
-
-	targets := []string{"Drafts", "INBOX/Drafts", "INBOX.Drafts"}
 	var lastErr error
 	for _, folder := range targets {
-		if err := appendToFolder(folder, []string{"\\Draft"}); err == nil {
+		err := ensureFolderThenRun(d, folder, func(folder string) error {
+			return d.Append(folder, flags, time.Now(), raw)
+		})
+		if err == nil {
 			return nil
-		} else {
-			lastErr = err
 		}
+		lastErr = err
 	}
 	if lastErr != nil {
-		return fmt.Errorf("failed to save draft: %w", lastErr)
+		return fmt.Errorf("failed to %s: %w", failureVerb, lastErr)
 	}
-	return errors.New("failed to save draft")
+	return fmt.Errorf("failed to %s", failureVerb)
+}
+
+func (c *APIClient) SaveDraft(ctx context.Context, draft DraftMessage) error {
+	return c.saveMessage(ctx, draft, []string{"Drafts", "INBOX/Drafts", "INBOX.Drafts"}, []string{"\\Draft"}, "save draft")
 }
 
 func (c *APIClient) SaveSent(ctx context.Context, draft DraftMessage) error {
-	c.opMu.Lock()
-	defer c.opMu.Unlock()
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if len(draft.To) == 0 {
-		return errors.New("at least one TO recipient is required")
-	}
-
-	d, err := c.ensureConnectedLocked()
-	if err != nil {
-		return err
-	}
-
-	subject := sanitizeDraftHeaderValue(draft.Subject)
-	from := sanitizeDraftHeaderValue(c.username)
-	mode := strings.ToLower(strings.TrimSpace(draft.Mode))
-	contentType := "text/plain; charset=UTF-8"
-	if mode == "html" {
-		contentType = "text/html; charset=UTF-8"
-	}
-
-	message := strings.Builder{}
-	message.WriteString("From: " + from + "\r\n")
-	message.WriteString("To: " + strings.Join(draft.To, ", ") + "\r\n")
-	if len(draft.CC) > 0 {
-		message.WriteString("Cc: " + strings.Join(draft.CC, ", ") + "\r\n")
-	}
-	if len(draft.BCC) > 0 {
-		message.WriteString("Bcc: " + strings.Join(draft.BCC, ", ") + "\r\n")
-	}
-	message.WriteString("Subject: " + subject + "\r\n")
-	message.WriteString("MIME-Version: 1.0\r\n")
-	message.WriteString("Content-Type: " + contentType + "\r\n")
-	message.WriteString("\r\n")
-	message.WriteString(draft.Body)
-
-	appendToFolder := func(folder string, flags []string) error {
-		if err := d.Append(folder, flags, time.Now(), []byte(message.String())); err == nil {
-			return nil
-		}
-		if err := d.CreateFolder(folder); err != nil {
-			return err
-		}
-		return d.Append(folder, flags, time.Now(), []byte(message.String()))
-	}
-
 	targets := []string{"Sent", "INBOX/Sent", "INBOX.Sent", "Sent Items", "INBOX/Sent Items", "INBOX.Sent Items"}
-	var lastErr error
-	for _, folder := range targets {
-		if err := appendToFolder(folder, []string{"\\Seen"}); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-	}
-	if lastErr != nil {
-		return fmt.Errorf("failed to save sent mail: %w", lastErr)
-	}
-	return errors.New("failed to save sent mail")
+	return c.saveMessage(ctx, draft, targets, []string{"\\Seen"}, "save sent mail")
 }
 
 func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {

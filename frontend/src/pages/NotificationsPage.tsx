@@ -1,18 +1,6 @@
 import { useEffect, useState } from "react";
-import { deleteJSON, getJSON, postJSON, putJSON } from "../api/client";
-
-type AppConfig = {
-  timezone: string;
-  logLevel: string;
-  scan: { intervalSeconds: number };
-  rateLimits: { perMinute: number; perHour: number };
-  labels: { allowlist: string[]; keywordMappings: Record<string, string[]> };
-  llama: { baseUrl: string; apiKey: string; classifyPath: string };
-  notifications: {
-    mode: "all" | "keywords" | "none";
-    keywords: string[];
-  };
-};
+import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+import { normalizeConfig, uniqueLabels, type AppConfig } from "../api/config";
 
 type LabelsResponse = {
   configured: string[];
@@ -32,44 +20,12 @@ type NotificationTestResponse = {
   activeSubscriptions?: number;
 };
 
-function uniqueLabels(labels: string[]): string[] {
-  return Array.from(new Set(labels.map((label) => label.trim()).filter(Boolean)));
-}
-
 function collectNotificationKeywordOptions(cfg: AppConfig, labelsData: LabelsResponse): string[] {
   const configured = cfg.labels.allowlist ?? [];
   const mapped = Object.values(cfg.labels.keywordMappings ?? {}).flat();
   const imap = labelsData.imap ?? [];
   const selected = cfg.notifications.keywords ?? [];
   return uniqueLabels([...configured, ...mapped, ...imap, ...selected]);
-}
-
-function normalizeConfig(input: unknown): AppConfig {
-  const source = (input ?? {}) as Record<string, any>;
-  const notifications = source.notifications ?? {};
-
-  return {
-    timezone: source.timezone ?? "UTC",
-    logLevel: source.logLevel ?? "info",
-    scan: { intervalSeconds: source.scan?.intervalSeconds ?? 90 },
-    rateLimits: {
-      perMinute: source.rateLimits?.perMinute ?? 10,
-      perHour: source.rateLimits?.perHour ?? 20
-    },
-    labels: {
-      allowlist: source.labels?.allowlist ?? [],
-      keywordMappings: source.labels?.keywordMappings ?? {}
-    },
-    llama: {
-      baseUrl: source.llama?.baseUrl ?? "",
-      apiKey: source.llama?.apiKey ?? "",
-      classifyPath: source.llama?.classifyPath ?? "/"
-    },
-    notifications: {
-      mode: notifications.mode ?? "none",
-      keywords: Array.isArray(notifications.keywords) ? notifications.keywords.map(String) : []
-    }
-  };
 }
 
 export function NotificationsPage() {
@@ -184,7 +140,7 @@ export function NotificationsPage() {
       });
       setStatus(`Test sent: ${result.sent}/${result.subscriptions} device(s) delivered.`);
     } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : "unknown error";
+      const detail = toErrorMessage(error, "unknown error");
       setStatus(`Failed to send test notification: ${detail}`);
     } finally {
       setTestBusy(false);
@@ -212,7 +168,7 @@ export function NotificationsPage() {
       await subscription.unsubscribe();
       setStatus("Unsubscribed this device from push notifications.");
     } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : "unknown error";
+      const detail = toErrorMessage(error, "unknown error");
       setStatus(`Failed to unsubscribe this device: ${detail}`);
     } finally {
       setUnsubscribeBusy(false);

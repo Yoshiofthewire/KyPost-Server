@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { getJSON, postJSON } from "../api/client";
+import { getJSON, postJSON, toErrorMessage } from "../api/client";
 
 type InboxEmail = {
   messageId: string;
@@ -234,6 +234,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [byTab, setByTab] = useState<Record<string, InboxEmail[]>>({});
   const [activeTab, setActiveTab] = useState<string>("");
   const [selected, setSelected] = useState<InboxEmail | null>(null);
+  const emailReaderDialogRef = useRef<HTMLDialogElement | null>(null);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [showImages, setShowImages] = useState(false);
   const [showRawEmail, setShowRawEmail] = useState(false);
@@ -352,7 +353,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         return current.filter((id) => nextIDSet.has(id));
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to load inbox";
+      const message = toErrorMessage(e, "failed to load inbox");
       setError(message);
       setTabs([]);
       setByTab({});
@@ -370,6 +371,16 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     const timer = setInterval(loadInbox, 15_000);
     return () => clearInterval(timer);
   }, [mailbox]);
+
+  useEffect(() => {
+    const dialog = emailReaderDialogRef.current;
+    if (!dialog) return;
+    if (selected && !dialog.open) {
+      dialog.showModal();
+    } else if (!selected && dialog.open) {
+      dialog.close();
+    }
+  }, [selected]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -555,7 +566,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       }
       return true;
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to apply inbox action";
+      const message = toErrorMessage(e, "failed to apply inbox action");
       setActionError(message);
       return false;
     } finally {
@@ -795,14 +806,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
 
   function printEmails(items: InboxEmail[]) {
     if (items.length === 0 || typeof window === "undefined") return;
-    const escapeHtml = (value: string) =>
-      value
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
-
     const sections = items
       .map((item) => {
         const body = item.body || "No message body available.";
@@ -1093,13 +1096,20 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         </button>
       </div>
 
-      {selected ? (
-        <div
-          className="email-reader-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setSelected(null)}
-        >
+      <dialog
+        ref={emailReaderDialogRef}
+        className="email-reader-backdrop"
+        onCancel={(event) => {
+          event.preventDefault();
+          setSelected(null);
+        }}
+        onClick={(event) => {
+          if (event.target === emailReaderDialogRef.current) {
+            setSelected(null);
+          }
+        }}
+      >
+        {selected ? (
           <div
             className="email-reader-window"
             onClick={(e) => e.stopPropagation()}
@@ -1211,8 +1221,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </dialog>
     </section>
   );
 }

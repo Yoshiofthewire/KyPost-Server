@@ -32,8 +32,6 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 | `ConfigPage.tsx` | `GET/POST /api/imap/config` (also carries SMTP host/port for sending), `POST /api/imap/test` |
 | `NotificationsPage.tsx` | `GET /api/config`, `GET /api/labels`, `PUT /api/config`, `GET /api/notifications/vapid-public-key`, `POST /api/notifications/subscriptions`, `POST /api/notifications/test` (push notification mode, all-email toggle, IMAP keyword selection, device subscription, and test push broadcast to all user devices) |
 | `TuningPage.tsx` | `GET/PUT /api/tuning` |
-| `LabelsPage.tsx` | `GET /api/labels` |
-| `DecisionsPage.tsx` | `GET /api/decisions?limit=10` |
 | `LogsPage.tsx` | `GET /api/logs?file=<name>.log&lines=<n>`, `GET /api/logs/list` |
 
 ### App Shell → API Mapping

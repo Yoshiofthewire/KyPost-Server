@@ -74,30 +74,38 @@ func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, he
 func (s *Server) Run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("/api/health/repair", s.withAuth(s.handleRepair))
-	mux.HandleFunc("/api/auth/login", s.handleLogin)
-	mux.HandleFunc("/api/auth/me", s.handleMe)
-	mux.HandleFunc("/api/auth/logout", s.withAuth(s.handleLogout))
-	mux.HandleFunc("/api/auth/password", s.withAuth(s.handleChangePassword))
+	mux.HandleFunc("POST /api/health/repair", s.withAuth(s.handleRepair))
+	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	mux.HandleFunc("GET /api/auth/me", s.handleMe)
+	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.handleLogout))
+	mux.HandleFunc("POST /api/auth/password", s.withAuth(s.handleChangePassword))
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
-	mux.HandleFunc("/api/config", s.withAuth(s.handleConfig))
-	mux.HandleFunc("/api/labels", s.withAuth(s.handleLabels))
-	mux.HandleFunc("/api/decisions", s.withAuth(s.handleDecisions))
-	mux.HandleFunc("/api/inbox", s.withAuth(s.handleInbox))
-	mux.HandleFunc("/api/inbox/folders", s.withAuth(s.handleInboxFolders))
-	mux.HandleFunc("/api/inbox/actions", s.withAuth(s.handleInboxActions))
-	mux.HandleFunc("/api/logs", s.withAuth(s.handleLogs))
-	mux.HandleFunc("/api/logs/list", s.withAuth(s.handleLogsList))
-	mux.HandleFunc("/api/imap/config", s.withAuth(s.handleIMAPConfig))
-	mux.HandleFunc("/api/imap/test", s.withAuth(s.handleIMAPTest))
-	mux.HandleFunc("/api/mail/draft", s.withAuth(s.handleMailDraft))
-	mux.HandleFunc("/api/mail/send", s.withAuth(s.handleMailSend))
-	mux.HandleFunc("/api/llama/test", s.withAuth(s.handleLlamaTest))
-	mux.HandleFunc("/api/tuning", s.withAuth(s.handleTuning))
-	mux.HandleFunc("/api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
-	mux.HandleFunc("/api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
-	mux.HandleFunc("/api/notifications/test", s.withAuth(s.handleNotificationTest))
-	mux.HandleFunc("/api/setup", s.handleSetup)
+	mux.HandleFunc("GET /api/config", s.withAuth(s.handleConfig))
+	mux.HandleFunc("PUT /api/config", s.withAuth(s.handleConfig))
+	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
+	mux.HandleFunc("GET /api/decisions", s.withAuth(s.handleDecisions))
+	mux.HandleFunc("GET /api/inbox", s.withAuth(s.handleInbox))
+	mux.HandleFunc("GET /api/inbox/folders", s.withAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/folders", s.withAuth(s.handleInboxFolders))
+	mux.HandleFunc("PUT /api/inbox/folders", s.withAuth(s.handleInboxFolders))
+	mux.HandleFunc("DELETE /api/inbox/folders", s.withAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/actions", s.withAuth(s.handleInboxActions))
+	mux.HandleFunc("GET /api/logs", s.withAuth(s.handleLogs))
+	mux.HandleFunc("GET /api/logs/list", s.withAuth(s.handleLogsList))
+	mux.HandleFunc("GET /api/imap/config", s.withAuth(s.handleIMAPConfig))
+	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
+	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))
+	mux.HandleFunc("POST /api/imap/test", s.withAuth(s.handleIMAPTest))
+	mux.HandleFunc("POST /api/mail/draft", s.withAuth(s.handleMailDraft))
+	mux.HandleFunc("POST /api/mail/send", s.withAuth(s.handleMailSend))
+	mux.HandleFunc("POST /api/llama/test", s.withAuth(s.handleLlamaTest))
+	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
+	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
+	mux.HandleFunc("GET /api/setup", s.handleSetup)
 	mux.HandleFunc("/", s.handleFrontend)
 
 	port := envInt("WEB_PORT", 5866)
@@ -227,17 +235,10 @@ func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "configured": false})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var req imapConfigPayload
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
 
@@ -306,6 +307,57 @@ func parseRecipientList(raw string) ([]string, error) {
 		out = append(out, clean)
 	}
 	return out, nil
+}
+
+type mailRequest struct {
+	Subject string
+	Body    string
+	Mode    string
+	To      []string
+	CC      []string
+	BCC     []string
+}
+
+// decodeMailRequest decodes and validates the shared to/cc/bcc/subject/body/mode
+// JSON body used by both the send and draft-save endpoints. On error it returns
+// the client-facing error message alongside the error.
+func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
+	var raw struct {
+		To      string `json:"to"`
+		CC      string `json:"cc"`
+		BCC     string `json:"bcc"`
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+		Mode    string `json:"mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&raw); err != nil {
+		return mailRequest{}, "invalid request", err
+	}
+
+	toList, err := parseRecipientList(raw.To)
+	if err != nil || len(toList) == 0 {
+		if err == nil {
+			err = errors.New("missing to recipient")
+		}
+		return mailRequest{}, "valid TO recipient is required", err
+	}
+	ccList, err := parseRecipientList(raw.CC)
+	if err != nil {
+		return mailRequest{}, "invalid CC recipients", err
+	}
+	bccList, err := parseRecipientList(raw.BCC)
+	if err != nil {
+		return mailRequest{}, "invalid BCC recipients", err
+	}
+
+	return mailRequest{
+		Subject: raw.Subject,
+		Body:    raw.Body,
+		Mode:    raw.Mode,
+		To:      toList,
+		CC:      ccList,
+		BCC:     bccList,
+	}, "", nil
 }
 
 func sanitizeHeaderValue(value string) string {
@@ -393,39 +445,12 @@ func smtpSendWithImplicitTLS(host string, port int, username, password, from str
 }
 
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		To      string `json:"to"`
-		CC      string `json:"cc"`
-		BCC     string `json:"bcc"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-		Mode    string `json:"mode"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	toList, err := parseRecipientList(req.To)
-	if err != nil || len(toList) == 0 {
-		http.Error(w, "valid TO recipient is required", http.StatusBadRequest)
-		return
-	}
-	ccList, err := parseRecipientList(req.CC)
+	req, errMsg, err := decodeMailRequest(r)
 	if err != nil {
-		http.Error(w, "invalid CC recipients", http.StatusBadRequest)
+		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
-	bccList, err := parseRecipientList(req.BCC)
-	if err != nil {
-		http.Error(w, "invalid BCC recipients", http.StatusBadRequest)
-		return
-	}
+	toList, ccList, bccList := req.To, req.CC, req.BCC
 
 	payload, exists, err := readIMAPConfigPayload(s.imapConfigPath, s.imapConfigKeyPath)
 	if err != nil {
@@ -525,48 +550,21 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMailDraft(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.mail == nil {
 		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
 		return
 	}
 
-	var req struct {
-		To      string `json:"to"`
-		CC      string `json:"cc"`
-		BCC     string `json:"bcc"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-		Mode    string `json:"mode"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	toList, err := parseRecipientList(req.To)
-	if err != nil || len(toList) == 0 {
-		http.Error(w, "valid TO recipient is required", http.StatusBadRequest)
-		return
-	}
-	ccList, err := parseRecipientList(req.CC)
+	req, errMsg, err := decodeMailRequest(r)
 	if err != nil {
-		http.Error(w, "invalid CC recipients", http.StatusBadRequest)
-		return
-	}
-	bccList, err := parseRecipientList(req.BCC)
-	if err != nil {
-		http.Error(w, "invalid BCC recipients", http.StatusBadRequest)
+		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
 
 	if err := s.mail.SaveDraft(r.Context(), imapadapter.DraftMessage{
-		To:      toList,
-		CC:      ccList,
-		BCC:     bccList,
+		To:      req.To,
+		CC:      req.CC,
+		BCC:     req.BCC,
 		Subject: req.Subject,
 		Body:    req.Body,
 		Mode:    req.Mode,
@@ -596,21 +594,7 @@ func readIMAPConfigPayload(path, keyPath string) (imapConfigPayload, bool, error
 	if err := json.Unmarshal(plain, &payload); err != nil {
 		return imapConfigPayload{}, false, err
 	}
-	payload.Host = strings.TrimSpace(payload.Host)
-	payload.Username = strings.TrimSpace(payload.Username)
-	payload.Password = strings.TrimSpace(payload.Password)
-	payload.Mailbox = strings.TrimSpace(payload.Mailbox)
-	payload.SMTPHost = strings.TrimSpace(payload.SMTPHost)
-	if payload.Port <= 0 {
-		payload.Port = 993
-	}
-	if payload.Mailbox == "" {
-		payload.Mailbox = "INBOX"
-	}
-	if payload.SMTPHost != "" && payload.SMTPPort <= 0 {
-		payload.SMTPPort = 587
-	}
-	return payload, true, nil
+	return normalizeIMAPPayload(payload), true, nil
 }
 
 func writeIMAPConfigPayload(path, keyPath string, payload imapConfigPayload) error {
@@ -754,8 +738,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Info("config updated via api")
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -779,10 +761,6 @@ type notificationTestPayload struct {
 }
 
 func (s *Server) handleNotificationVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	s.mu.RLock()
 	publicKey := strings.TrimSpace(s.cfg.Notifications.PublicKey)
 	s.mu.RUnlock()
@@ -842,17 +820,10 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 		}
 		count := len(s.store.ListNotificationSubscriptions())
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "subscriptions": count})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var payload notificationTestPayload
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload)
 	title := strings.TrimSpace(payload.Title)
@@ -963,10 +934,6 @@ func encodeVAPIDPrivateKey(key *ecdsa.PrivateKey) string {
 }
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 1000 {
@@ -1092,11 +1059,6 @@ func collectAllowedKeywords(cfg config.Config) []string {
 }
 
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	limit := 500
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 5000 {
@@ -1285,16 +1247,10 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 			"folder": folder,
 			"parent": mailboxParentPath(folder),
 		})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.mail == nil {
 		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
 		return
@@ -1367,10 +1323,6 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	s.mu.RLock()
 	configured := append([]string{}, s.cfg.Labels.Allowlist...)
 	s.mu.RUnlock()
@@ -1429,16 +1381,10 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 			llama.ResetWarmupState()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": s.tuningPath, "restartOk": restartOk, "restartError": restartError})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	lines := 200
 	if raw := r.URL.Query().Get("lines"); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 5000 {
@@ -1466,10 +1412,6 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	logDir := envOrDefault("LOG_DIR", "/llama_lab/logs")
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
@@ -1486,11 +1428,7 @@ func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	b, err := os.ReadFile(s.adminPath)
+	admin, err := readAdminEnv(s.adminPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeJSON(w, http.StatusOK, map[string]any{"configured": false})
@@ -1499,32 +1437,16 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read setup state", http.StatusInternalServerError)
 		return
 	}
-	resp := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		resp[strings.ToLower(parts[0])] = parts[1]
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "setup": map[string]any{"admin_user": resp["admin_user"], "must_change_password": strings.EqualFold(resp["must_change_password"], "true")}})
+	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "setup": map[string]any{"admin_user": admin["ADMIN_USER"], "must_change_password": strings.EqualFold(admin["MUST_CHANGE_PASSWORD"], "true")}})
 }
 
 func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	s.logger.Error("manual repair requested")
 	scheduleContainerRestart(s.logger, "manual repair", 250*time.Millisecond)
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "message": "restart requested"})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -1555,10 +1477,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	c, err := r.Cookie("llama_session")
 	if err == nil {
 		s.mu.Lock()
@@ -1570,10 +1488,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if !s.authorize(r) {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
@@ -1591,10 +1505,6 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	var req struct {
 		Username    string `json:"username"`
 		OldPassword string `json:"oldPassword"`
@@ -1638,11 +1548,6 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLlamaTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
@@ -1849,54 +1754,6 @@ func restartProcess(ctx context.Context, processName string, onSuccess func()) e
 
 func restartLlamaProcess(ctx context.Context) error {
 	return restartProcess(ctx, "llama", func() { llama.ResetWarmupState() })
-}
-
-func restartDaemonProcess(ctx context.Context) error {
-	return restartProcess(ctx, "daemon", nil)
-}
-
-// signalDaemonProcessRestart finds the running `llama-lab --mode daemon` process
-// and sends it SIGTERM. The daemon program is configured with autorestart=true
-// in supervisord, so supervisord respawns it with the freshly written tokens.
-// This is used as a fallback when supervisorctl is unavailable, avoiding a full
-// container shutdown.
-func signalDaemonProcessRestart() error {
-	self := os.Getpid()
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return fmt.Errorf("read /proc: %w", err)
-	}
-
-	signaled := 0
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid == self || pid == 1 {
-			continue
-		}
-		raw, err := os.ReadFile("/proc/" + entry.Name() + "/cmdline")
-		if err != nil {
-			continue
-		}
-		// /proc/<pid>/cmdline is NUL-separated.
-		cmdline := strings.ReplaceAll(string(raw), "\x00", " ")
-		if !strings.Contains(cmdline, "llama-lab") {
-			continue
-		}
-		if !strings.Contains(cmdline, "--mode") || !strings.Contains(cmdline, "daemon") {
-			continue
-		}
-		if err := syscall.Kill(pid, syscall.SIGTERM); err == nil {
-			signaled++
-		}
-	}
-
-	if signaled == 0 {
-		return errors.New("daemon process not found")
-	}
-	return nil
 }
 
 func tailLines(path string, limit int) ([]string, error) {

@@ -2,13 +2,11 @@ import { type DragEvent, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
-import { deleteJSON, getJSON, postJSON, putJSON } from "./api/client";
+import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
 import { ConfigPage } from "./pages/ConfigPage";
-import { DecisionsPage } from "./pages/DecisionsPage";
 import { HealthPage } from "./pages/HealthPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
-import { LabelsPage } from "./pages/LabelsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { ReadPage } from "./pages/ReadPage";
 import { TuningPage } from "./pages/TuningPage";
@@ -117,6 +115,7 @@ export function App() {
   const [composeSuccess, setComposeSuccess] = useState("");
   const quillEditorRef = useRef<HTMLDivElement | null>(null);
   const quillInstanceRef = useRef<Quill | null>(null);
+  const composeDialogRef = useRef<HTMLDialogElement | null>(null);
   const currentMailbox = new URLSearchParams(location.search).get("mailbox")?.trim() ?? "";
   const onReadPage = location.pathname === "/read";
 
@@ -217,7 +216,7 @@ export function App() {
       setInboxCreateOpen(false);
       await loadMailboxFolders();
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to create folder";
+      const message = toErrorMessage(e, "failed to create folder");
       setCreateFolderError(message);
     } finally {
       setCreateFolderLoading(false);
@@ -259,7 +258,7 @@ export function App() {
       }
       await loadMailboxFolders();
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to delete folder";
+      const message = toErrorMessage(e, "failed to delete folder");
       setDeleteFolderError(message);
     } finally {
       setDeleteFolderLoading("");
@@ -291,7 +290,7 @@ export function App() {
       }
       await loadMailboxFolders();
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to rename folder";
+      const message = toErrorMessage(e, "failed to rename folder");
       setDeleteFolderError(message);
     } finally {
       setRenameFolderLoading("");
@@ -339,7 +338,7 @@ export function App() {
         }));
       }
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to move email";
+      const message = toErrorMessage(e, "failed to move email");
       setDeleteFolderError(message);
     }
   }
@@ -386,6 +385,16 @@ export function App() {
       editor.root.innerHTML = composeHtmlBody;
     }
   }, [composeOpen, composeHtmlBody]);
+
+  useEffect(() => {
+    const dialog = composeDialogRef.current;
+    if (!dialog) return;
+    if (composeOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!composeOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [composeOpen]);
 
   function resetComposeForm() {
     setComposeTo("");
@@ -467,7 +476,7 @@ export function App() {
       setComposeOpen(false);
       resetComposeForm();
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to send email";
+      const message = toErrorMessage(e, "failed to send email");
       setComposeError(message);
     } finally {
       setComposeSending(false);
@@ -495,7 +504,7 @@ export function App() {
       });
       setComposeSuccess("Draft saved.");
     } catch (e) {
-      const message = e instanceof Error ? e.message : "failed to save draft";
+      const message = toErrorMessage(e, "failed to save draft");
       setComposeError(message);
     } finally {
       setComposeSavingDraft(false);
@@ -749,18 +758,25 @@ export function App() {
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/notifications" element={protect(<NotificationsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
-          <Route path="/labels" element={protect(<LabelsPage />)} />
-          <Route path="/decisions" element={protect(<DecisionsPage />)} />
           <Route path="/logs" element={protect(<LogsPage />)} />
         </Routes>
       </main>
-      {composeOpen ? (
-        <div
-          className="compose-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={composeSending ? undefined : closeComposeWindow}
-        >
+      <dialog
+        ref={composeDialogRef}
+        className="compose-backdrop"
+        onCancel={(event) => {
+          if (composeSending) {
+            event.preventDefault();
+            return;
+          }
+          closeComposeWindow();
+        }}
+        onClick={(event) => {
+          if (event.target === composeDialogRef.current && !composeSending) {
+            closeComposeWindow();
+          }
+        }}
+      >
           <section
             className={`compose-window${composeSending ? " compose-window-sending" : ""}`}
             onClick={(event) => event.stopPropagation()}
@@ -806,8 +822,7 @@ export function App() {
               }}
             />
           </section>
-        </div>
-      ) : null}
+      </dialog>
     </div>
   );
 }

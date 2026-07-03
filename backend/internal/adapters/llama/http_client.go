@@ -464,26 +464,6 @@ func labelSearchScope(s string) string {
 	return strings.Join(lines[len(lines)-40:], "\n")
 }
 
-func LoadGuardrailText() string {
-	paths := []string{}
-	if envPath := strings.TrimSpace(os.Getenv("GARDRAIL_FILE")); envPath != "" {
-		paths = append(paths, envPath)
-	}
-	paths = append(paths, "GARDRAIL.md", "/opt/llama-lab/GARDRAIL.md")
-
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		text := strings.TrimSpace(string(b))
-		if text != "" {
-			return text
-		}
-	}
-	return ""
-}
-
 func LoadTuningText() string {
 	paths := []string{}
 	if envPath := strings.TrimSpace(os.Getenv("TUNING_FILE")); envPath != "" {
@@ -504,8 +484,8 @@ func LoadTuningText() string {
 	return ""
 }
 
-func appendLlamaOutputLog(result string) {
-	trimmed := strings.TrimSpace(result)
+func appendLlamaLog(file, prefix, message string) {
+	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
 		return
 	}
@@ -513,7 +493,7 @@ func appendLlamaOutputLog(result string) {
 	if logDir == "" {
 		logDir = "/llama_lab/logs"
 	}
-	path := filepath.Join(logDir, "llama.log")
+	path := filepath.Join(logDir, file)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
@@ -526,69 +506,22 @@ func appendLlamaOutputLog(result string) {
 		if line == "" {
 			continue
 		}
-		_, _ = fmt.Fprintf(f, "[%s] [OLLAMA OUTPUT] %s\n", ts, line)
+		if prefix != "" {
+			_, _ = fmt.Fprintf(f, "[%s] %s %s\n", ts, prefix, line)
+		} else {
+			_, _ = fmt.Fprintf(f, "[%s] %s\n", ts, line)
+		}
 	}
+}
+
+func appendLlamaOutputLog(result string) {
+	appendLlamaLog("llama.log", "[OLLAMA OUTPUT]", result)
 }
 
 func appendLlamaServerLog(message string) {
-	trimmed := strings.TrimSpace(message)
-	if trimmed == "" {
-		return
-	}
-	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
-	if logDir == "" {
-		logDir = "/llama_lab/logs"
-	}
-	path := filepath.Join(logDir, "llama-server.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		_, _ = fmt.Fprintf(f, "[%s] %s\n", ts, line)
-	}
+	appendLlamaLog("llama-server.log", "", message)
 }
 
 func appendLlamaErrorLog(message string) {
-	trimmed := strings.TrimSpace(message)
-	if trimmed == "" {
-		return
-	}
-	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
-	if logDir == "" {
-		logDir = "/llama_lab/logs"
-	}
-	path := filepath.Join(logDir, "llama.err.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		_, _ = fmt.Fprintf(f, "[%s] [LLAMA ERROR] %s\n", ts, line)
-	}
-}
-
-func buildWarmupPrompt(name, content string) string {
-	title := strings.ToUpper(strings.TrimSpace(name))
-	if title == "" {
-		title = "DOCUMENT"
-	}
-	payload := strings.TrimSpace(content)
-	if payload == "" {
-		payload = "(empty)"
-	}
-	return fmt.Sprintf("Please acknowledge loading this %s context and reply with READY.\n\n%s", title, payload)
+	appendLlamaLog("llama.err.log", "[LLAMA ERROR]", message)
 }

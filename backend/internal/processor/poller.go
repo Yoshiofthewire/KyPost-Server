@@ -27,8 +27,6 @@ import (
 	"github.com/SherClockHolmes/webpush-go"
 )
 
-const notificationTTL = 1 * time.Hour
-
 type Poller struct {
 	cfg       config.Config
 	cfgMu     sync.RWMutex
@@ -187,11 +185,11 @@ func (p *Poller) tick() {
 
 	p.log.Info(
 		"poll tick summary",
-		"fetched", intToString(len(messages)),
-		"processed", intToString(processedCount),
-		"skipped_seen", intToString(skippedSeenCount),
-		"failed", intToString(failedCount),
-		"deferred_rate_limited", intToString(rateLimitedCount),
+		"fetched", strconv.Itoa(len(messages)),
+		"processed", strconv.Itoa(processedCount),
+		"skipped_seen", strconv.Itoa(skippedSeenCount),
+		"failed", strconv.Itoa(failedCount),
+		"deferred_rate_limited", strconv.Itoa(rateLimitedCount),
 	)
 	p.log.Info("poll tick completed")
 	p.health.MarkHealthy()
@@ -274,7 +272,7 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 	p.log.Info("classification result", "message_id", msg.ID, "raw_label", strings.TrimSpace(label), "sender", msg.Sender, "subject", msg.Subject)
 	selected := llama.SelectLabelFromText(cfg.Labels.Allowlist, label)
 	if selected == "" {
-		p.log.Info("classification skipped", "message_id", msg.ID, "reason", "no known label returned", "raw_label", strings.TrimSpace(label), "allowlist_count", intToString(len(cfg.Labels.Allowlist)))
+		p.log.Info("classification skipped", "message_id", msg.ID, "reason", "no known label returned", "raw_label", strings.TrimSpace(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
 		_ = p.store.AddDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
@@ -416,10 +414,10 @@ func (p *Poller) maybeSendPushNotification(msg imapadapter.Message, selectedLabe
 	p.log.Info(
 		"new-email push notification attempt",
 		"message_id", msg.ID,
-		"subscriptions", intToString(len(subs)),
-		"sent", intToString(sent),
-		"failed", intToString(failed),
-		"removed_stale", intToString(removed),
+		"subscriptions", strconv.Itoa(len(subs)),
+		"sent", strconv.Itoa(sent),
+		"failed", strconv.Itoa(failed),
+		"removed_stale", strconv.Itoa(removed),
 	)
 }
 
@@ -664,8 +662,4 @@ func (p *Poller) allowByRate() bool {
 	}
 	p.processed = append(p.processed, now)
 	return true
-}
-
-func intToString(v int) string {
-	return strconv.Itoa(v)
 }

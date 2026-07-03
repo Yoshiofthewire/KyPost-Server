@@ -1,19 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { deleteJSON, getJSON, postJSON, putJSON } from "../api/client";
+import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+import { normalizeConfig, uniqueLabels, type AppConfig } from "../api/config";
 import { applyTheme, getStoredTheme, THEME_OPTIONS, type ThemeName } from "../theme";
-
-type AppConfig = {
-  timezone: string;
-  logLevel: string;
-  scan: { intervalSeconds: number };
-  rateLimits: { perMinute: number; perHour: number };
-  labels: { allowlist: string[]; keywordMappings: Record<string, string[]> };
-  llama: { baseUrl: string; apiKey: string; classifyPath: string };
-  notifications: {
-    mode: "all" | "keywords" | "none";
-    keywords: string[];
-  };
-};
 
 type LabelsResponse = {
   configured: string[];
@@ -53,62 +41,6 @@ function getTimezoneOptions(): string[] {
   };
   const supported = intlWithSupportedValues.supportedValuesOf?.("timeZone");
   return Array.isArray(supported) && supported.length > 0 ? supported : FALLBACK_TIMEZONE_OPTIONS;
-}
-
-function normalizeKeywordMappings(input: unknown): Record<string, string[]> {
-  if (!input || typeof input !== "object") return {};
-  const source = input as Record<string, unknown>;
-  const out: Record<string, string[]> = {};
-  
-  for (const [label, rawValues] of Object.entries(source)) {
-    const cleanLabel = String(label).trim();
-    if (!cleanLabel) continue;
-    
-    const values = Array.isArray(rawValues)
-      ? uniqueLabels(rawValues.map(String))
-      : typeof rawValues === "string"
-        ? uniqueLabels(rawValues.split(","))
-        : [];
-    
-    if (values.length > 0) out[cleanLabel] = values;
-  }
-  return out;
-}
-
-function normalizeConfig(input: unknown): AppConfig {
-  const source = (input ?? {}) as Record<string, any>;
-  const labels = source.labels ?? {};
-  const llama = source.llama ?? {};
-  const scan = source.scan ?? {};
-  const rateLimits = source.rateLimits ?? {};
-  const rawMappings = labels.keywordMappings;
-
-  return {
-    timezone: source.timezone ?? "UTC",
-    logLevel: source.logLevel ?? "info",
-    scan: { intervalSeconds: scan.intervalSeconds ?? 90 },
-    rateLimits: {
-      perMinute: rateLimits.perMinute ?? 10,
-      perHour: rateLimits.perHour ?? 20
-    },
-    labels: {
-      allowlist: labels.allowlist ?? [],
-      keywordMappings: normalizeKeywordMappings(rawMappings)
-    },
-    llama: {
-      baseUrl: llama.baseUrl ?? "",
-      apiKey: llama.apiKey ?? "",
-      classifyPath: llama.classifyPath ?? "/"
-    },
-    notifications: {
-      mode: source.notifications?.mode ?? "none",
-      keywords: Array.isArray(source.notifications?.keywords) ? source.notifications.keywords.map(String) : []
-    }
-  };
-}
-
-function uniqueLabels(labels: string[]): string[] {
-  return Array.from(new Set(labels.map((label) => label.trim()).filter(Boolean)));
 }
 
 function labelsToText(labels: string[]): string {
@@ -154,7 +86,7 @@ export function ConfigPage() {
   const [keywordMappingText, setKeywordMappingText] = useState("");
   const [labelsFromImap, setLabelsFromImap] = useState<string[]>([]);
   const [configStatus, setConfigStatus] = useState("");
-  const [selectedTheme, setSelectedTheme] = useState<ThemeName>("Current");
+  const [selectedTheme, setSelectedTheme] = useState<ThemeName>(getStoredTheme());
 
   const [imapStatus, setImapStatus] = useState<IMAPConfigStatus | null>(null);
   const [imapForm, setImapForm] = useState<IMAPForm>({
@@ -300,7 +232,7 @@ export function ConfigPage() {
       setImapMessage("IMAP configuration saved.");
       await refreshLabels();
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "unknown error";
+      const message = toErrorMessage(error, "unknown error");
       setImapMessage(`Failed to save IMAP config: ${message}`);
     } finally {
       setImapBusy(false);
@@ -321,7 +253,7 @@ export function ConfigPage() {
         setImapMessage(`IMAP test failed: ${result.error ?? "unknown error"}`);
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "unknown error";
+      const message = toErrorMessage(error, "unknown error");
       setImapMessage(`IMAP test failed: ${message}`);
     } finally {
       setImapBusy(false);
@@ -337,7 +269,7 @@ export function ConfigPage() {
       setImapForm({ host: "", port: 993, username: "", password: "", mailbox: "INBOX", smtpHost: "", smtpPort: 587 });
       setImapMessage("Stored IMAP configuration removed.");
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "unknown error";
+      const message = toErrorMessage(error, "unknown error");
       setImapMessage(`Failed to delete IMAP config: ${message}`);
     } finally {
       setImapBusy(false);
@@ -360,7 +292,7 @@ export function ConfigPage() {
         );
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "unknown error";
+      const message = toErrorMessage(error, "unknown error");
       setLlamaTestResult(`Llama test failed: ${message}`);
     } finally {
       setLlamaTestBusy(false);

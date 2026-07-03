@@ -91,7 +91,7 @@ function LogViewer({ filename }: { filename: string }) {
           {loading ? "..." : "Refresh"}
         </button>
         <label style={{ marginLeft: "auto", display: "flex", gap: "0.4rem", alignItems: "center", cursor: "pointer", fontSize: "0.8rem" }}>
-          <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+          <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
           Auto-scroll
         </label>
       </div>
