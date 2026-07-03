@@ -124,6 +124,108 @@ function processEmailHtml(html: string, showImages: boolean): string {
   return root.innerHTML;
 }
 
+function firstAddressFromText(value: string): string {
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0] : value.trim();
+}
+
+function listAddressesFromText(value: string): string[] {
+  const matches = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
+  if (!matches || matches.length === 0) {
+    const fallback = value.trim();
+    return fallback ? [fallback] : [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of matches) {
+    const clean = raw.trim();
+    const key = clean.toLowerCase();
+    if (!clean || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+
+function ensureSubjectPrefix(subject: string | undefined, prefix: "Re:" | "Fwd:"): string {
+  const base = (subject ?? "").trim();
+  if (base === "") {
+    return prefix;
+  }
+  const lowerPrefix = prefix.toLowerCase();
+  if (base.toLowerCase().startsWith(lowerPrefix)) {
+    return base;
+  }
+  return `${prefix} ${base}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildReplyBody(email: InboxEmail): string {
+  const time = formatTimestamp(email.atUtc);
+  const sender = email.sender || "-";
+  const subject = email.subject || "(no subject)";
+  const body = email.body || "";
+  const isHtml = /<[^>]+>/.test(body);
+  const rendered = isHtml ? body : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
+  return [
+    "<p><br /></p>",
+    `<p>On ${escapeHtml(time)}, ${escapeHtml(sender)} wrote:</p>`,
+    "<blockquote style=\"margin: 0 0 0 0.8rem; padding-left: 0.8rem; border-left: 3px solid var(--line, #c2c7d0);\">",
+    `<p><strong>Subject:</strong> ${escapeHtml(subject)}</p>`,
+    rendered,
+    "</blockquote>"
+  ].join("");
+}
+
+function buildForwardBody(email: InboxEmail): string {
+  const time = formatTimestamp(email.atUtc);
+  const sender = email.sender || "-";
+  const sentTo = email.sentTo || "-";
+  const subject = email.subject || "(no subject)";
+  const body = email.body || "";
+  const isHtml = /<[^>]+>/.test(body);
+  const rendered = isHtml ? body : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
+  return [
+    "<p><br /></p>",
+    "<p>---------- Forwarded message ----------</p>",
+    `<p><strong>From:</strong> ${escapeHtml(sender)}</p>`,
+    `<p><strong>Date:</strong> ${escapeHtml(time)}</p>`,
+    `<p><strong>Subject:</strong> ${escapeHtml(subject)}</p>`,
+    `<p><strong>To:</strong> ${escapeHtml(sentTo)}</p>`,
+    rendered
+  ].join("");
+}
+
+function buildReplyAllRecipients(email: InboxEmail): { to: string; cc: string } {
+  const sender = firstAddressFromText(email.sender || "");
+  const senderKey = sender.toLowerCase();
+  const recipients = [
+    ...listAddressesFromText(email.sentTo || ""),
+    ...listAddressesFromText(email.cc || "")
+  ];
+  const cc: string[] = [];
+  const seen = new Set<string>();
+  for (const recipient of recipients) {
+    const key = recipient.toLowerCase();
+    if (!recipient || key === senderKey || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    cc.push(recipient);
+  }
+  return { to: sender, cc: cc.join(", ") };
+}
+
 export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [searchParams] = useSearchParams();
   const mailbox = (searchParams.get("mailbox") || "").trim();
@@ -659,6 +761,38 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     }
   }
 
+  function replyToSelectedEmail() {
+    if (!selected || !onOpenDraft) return;
+    onOpenDraft({
+      sentTo: firstAddressFromText(selected.sender || ""),
+      subject: ensureSubjectPrefix(selected.subject, "Re:"),
+      body: buildReplyBody(selected)
+    });
+    setSelected(null);
+  }
+
+  function forwardSelectedEmail() {
+    if (!selected || !onOpenDraft) return;
+    onOpenDraft({
+      sentTo: "",
+      subject: ensureSubjectPrefix(selected.subject, "Fwd:"),
+      body: buildForwardBody(selected)
+    });
+    setSelected(null);
+  }
+
+  function replyAllToSelectedEmail() {
+    if (!selected || !onOpenDraft) return;
+    const recipients = buildReplyAllRecipients(selected);
+    onOpenDraft({
+      sentTo: recipients.to,
+      cc: recipients.cc,
+      subject: ensureSubjectPrefix(selected.subject, "Re:"),
+      body: buildReplyBody(selected)
+    });
+    setSelected(null);
+  }
+
   function printEmails(items: InboxEmail[]) {
     if (items.length === 0 || typeof window === "undefined") return;
     const escapeHtml = (value: string) =>
@@ -1001,6 +1135,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                 >
                   Mark as Read
                 </button>
+                <button type="button" onClick={replyToSelectedEmail} disabled={actionLoading}>Reply</button>
+                <button type="button" onClick={replyAllToSelectedEmail} disabled={actionLoading}>Reply All</button>
+                <button type="button" onClick={forwardSelectedEmail} disabled={actionLoading}>Forward</button>
                 <button type="button" onClick={() => printEmails([selected])} disabled={actionLoading}>Print</button>
                 <button type="button" onClick={() => { setShowImages(true); }}>Show Images</button>
                 <button type="button" onClick={() => setSelected(null)}>Close</button>
