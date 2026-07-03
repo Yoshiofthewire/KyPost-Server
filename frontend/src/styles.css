@@ -586,10 +586,16 @@ body {
 }
 
 .email-reader-actions {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.email-reader-actions-row {
   display: flex;
   gap: 8px;
-  flex-wrap: wrap;
   justify-content: flex-end;
+  flex-wrap: nowrap;
 }
 
 .email-reader-content {
@@ -1627,6 +1633,13 @@ pre {
   .email-reader-actions {
     width: 100%;
     gap: 6px;
+    justify-items: stretch;
+  }
+
+  .email-reader-actions-row {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
   .email-reader-actions button {

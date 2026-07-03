@@ -1107,40 +1107,44 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             <div className="email-reader-head">
               <h3 style={{ margin: 0 }}>Email Details</h3>
               <div className="email-reader-actions">
-                <button
-                  type="button"
-                  onClick={() => applyInboxAction("delete", [selected.messageId], { closeModal: true })}
-                  disabled={actionLoading}
-                >
-                  Delete
-                </button>
-                <button
-                  type="button"
-                  onClick={() => applyInboxAction("archive", [selected.messageId], { closeModal: true })}
-                  disabled={actionLoading}
-                >
-                  Archive
-                </button>
-                <button
-                  type="button"
-                  onClick={() => applyInboxAction("spam", [selected.messageId], { closeModal: true })}
-                  disabled={actionLoading}
-                >
-                  Mark as Spam
-                </button>
-                <button
-                  type="button"
-                  onClick={() => applyInboxAction("read", [selected.messageId])}
-                  disabled={actionLoading}
-                >
-                  Mark as Read
-                </button>
-                <button type="button" onClick={replyToSelectedEmail} disabled={actionLoading}>Reply</button>
-                <button type="button" onClick={replyAllToSelectedEmail} disabled={actionLoading}>Reply All</button>
-                <button type="button" onClick={forwardSelectedEmail} disabled={actionLoading}>Forward</button>
-                <button type="button" onClick={() => printEmails([selected])} disabled={actionLoading}>Print</button>
-                <button type="button" onClick={() => { setShowImages(true); }}>Show Images</button>
-                <button type="button" onClick={() => setSelected(null)}>Close</button>
+                <div className="email-reader-actions-row">
+                  <button
+                    type="button"
+                    onClick={() => applyInboxAction("archive", [selected.messageId], { closeModal: true })}
+                    disabled={actionLoading}
+                  >
+                    Archive
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyInboxAction("read", [selected.messageId])}
+                    disabled={actionLoading}
+                  >
+                    Mark as Read
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyInboxAction("spam", [selected.messageId], { closeModal: true })}
+                    disabled={actionLoading}
+                  >
+                    Mark as Spam
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyInboxAction("delete", [selected.messageId], { closeModal: true })}
+                    disabled={actionLoading}
+                  >
+                    Delete
+                  </button>
+                  <button type="button" onClick={() => printEmails([selected])} disabled={actionLoading}>Print</button>
+                  <button type="button" onClick={() => { setShowImages(true); }}>Show Images</button>
+                </div>
+                <div className="email-reader-actions-row">
+                  <button type="button" onClick={replyToSelectedEmail} disabled={actionLoading}>Reply</button>
+                  <button type="button" onClick={replyAllToSelectedEmail} disabled={actionLoading}>Reply All</button>
+                  <button type="button" onClick={forwardSelectedEmail} disabled={actionLoading}>Forward</button>
+                  <button type="button" onClick={() => setSelected(null)}>Close</button>
+                </div>
               </div>
             </div>
 
