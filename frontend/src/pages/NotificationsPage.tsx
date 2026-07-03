@@ -53,6 +53,7 @@ function buildNovuPairingLink(novu: NovuStatusResponse): string {
 export function NotificationsPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [availableKeywords, setAvailableKeywords] = useState<string[]>([]);
+  const [settingsTab, setSettingsTab] = useState<"delivery" | "keywords">("delivery");
   const [status, setStatus] = useState("");
   const [testBusy, setTestBusy] = useState(false);
   const [unsubscribeBusy, setUnsubscribeBusy] = useState(false);
@@ -265,6 +266,10 @@ export function NotificationsPage() {
         window.alert("To help insure notifications work, please remove your browser from sleep state.");
       }
 
+      if (mode === "keywords") {
+        setSettingsTab("keywords");
+      }
+
       return { ...prev, notifications: { ...prev.notifications, mode } };
     });
   }
@@ -305,49 +310,114 @@ export function NotificationsPage() {
 
       <div className="notifications-layout">
         <section className="notifications-card">
-          <h3>Delivery Mode</h3>
-          <p className="notifications-muted">Switch between disabled alerts, all-email alerts, or keyword-only alerts.</p>
-
-          <div className="notifications-mode-grid">
-            <label className={`notifications-mode-option${cfg.notifications.mode === "none" ? " active" : ""}`}>
-              <input
-                className="notifications-mode-input"
-                type="radio"
-                checked={cfg.notifications.mode === "none"}
-                onChange={() => setMode("none")}
-              />
-              <span className="notifications-mode-title">No email</span>
-              <span className="notifications-mode-copy">Pause browser notifications.</span>
-            </label>
-
-            <label className={`notifications-mode-option${cfg.notifications.mode === "all" ? " active" : ""}`}>
-              <input
-                className="notifications-mode-input"
-                type="radio"
-                checked={cfg.notifications.mode === "all"}
-                onChange={() => setMode("all")}
-              />
-              <span className="notifications-mode-title">All emails</span>
-              <span className="notifications-mode-copy">Notify for every new message.</span>
-            </label>
-
-            <label className={`notifications-mode-option${cfg.notifications.mode === "keywords" ? " active" : ""}`}>
-              <input
-                className="notifications-mode-input"
-                type="radio"
-                checked={cfg.notifications.mode === "keywords"}
-                onChange={() => setMode("keywords")}
-              />
-              <span className="notifications-mode-title">IMAP keywords</span>
-              <span className="notifications-mode-copy">Notify only for selected keywords.</span>
-            </label>
+          <div className="notifications-settings-tabs" role="tablist" aria-label="Notification settings tabs">
+            <button
+              type="button"
+              role="tab"
+              className={`notifications-settings-tab${settingsTab === "delivery" ? " active" : ""}`}
+              aria-selected={settingsTab === "delivery"}
+              onClick={() => setSettingsTab("delivery")}
+            >
+              Delivery Mode
+            </button>
+            <button
+              type="button"
+              role="tab"
+              className={`notifications-settings-tab${settingsTab === "keywords" ? " active" : ""}`}
+              aria-selected={settingsTab === "keywords"}
+              onClick={() => setSettingsTab("keywords")}
+            >
+              IMAP Keywords
+            </button>
           </div>
+
+          {settingsTab === "delivery" ? (
+            <div role="tabpanel" className="notifications-settings-panel">
+              <h3>Delivery Mode</h3>
+              <p className="notifications-muted">Switch between disabled alerts, all-email alerts, or keyword-only alerts.</p>
+
+              <div className="notifications-mode-grid">
+                <label className={`notifications-mode-option${cfg.notifications.mode === "none" ? " active" : ""}`}>
+                  <input
+                    className="notifications-mode-input"
+                    type="radio"
+                    checked={cfg.notifications.mode === "none"}
+                    onChange={() => setMode("none")}
+                  />
+                  <span className="notifications-mode-title">No email</span>
+                  <span className="notifications-mode-copy">Pause browser notifications.</span>
+                </label>
+
+                <label className={`notifications-mode-option${cfg.notifications.mode === "all" ? " active" : ""}`}>
+                  <input
+                    className="notifications-mode-input"
+                    type="radio"
+                    checked={cfg.notifications.mode === "all"}
+                    onChange={() => setMode("all")}
+                  />
+                  <span className="notifications-mode-title">All emails</span>
+                  <span className="notifications-mode-copy">Notify for every new message.</span>
+                </label>
+
+                <label className={`notifications-mode-option${cfg.notifications.mode === "keywords" ? " active" : ""}`}>
+                  <input
+                    className="notifications-mode-input"
+                    type="radio"
+                    checked={cfg.notifications.mode === "keywords"}
+                    onChange={() => setMode("keywords")}
+                  />
+                  <span className="notifications-mode-title">IMAP keywords</span>
+                  <span className="notifications-mode-copy">Notify only for selected keywords.</span>
+                </label>
+              </div>
+            </div>
+          ) : (
+            <div role="tabpanel" className="notifications-settings-panel">
+              <div className="notifications-keywords-head">
+                <div>
+                  <h3>IMAP Keywords</h3>
+                  <p className="notifications-muted">Select which IMAP keywords can trigger notifications.</p>
+                </div>
+                <span className="notifications-count">{cfg.notifications.keywords.length} selected</span>
+              </div>
+
+              <div className="notifications-keywords-tools">
+                <button type="button" className="notifications-secondary" onClick={setAllKeywords} disabled={availableKeywords.length === 0}>
+                  Select All
+                </button>
+                <button type="button" className="notifications-ghost" onClick={clearKeywords} disabled={cfg.notifications.keywords.length === 0}>
+                  Clear
+                </button>
+              </div>
+
+              {availableKeywords.length === 0 ? (
+                <p className="notifications-empty">No IMAP keywords found yet. Configure labels in Configuration or sync labels from IMAP first.</p>
+              ) : (
+                <div className="notifications-keywords-grid">
+                  {availableKeywords.map((keyword) => (
+                    <label key={keyword} className={`notifications-keyword-option${cfg.notifications.keywords.includes(keyword) ? " selected" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={cfg.notifications.keywords.includes(keyword)}
+                        onChange={(event) => toggleKeyword(keyword, event.target.checked)}
+                      />
+                      <span>{keyword}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {cfg.notifications.mode !== "keywords" ? (
+                <p className="notifications-hint">Selections are saved now and will be used when Delivery Mode is set to IMAP keywords.</p>
+              ) : null}
+            </div>
+          )}
         </section>
 
         <section className="notifications-card notifications-android-card">
           <div className="notifications-android-head">
             <div>
-              <h3>Android App Pairing</h3>
+              <h3>Mobile App Pairing</h3>
               <p className="notifications-muted">Scan this QR code from the Llama Labels Android app to receive push notifications for keyword-labeled email.</p>
             </div>
             <button type="button" className="notifications-ghost" onClick={() => void refreshNovuStatus()}>
@@ -387,45 +457,6 @@ export function NotificationsPage() {
           )}
         </section>
 
-        <section className="notifications-card notifications-keywords-card">
-          <div className="notifications-keywords-head">
-            <div>
-              <h3>IMAP Keywords</h3>
-              <p className="notifications-muted">This list is always visible so you can prepare selections before enabling keyword mode.</p>
-            </div>
-            <span className="notifications-count">{cfg.notifications.keywords.length} selected</span>
-          </div>
-
-          <div className="notifications-keywords-tools">
-            <button type="button" className="notifications-secondary" onClick={setAllKeywords} disabled={availableKeywords.length === 0}>
-              Select All
-            </button>
-            <button type="button" className="notifications-ghost" onClick={clearKeywords} disabled={cfg.notifications.keywords.length === 0}>
-              Clear
-            </button>
-          </div>
-
-          {availableKeywords.length === 0 ? (
-            <p className="notifications-empty">No IMAP keywords found yet. Configure labels in Configuration or sync labels from IMAP first.</p>
-          ) : (
-            <div className="notifications-keywords-grid">
-              {availableKeywords.map((keyword) => (
-                <label key={keyword} className={`notifications-keyword-option${cfg.notifications.keywords.includes(keyword) ? " selected" : ""}`}>
-                  <input
-                    type="checkbox"
-                    checked={cfg.notifications.keywords.includes(keyword)}
-                    onChange={(event) => toggleKeyword(keyword, event.target.checked)}
-                  />
-                  <span>{keyword}</span>
-                </label>
-              ))}
-            </div>
-          )}
-
-          {cfg.notifications.mode !== "keywords" ? (
-            <p className="notifications-hint">Selections are saved now and will be used when Delivery Mode is set to IMAP keywords.</p>
-          ) : null}
-        </section>
       </div>
 
       <div className="notifications-footer">

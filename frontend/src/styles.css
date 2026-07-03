@@ -876,6 +876,30 @@ pre {
   font-size: 0.9rem;
 }
 
+.notifications-settings-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.notifications-settings-tab {
+  border: 1px solid color-mix(in srgb, var(--line) 86%, var(--accent));
+  background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+  color: var(--ink-strong);
+  border-radius: 999px;
+  padding: 7px 14px;
+}
+
+.notifications-settings-tab.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-strong) 15%, transparent);
+}
+
+.notifications-settings-panel {
+  margin-top: 12px;
+}
+
 .notifications-mode-grid {
   margin-top: 12px;
   display: grid;
@@ -919,10 +943,6 @@ pre {
   grid-column: 2;
   color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
   font-size: 0.85rem;
-}
-
-.notifications-keywords-card {
-  min-height: 320px;
 }
 
 .notifications-android-card {
