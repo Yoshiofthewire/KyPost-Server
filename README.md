@@ -98,11 +98,12 @@ Common variables:
 - `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`)
 - `IMAP_CONFIG_FILE` (default `/llama_lab/private/imap-config.json`)
 - `IMAP_CONFIG_KEY_FILE` (default `/llama_lab/private/imap-config.key`)
-- `SERVER_BASE_URL` (optional but recommended for mobile pairing; public URL embedded as `srv` in QR and used to build `relay`)
-- `NOVU_SECRET_KEY` (required for mobile push pairing and Novu event trigger)
-- `NOVU_WORKFLOW_ID` (required Novu workflow identifier, for example `new-email-push-notification`)
-- `NOVU_APPLICATION_IDENTIFIER` (required public Novu app id encoded in desktop pairing QR)
-- `NOVU_API_BASE` (default `https://api.novu.co`; set EU endpoint only if your Novu project is in EU region)
+- `SERVER_BASE_URL` (optional but recommended for mobile pairing; public URL embedded as `srv` in QR and used to build `reg`)
+- `PAIRING_SECRET` (required for mobile pairing token signing/validation)
+- `FCM_SERVICE_ACCOUNT_FILE` (optional; path to Firebase service-account JSON for backend direct native push delivery via FCM HTTP v1)
+- `FCM_PROJECT_ID` (optional override; otherwise read from service-account `project_id`)
+- `FCM_TOKEN_URL` (optional OAuth token endpoint override; otherwise read from service-account `token_uri`)
+- `FCM_SEND_URL` (optional endpoint override; defaults to `https://fcm.googleapis.com/v1/projects/<project>/messages:send`)
 
 Notes:
 
@@ -116,31 +117,34 @@ Create model cache directory once before first run:
 mkdir -p share/ollama/models
 ```
 
-## Mobile App Pairing (Novu)
+## Mobile App Pairing (Native)
 
-If you use the mobile app pairing flow, each deployment/client must provide its own Novu credentials.
+Mobile pairing is backend-native and does not require Novu.
 
-- Do not reuse or share Novu keys across organizations/environments.
-- This repo does not ship default Novu secrets.
-- The backend keeps `NOVU_SECRET_KEY` server-side and never sends it to clients.
-
-Required Novu setup per client/deployment:
-
-1. Create your own Novu project.
-2. Create a workflow and set `NOVU_WORKFLOW_ID` to that workflow's identifier.
-3. Copy your Novu application identifier into `NOVU_APPLICATION_IDENTIFIER`.
-4. Set `NOVU_SECRET_KEY` from your Novu environment.
-5. Connect and activate an `fcm` push integration in that same Novu environment (Integration Store -> Push -> Firebase Cloud Messaging).
-6. Ensure your mobile app is configured for that same Novu project and its own Firebase/FCM project.
+- Set `PAIRING_SECRET` on the server.
+- Optionally set `SERVER_BASE_URL` so QR payloads always point to the correct public backend URL.
+- Keep all pairing secrets server-side only.
 
 Desktop pairing behavior:
 
-- Notifications page renders a QR link with `app`, `sub`, `hash`, `api`, `srv`, `relay`, and `pt`.
-- Set `SERVER_BASE_URL` in `.env` so `srv` and `relay` always point to the deployment address the mobile app should use (no manual server URL entry required).
+- Notifications page renders a QR link with `sub`, `hash`, `srv`, `reg`, and `pt`.
+- Set `SERVER_BASE_URL` in `.env` so `srv` and `reg` always point to the deployment address the mobile app should use (no manual server URL entry required).
 - `pt` is a signed pairing token valid for 90 seconds.
 - UI shows a 4px countdown bar under the QR that shrinks over 90 seconds, transitions green to red, and is red during the last 15 seconds.
-- Mobile app scans QR and syncs its device token through `relay` (or `srv + /api/notifications/novu/relay/fcm` fallback).
-- Relay endpoint (`POST /api/notifications/novu/relay/fcm`) validates `pt` and registers token to Novu using server-side credentials to avoid mobile-side 401s.
+- Mobile app scans QR and registers its push token through `reg` (or `srv + /api/notifications/native/register` fallback).
+
+Native registration behavior:
+
+- `POST /api/notifications/native/register` validates pairing token and stores native device metadata/token in backend state.
+- `GET /api/notifications/native/devices` lists paired native devices.
+- `DELETE /api/notifications/native/devices` removes a paired native device by `deviceId`.
+- `POST /api/notifications/native/unpair` revokes all paired native devices for the current signed-in user.
+
+Firebase credential guidance:
+
+- Backend direct native push delivery does not read `google-services.json`.
+- `google-services.json` belongs in the mobile project (Android app module, typically `app/google-services.json`) and should never be committed.
+- Backend push delivery uses service-account OAuth (`FCM_SERVICE_ACCOUNT_FILE`) with FCM HTTP v1.
 
 ## Persistence
 
@@ -206,6 +210,10 @@ Notifications:
 - `GET /api/notifications/vapid-public-key`
 - `POST|DELETE /api/notifications/subscriptions`
 - `POST /api/notifications/test`
+- `GET /api/notifications/pairing`
+- `POST /api/notifications/native/register`
+- `GET|DELETE /api/notifications/native/devices`
+- `POST /api/notifications/native/unpair`
 
 Logs:
 

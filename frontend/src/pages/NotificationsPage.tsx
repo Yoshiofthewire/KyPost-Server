@@ -21,18 +21,31 @@ type NotificationTestResponse = {
   activeSubscriptions?: number;
 };
 
-type NovuStatusResponse = {
-  applicationIdentifier: string;
+type PairingStatusResponse = {
   subscriberId: string;
-  apiBase: string;
   serverBaseUrl?: string;
-  relayEndpoint?: string;
+  registerEndpoint?: string;
   subscriberHash?: string;
   pairingToken?: string;
   pairingExpiresAt?: string;
   pairingTtlSeconds?: number;
   configurationError?: string;
   configured: boolean;
+};
+
+type NativeDevice = {
+  deviceId: string;
+  platform: string;
+  pushToken: string;
+  deviceName?: string;
+  appVersion?: string;
+  userAgent?: string;
+  registeredAt?: string;
+  updatedAt?: string;
+};
+
+type NativeDevicesResponse = {
+  devices: NativeDevice[];
 };
 
 const QR_CODE_WIDTH_PX = 220;
@@ -47,30 +60,56 @@ function collectNotificationKeywordOptions(cfg: AppConfig, labelsData: LabelsRes
   return uniqueLabels([...configured, ...mapped, ...imap, ...selected]);
 }
 
-function buildNovuPairingLink(novu: NovuStatusResponse): string {
+function buildNativePairingLink(pairing: PairingStatusResponse): string {
   const params = new URLSearchParams();
-  params.set("app", novu.applicationIdentifier);
-  params.set("sub", novu.subscriberId);
-  if (novu.subscriberHash) {
-    params.set("hash", novu.subscriberHash);
+  params.set("sub", pairing.subscriberId);
+  if (pairing.subscriberHash) {
+    params.set("hash", pairing.subscriberHash);
   }
-  if (novu.apiBase) {
-    params.set("api", novu.apiBase);
+  if (pairing.serverBaseUrl) {
+    params.set("srv", pairing.serverBaseUrl);
   }
-  if (novu.serverBaseUrl) {
-    params.set("srv", novu.serverBaseUrl);
+  if (pairing.registerEndpoint) {
+    params.set("reg", pairing.registerEndpoint);
   }
-  if (novu.relayEndpoint) {
-    params.set("relay", novu.relayEndpoint);
+  if (pairing.pairingToken) {
+    params.set("pt", pairing.pairingToken);
   }
-  if (novu.pairingToken) {
-    params.set("pt", novu.pairingToken);
-  }
-  return `llamalabels://novu-pair?${params.toString()}`;
+  return `llamalabels://native-pair?${params.toString()}`;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function maskToken(token: string): string {
+  const trimmed = token.trim();
+  if (trimmed.length <= 14) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 8)}...${trimmed.slice(-6)}`;
+}
+
+function formatDeviceTime(value?: string): string {
+  const clean = (value ?? "").trim();
+  if (!clean) {
+    return "unknown";
+  }
+  const parsed = Date.parse(clean);
+  if (!Number.isFinite(parsed)) {
+    return clean;
+  }
+  return new Date(parsed).toLocaleString();
+}
+
+function summarizeDevice(device: NativeDevice): string {
+  const platform = (device.platform || "android").toLowerCase();
+  const label = platform === "ios" ? "iOS" : "Android";
+  const version = (device.appVersion || "").trim();
+  if (!version) {
+    return label;
+  }
+  return `${label} v${version}`;
 }
 
 function pairingBarColor(remainingMs: number, ttlMs: number): string {
@@ -92,9 +131,12 @@ export function NotificationsPage() {
   const [status, setStatus] = useState("");
   const [testBusy, setTestBusy] = useState(false);
   const [unsubscribeBusy, setUnsubscribeBusy] = useState(false);
-  const [novuStatus, setNovuStatus] = useState<NovuStatusResponse | null>(null);
-  const [novuQrDataUrl, setNovuQrDataUrl] = useState("");
+  const [pairingStatus, setPairingStatus] = useState<PairingStatusResponse | null>(null);
+  const [pairingQrDataUrl, setPairingQrDataUrl] = useState("");
   const [unpairBusy, setUnpairBusy] = useState(false);
+  const [nativeDevices, setNativeDevices] = useState<NativeDevice[]>([]);
+  const [nativeDevicesBusy, setNativeDevicesBusy] = useState(false);
+  const [nativeRemoveBusyId, setNativeRemoveBusyId] = useState("");
   const [pairingExpiresAtMs, setPairingExpiresAtMs] = useState<number | null>(null);
   const [pairingTtlMs, setPairingTtlMs] = useState(DEFAULT_PAIRING_TTL_SECONDS * 1000);
   const [pairingClockMs, setPairingClockMs] = useState<number>(() => Date.now());
@@ -102,8 +144,8 @@ export function NotificationsPage() {
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
-  function applyNovuStatus(next: NovuStatusResponse | null) {
-    setNovuStatus(next);
+  function applyPairingStatus(next: PairingStatusResponse | null) {
+    setPairingStatus(next);
     if (!next) {
       setPairingExpiresAtMs(null);
       return;
@@ -141,14 +183,17 @@ export function NotificationsPage() {
         setCfg(normalized);
         setAvailableKeywords(collectNotificationKeywordOptions(normalized, labelsData));
         try {
-          const status = await getJSON<NovuStatusResponse>("/api/notifications/novu");
+          const status = await getJSON<PairingStatusResponse>("/api/notifications/pairing");
           if (!cancelled) {
-            applyNovuStatus(status);
+            applyPairingStatus(status);
           }
         } catch {
           if (!cancelled) {
-            applyNovuStatus(null);
+            applyPairingStatus(null);
           }
+        }
+        if (!cancelled) {
+          await refreshNativeDevices();
         }
       } catch {
         if (!cancelled) {
@@ -179,7 +224,7 @@ export function NotificationsPage() {
       if (now >= pairingExpiresAtMs && !refreshTriggered) {
         refreshTriggered = true;
         setPairingRefreshBusy(true);
-        void refreshNovuStatus().finally(() => {
+        void refreshPairingStatus().finally(() => {
           if (!cancelled) {
             setPairingRefreshBusy(false);
           }
@@ -197,25 +242,25 @@ export function NotificationsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    if (!novuStatus?.configured || !novuStatus.applicationIdentifier || !novuStatus.subscriberId) {
-      setNovuQrDataUrl("");
+    if (!pairingStatus?.configured || !pairingStatus.subscriberId) {
+      setPairingQrDataUrl("");
       return;
     }
-    QRCode.toDataURL(buildNovuPairingLink(novuStatus), { errorCorrectionLevel: "M", margin: 2, width: 220 })
+    QRCode.toDataURL(buildNativePairingLink(pairingStatus), { errorCorrectionLevel: "M", margin: 2, width: 220 })
       .then((dataUrl) => {
         if (!cancelled) {
-          setNovuQrDataUrl(dataUrl);
+          setPairingQrDataUrl(dataUrl);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setNovuQrDataUrl("");
+          setPairingQrDataUrl("");
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [novuStatus]);
+  }, [pairingStatus]);
 
   async function save() {
     if (!cfg) {
@@ -327,25 +372,57 @@ export function NotificationsPage() {
     }
   }
 
-  async function refreshNovuStatus() {
+  async function refreshPairingStatus() {
     try {
-      const next = await getJSON<NovuStatusResponse>("/api/notifications/novu");
-      applyNovuStatus(next);
+      const next = await getJSON<PairingStatusResponse>("/api/notifications/pairing");
+      applyPairingStatus(next);
     } catch {
-      applyNovuStatus(null);
+      applyPairingStatus(null);
+    }
+    await refreshNativeDevices();
+  }
+
+  async function refreshNativeDevices() {
+    try {
+      const next = await getJSON<NativeDevicesResponse>("/api/notifications/native/devices");
+      setNativeDevices(Array.isArray(next.devices) ? next.devices : []);
+    } catch {
+      setNativeDevices([]);
+    }
+  }
+
+  async function removeNativeDevice(deviceId: string) {
+    const cleaned = deviceId.trim();
+    if (!cleaned) {
+      return;
+    }
+
+    setNativeRemoveBusyId(cleaned);
+    setNativeDevicesBusy(true);
+    try {
+      await deleteJSON<{ ok: boolean; removed: boolean; devices: number }>("/api/notifications/native/devices", { deviceId: cleaned });
+      await refreshNativeDevices();
+      setStatus("Removed paired native device.");
+    } catch (error: unknown) {
+      const detail = toErrorMessage(error, "unknown error");
+      setStatus(`Failed to remove paired native device: ${detail}`);
+    } finally {
+      setNativeRemoveBusyId("");
+      setNativeDevicesBusy(false);
     }
   }
 
   const pairingRemainingMs = pairingExpiresAtMs ? Math.max(0, pairingExpiresAtMs - pairingClockMs) : 0;
   const pairingBarWidth = Math.round(QR_CODE_WIDTH_PX * clamp(pairingRemainingMs / Math.max(pairingTtlMs, 1), 0, 1));
-  const showPairingBar = pairingRemainingMs > 0 && novuStatus?.configured;
+  const showPairingBar = pairingRemainingMs > 0 && pairingStatus?.configured;
   const pairingBarBg = pairingBarColor(pairingRemainingMs, pairingTtlMs);
 
   async function revokePairedDevices() {
     setUnpairBusy(true);
     try {
-      await postJSON<{ ok: boolean }>("/api/notifications/novu/unpair", {});
-      setStatus("Revoked paired Android devices.");
+      await postJSON<{ ok: boolean }>("/api/notifications/native/unpair", {});
+      await refreshNativeDevices();
+      setStatus("Revoked paired native devices.");
     } catch (error: unknown) {
       const detail = toErrorMessage(error, "unknown error");
       setStatus(`Failed to revoke paired devices: ${detail}`);
@@ -517,20 +594,20 @@ export function NotificationsPage() {
           <div className="notifications-android-head">
             <div>
               <h3>Mobile App Pairing</h3>
-              <p className="notifications-muted">Scan this QR code from the Llama Labels app to receive push notifications for keyword-labeled email.</p>
+              <p className="notifications-muted">Scan this QR code from the Llama Labels app to pair your device. The app receives the server URL automatically.</p>
             </div>
-            <button type="button" className="notifications-ghost" onClick={() => void refreshNovuStatus()}>
+            <button type="button" className="notifications-ghost" onClick={() => void refreshPairingStatus()}>
               Refresh
             </button>
           </div>
 
-          {!novuStatus?.configured ? (
-            <p className="notifications-empty">{novuStatus?.configurationError ?? "Novu is not configured on the server yet. Set NOVU_SECRET_KEY, NOVU_WORKFLOW_ID and NOVU_APPLICATION_IDENTIFIER first."}</p>
+          {!pairingStatus?.configured ? (
+            <p className="notifications-empty">{pairingStatus?.configurationError ?? "Pairing is not configured on the server yet. Set PAIRING_SECRET first."}</p>
           ) : (
             <>
-              {novuQrDataUrl ? (
+              {pairingQrDataUrl ? (
                 <div className="notifications-qr">
-                  <img className="notifications-qr-image" src={novuQrDataUrl} alt="Android pairing QR code" width={220} height={220} />
+                  <img className="notifications-qr-image" src={pairingQrDataUrl} alt="Native mobile pairing QR code" width={220} height={220} />
                   {showPairingBar ? (
                     <div className="notifications-qr-timer-track" style={{ width: `${QR_CODE_WIDTH_PX}px` }} aria-hidden="true">
                       <div
@@ -548,13 +625,42 @@ export function NotificationsPage() {
 
               <div className="notifications-android-meta">
                 <span>Subscriber ID</span>
-                <strong>{novuStatus.subscriberId || "Not available"}</strong>
+                <strong>{pairingStatus.subscriberId || "Not available"}</strong>
               </div>
 
               <div className="notifications-android-tools">
                 <button type="button" className="notifications-ghost" onClick={() => void revokePairedDevices()} disabled={unpairBusy}>
                   {unpairBusy ? "Revoking..." : "Revoke Paired Devices"}
                 </button>
+              </div>
+
+              <div className="notifications-native-list">
+                <h4>Paired Native Devices</h4>
+                {nativeDevices.length === 0 ? (
+                  <p className="notifications-native-empty">No native devices registered yet.</p>
+                ) : (
+                  <div className="notifications-native-items">
+                    {nativeDevices.map((device) => (
+                      <div key={device.deviceId} className="notifications-native-item">
+                        <div className="notifications-native-main">
+                          <strong>{device.deviceName?.trim() || device.platform || "device"}</strong>
+                          <span>{maskToken(device.pushToken || "")}</span>
+                          <span className="notifications-native-detail">{summarizeDevice(device)}</span>
+                          <span className="notifications-native-detail">Updated: {formatDeviceTime(device.updatedAt || device.registeredAt)}</span>
+                          {device.userAgent?.trim() ? <span className="notifications-native-detail">UA: {device.userAgent.trim()}</span> : null}
+                        </div>
+                        <button
+                          type="button"
+                          className="notifications-ghost"
+                          onClick={() => void removeNativeDevice(device.deviceId)}
+                          disabled={nativeDevicesBusy || nativeRemoveBusyId === device.deviceId}
+                        >
+                          {nativeRemoveBusyId === device.deviceId ? "Removing..." : "Remove"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="notifications-store-links">

@@ -18,8 +18,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 - Three runtime modes: `daemon` (poller only), `server` (API only), `all` (both)
 - In Docker `server` and `daemon` run as separate processes; daemon reloads `config.yaml` from disk periodically so API-saved notification/config updates propagate without restart
 - Secrets (IMAP password, Ollama auth) are encrypted at rest under `SECRET_DIR`
-- State is persisted as JSON under `STATE_DIR`: checkpoint (last processed IMAP UID), processed set, decisions log
-- State is persisted as JSON under `STATE_DIR`: checkpoint, processed set, decisions log, and a stable Novu `subscriberId` (the Android app derives everything else from the QR pairing link)
+- State is persisted as JSON under `STATE_DIR`: checkpoint, processed set, decisions log, stable pairing `subscriberId`, and native mobile device registry entries (`nativeDevices`).
 - Logs are structured JSON, written to stdout and a rotating file (16 MB max × 8 backups) under `LOG_DIR`
 
 ### Internal Package Layout
@@ -27,7 +26,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | Package | Responsibility |
 |---------|---------------|
 | `app/` | Mode flag parsing; bootstrap logger, config, poller, API server |
-| `api/` | 21 HTTP endpoints; scrypt session auth; config/IMAP/Ollama/health/decisions/logs/tuning/mail-send/draft-save |
+| `api/` | HTTP endpoints; scrypt session auth; config/IMAP/Ollama/health/decisions/logs/tuning/mail-send/draft-save |
 | `adapters/imap/` | IMAP UID-based email fetching; credential decrypt |
 | `adapters/llama/` | Ollama `/api/generate` HTTP calls; 3s inter-request pacing; retry backoff |
 | `processor/` | Timed polling loop (~90s default); orchestrates fetch → redact → classify → label → persist |
@@ -45,8 +44,8 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 4. POST to Ollama `/api/generate` with tuning prompt + redacted email text
 5. Fuzzy-match Ollama response against the label allowlist
 6. Apply matched label as an IMAP keyword
-7. Send browser push notifications for new emails when `notifications.mode` is `all`, or when mode is `keywords` and selected IMAP keywords match config
-8. Trigger Novu workflow events using the same notification-mode gate; the paired Android app receives them via FCM (the app registers its device with Novu directly and never calls this server)
+7. Queue browser push notifications and native-device notifications using the same notification-mode gate (`none`, `all`, `keywords`)
+8. Send browser and native push notifications using the same notification-mode gate
 9. Persist decision (messageId, sender, subject, label, status, timestamp)
 10. Advance checkpoint to next UID
 
@@ -79,9 +78,10 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `GET /api/notifications/vapid-public-key` | yes | VAPID public key for browser push subscription setup |
 | `POST\|DELETE /api/notifications/subscriptions` | yes | Upsert or remove a browser push subscription for the signed-in user/device |
 | `POST /api/notifications/test` | yes | Sends a test push notification to all stored subscriptions for the signed-in user and prunes stale endpoints |
-| `GET /api/notifications/novu` | yes | Returns Novu pairing info for the desktop QR code: `applicationIdentifier`, `subscriberId`, `apiBase`, `serverBaseUrl`, `relayEndpoint`, `subscriberHash` (HMAC), `pairingToken`, `pairingExpiresAt`, `pairingTtlSeconds`, `configured`; when Novu is configured it ensures subscriber existence and issues a 90-second pairing token |
-| `POST /api/notifications/novu/relay/fcm` | no | Mobile relay endpoint for Android/iOS token sync. Requires `subscriberId`, `pairingToken`, `deviceToken` (optional `subscriberHash`); validates signed 90-second pairing token and syncs FCM credentials to Novu using server-side `NOVU_SECRET_KEY` |
-| `POST /api/notifications/novu/unpair` | yes | Revokes the Novu FCM credentials registered for this subscriber (disconnects paired Android devices) |
+| `GET /api/notifications/pairing` | yes | Returns native pairing info for the desktop QR code: `subscriberId`, `serverBaseUrl`, `registerEndpoint`, `subscriberHash` (HMAC), `pairingToken`, `pairingExpiresAt`, `pairingTtlSeconds`, `configured` |
+| `POST /api/notifications/native/register` | no | Native mobile registration endpoint. Accepts `subscriberId`, `pairingToken`, `deviceToken`, optional `subscriberHash`, plus optional device metadata; validates pairing token and stores native device token in state |
+| `GET\|DELETE /api/notifications/native/devices` | yes | Lists or removes native registered mobile devices from state using `deviceId` |
+| `POST /api/notifications/native/unpair` | yes | Removes all paired native devices for the current signed-in user |
 
 ### Environment Variables
 
@@ -97,11 +97,12 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `TUNING_FILE` | `$CONFIG_DIR/TUNING.md` | Classification prompt template |
 | `IMAP_CONFIG_FILE` | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
 | `IMAP_CONFIG_KEY_FILE` | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
-| `SERVER_BASE_URL` | empty | Public backend URL embedded in mobile pairing QR (`srv`) and used to build relay endpoint (`relay`) |
-| `NOVU_SECRET_KEY` | empty | Novu API secret used for subscriber credential registration and workflow triggering |
-| `NOVU_WORKFLOW_ID` | empty | Novu workflow identifier triggered for new email keyword notifications |
-| `NOVU_APPLICATION_IDENTIFIER` | empty | Public Novu application identifier embedded in the desktop pairing QR code |
-| `NOVU_API_BASE` | `https://api.novu.co` | Novu API base URL (set to EU endpoint only for EU region) |
+| `SERVER_BASE_URL` | empty | Public backend URL embedded in mobile pairing QR (`srv`) and used to build register endpoint (`reg`) |
+| `PAIRING_SECRET` | empty | HMAC secret used to sign and validate short-lived mobile pairing tokens |
+| `FCM_SERVICE_ACCOUNT_FILE` | empty | Optional path to Firebase service-account JSON for direct backend native push delivery via FCM HTTP v1 |
+| `FCM_PROJECT_ID` | empty | Optional project override; defaults to service-account `project_id` |
+| `FCM_TOKEN_URL` | token URI from service-account | Optional OAuth token endpoint override for test/proxy environments |
+| `FCM_SEND_URL` | `https://fcm.googleapis.com/v1/projects/<project>/messages:send` | Optional FCM HTTP v1 send endpoint override for test/proxy environments |
 
 ### Key Data Files
 
@@ -113,7 +114,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `$CONFIG_DIR/notifications-vapid-private.pem` | Generated browser push private key for notification subscriptions |
 | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
 | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
-| `$STATE_DIR/state.json` | Checkpoint + processed-set + browser push subscriptions + stable Novu `subscriberId` |
+| `$STATE_DIR/state.json` | Checkpoint + processed-set + browser push subscriptions + stable pairing `subscriberId` + native mobile `nativeDevices` registry |
 | `$STATE_DIR/decisions.json` | Decision audit log |
 
 ### Log Files

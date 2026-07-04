@@ -21,6 +21,8 @@ type Store struct {
 	decisions          []Decision
 	notifications      []NotificationSubscription
 	notificationsDirty bool
+	nativeDevices      []NativeDevice
+	nativeDevicesDirty bool
 	subscriberID       string
 
 	aiCreditsExhausted   bool
@@ -46,10 +48,22 @@ type NotificationSubscription struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
+type NativeDevice struct {
+	DeviceID     string `json:"deviceId"`
+	Platform     string `json:"platform"`
+	PushToken    string `json:"pushToken"`
+	DeviceName   string `json:"deviceName,omitempty"`
+	AppVersion   string `json:"appVersion,omitempty"`
+	UserAgent    string `json:"userAgent,omitempty"`
+	RegisteredAt string `json:"registeredAt"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
 type stateFile struct {
 	LastCheckpoint       string                     `json:"lastCheckpoint"`
 	Processed            map[string]string          `json:"processed"`
 	Notifications        []NotificationSubscription `json:"notifications,omitempty"`
+	NativeDevices        []NativeDevice             `json:"nativeDevices,omitempty"`
 	SubscriberID         string                     `json:"subscriberId,omitempty"`
 	AICreditsExhausted   bool                       `json:"aiCreditsExhausted,omitempty"`
 	AICreditsExhaustedAt string                     `json:"aiCreditsExhaustedAt,omitempty"`
@@ -100,6 +114,8 @@ func (s *Store) applyStateFile(sf stateFile) {
 	s.subscriberID = strings.TrimSpace(sf.SubscriberID)
 	s.notifications = append([]NotificationSubscription{}, sf.Notifications...)
 	s.notificationsDirty = false
+	s.nativeDevices = append([]NativeDevice{}, sf.NativeDevices...)
+	s.nativeDevicesDirty = false
 
 	processed := make(map[string]time.Time, len(sf.Processed))
 	for id, ts := range sf.Processed {
@@ -146,6 +162,26 @@ func (s *Store) refreshNotificationsFromDiskLocked() error {
 	}
 	s.notifications = append([]NotificationSubscription{}, sf.Notifications...)
 	s.notificationsDirty = false
+	return nil
+}
+
+func (s *Store) refreshNativeDevicesFromDiskLocked() error {
+	b, err := os.ReadFile(s.path())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var sf struct {
+		NativeDevices []NativeDevice `json:"nativeDevices,omitempty"`
+	}
+	if err := json.Unmarshal(b, &sf); err != nil {
+		return err
+	}
+	s.nativeDevices = append([]NativeDevice{}, sf.NativeDevices...)
+	s.nativeDevicesDirty = false
 	return nil
 }
 
@@ -266,6 +302,11 @@ func (s *Store) persistLocked() error {
 			return err
 		}
 	}
+	if !s.nativeDevicesDirty {
+		if err := s.refreshNativeDevicesFromDiskLocked(); err != nil {
+			return err
+		}
+	}
 
 	processed := make(map[string]string, len(s.processedSet))
 	for id, ts := range s.processedSet {
@@ -275,6 +316,7 @@ func (s *Store) persistLocked() error {
 		LastCheckpoint:       s.checkpoint,
 		Processed:            processed,
 		Notifications:        s.notifications,
+		NativeDevices:        s.nativeDevices,
 		SubscriberID:         s.subscriberID,
 		AICreditsExhausted:   s.aiCreditsExhausted,
 		AICreditsExhaustedAt: s.aiCreditsExhaustedAt,
@@ -286,6 +328,7 @@ func (s *Store) persistLocked() error {
 		return fmt.Errorf("write state: %w", err)
 	}
 	s.notificationsDirty = false
+	s.nativeDevicesDirty = false
 	return nil
 }
 
@@ -328,6 +371,79 @@ func (s *Store) RemoveNotificationSubscription(endpoint string) (bool, error) {
 		}
 		s.notifications = append(s.notifications[:i], s.notifications[i+1:]...)
 		s.notificationsDirty = true
+		if err := s.persistLocked(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *Store) ListNativeDevices() []NativeDevice {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshNativeDevicesFromDiskLocked()
+	out := make([]NativeDevice, len(s.nativeDevices))
+	copy(out, s.nativeDevices)
+	return out
+}
+
+func (s *Store) UpsertNativeDevice(device NativeDevice) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return err
+	}
+
+	device.DeviceID = strings.TrimSpace(device.DeviceID)
+	device.Platform = strings.ToLower(strings.TrimSpace(device.Platform))
+	device.PushToken = strings.TrimSpace(device.PushToken)
+	if device.DeviceID == "" {
+		id, err := newUUIDv4()
+		if err != nil {
+			return err
+		}
+		device.DeviceID = id
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if strings.TrimSpace(device.RegisteredAt) == "" {
+		device.RegisteredAt = now
+	}
+	device.UpdatedAt = now
+
+	for i, existing := range s.nativeDevices {
+		if existing.DeviceID == device.DeviceID {
+			if device.RegisteredAt == "" {
+				device.RegisteredAt = existing.RegisteredAt
+			}
+			s.nativeDevices[i] = device
+			s.nativeDevicesDirty = true
+			return s.persistLocked()
+		}
+	}
+
+	s.nativeDevices = append(s.nativeDevices, device)
+	s.nativeDevicesDirty = true
+	return s.persistLocked()
+}
+
+func (s *Store) RemoveNativeDevice(deviceID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return false, err
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return false, nil
+	}
+
+	for i, device := range s.nativeDevices {
+		if device.DeviceID != deviceID {
+			continue
+		}
+		s.nativeDevices = append(s.nativeDevices[:i], s.nativeDevices[i+1:]...)
+		s.nativeDevicesDirty = true
 		if err := s.persistLocked(); err != nil {
 			return false, err
 		}

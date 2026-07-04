@@ -21,7 +21,7 @@ Required behavior:
 ## Current-State Constraints (Important)
 - Backend auth is currently single-admin from `admin.env`.
 - Sessions are currently in-memory (`token -> expiresAt`), not durable.
-- Most state is global today (`state.json`, `decisions.json`, IMAP config, Novu subscriber id, notification subscriptions).
+- Most state is global today (`state.json`, `decisions.json`, IMAP config, native pairing subscriber id, notification subscriptions).
 - Poller processes a single mailbox stream today.
 - Frontend route guards are auth-only, not role-aware.
 
@@ -67,7 +67,7 @@ Deliverable:
 2. Migrate these global items into per-user ownership:
    - IMAP credentials
    - notification subscriptions
-   - Novu subscriber identity
+   - pairing subscriber identity
    - user tuning prompt
    - mailbox checkpoint + processed set
 3. Map current single-user data to admin user on first migration.
@@ -162,7 +162,7 @@ Denied:
   - IMAP/SMTP credentials
   - mailbox state (checkpoint, processed set)
   - notification subscriptions
-  - Novu subscriber id and pairing state
+   - Pairing subscriber id and pairing state
   - tuning prompt
   - user-specific preferences
 
