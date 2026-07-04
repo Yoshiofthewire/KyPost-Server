@@ -79,7 +79,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `GET /api/notifications/vapid-public-key` | yes | VAPID public key for browser push subscription setup |
 | `POST\|DELETE /api/notifications/subscriptions` | yes | Upsert or remove a browser push subscription for the signed-in user/device |
 | `POST /api/notifications/test` | yes | Sends a test push notification to all stored subscriptions for the signed-in user and prunes stale endpoints |
-| `GET /api/notifications/novu` | yes | Returns Novu pairing info for the desktop QR code: `applicationIdentifier`, `subscriberId`, `apiBase`, `subscriberHash` (HMAC), `configured` |
+| `GET /api/notifications/novu` | yes | Returns Novu pairing info for the desktop QR code: `applicationIdentifier`, `subscriberId`, `apiBase`, `subscriberHash` (HMAC), `configured`; when Novu is configured it also ensures the Novu subscriber exists before returning payload so mobile token sync does not fail on a missing subscriber |
 | `POST /api/notifications/novu/unpair` | yes | Revokes the Novu FCM credentials registered for this subscriber (disconnects paired Android devices) |
 
 ### Environment Variables

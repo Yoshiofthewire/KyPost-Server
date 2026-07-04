@@ -944,6 +944,13 @@ func (s *Server) handleNotificationNovu(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	configured := s.novuSecretKey != "" && s.novuAppIdentifier != ""
+	if configured {
+		if err := s.ensureNovuSubscriber(r.Context(), subscriberID); err != nil {
+			s.logger.Error("failed to ensure novu subscriber", "subscriber_id", subscriberID, "error", err.Error())
+			http.Error(w, "failed to prepare mobile pairing", http.StatusBadGateway)
+			return
+		}
+	}
 	resp := map[string]any{
 		"applicationIdentifier": s.novuAppIdentifier,
 		"subscriberId":          subscriberID,
@@ -978,6 +985,33 @@ func (s *Server) novuSubscriberHash(subscriberID string) string {
 	mac := hmac.New(sha256.New, []byte(s.novuSecretKey))
 	mac.Write([]byte(subscriberID))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) ensureNovuSubscriber(ctx context.Context, subscriberID string) error {
+	body, err := json.Marshal(map[string]any{"subscriberId": strings.TrimSpace(subscriberID)})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.novuAPIBase+"/v1/subscribers", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "ApiKey "+s.novuSecretKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if (resp.StatusCode >= 200 && resp.StatusCode < 300) || resp.StatusCode == http.StatusConflict {
+		return nil
+	}
+
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("novu ensure subscriber status=%d response=%s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 }
 
 func (s *Server) deleteNovuDeviceCredentials(ctx context.Context, subscriberID string) error {
