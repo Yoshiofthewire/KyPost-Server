@@ -672,13 +672,19 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 		return
 	}
 
+	title, body := buildNativeNotificationText(msg)
 	notification := NativePushMessage{
-		Title: "New Email",
-		Body:  buildNotificationBody(msg),
+		Title: title,
+		Body:  body,
+		// title/body are duplicated into data so a mobile client that
+		// renders its own notification from the data payload shows the
+		// sender and subject instead of a generic fallback.
 		Data: map[string]string{
 			"messageId": strings.TrimSpace(msg.ID),
 			"sender":    strings.TrimSpace(msg.Sender),
 			"subject":   strings.TrimSpace(msg.Subject),
+			"title":     title,
+			"body":      body,
 			"url":       "/read",
 		},
 	}
@@ -787,6 +793,24 @@ func buildNotificationBody(msg imapadapter.Message) string {
 		return fmt.Sprintf("From: %s", from)
 	}
 	return fmt.Sprintf("From %s: %s", from, subject)
+}
+
+// buildNativeNotificationText renders a mobile push as a mail app would:
+// the sender is the notification title and the subject its body, so the
+// user sees who it is from and what it is about rather than a generic
+// "New Email".
+func buildNativeNotificationText(msg imapadapter.Message) (title, body string) {
+	from := strings.TrimSpace(msg.Sender)
+	subject := strings.TrimSpace(msg.Subject)
+	title = from
+	if title == "" {
+		title = "New Email"
+	}
+	body = subject
+	if body == "" {
+		body = "You have a new email."
+	}
+	return title, body
 }
 
 func loadVAPIDPrivateKey(path string) (string, error) {

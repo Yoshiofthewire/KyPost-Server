@@ -37,6 +37,11 @@ func Run(args []string) error {
 		LogDir:     envOrDefault("LOG_DIR", "/llama_lab/logs"),
 	}
 
+	// Capture legacy notification prefs before LoadOrInit rewrites
+	// config.yaml with the trimmed multi-user schema (which drops the old
+	// global mode/keywords fields the migration needs).
+	legacyPrefs, legacyPrefsOK := config.LoadLegacyNotificationPrefs(paths.ConfigFile)
+
 	cfg, err := config.LoadOrInit(paths.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -73,7 +78,7 @@ func Run(args []string) error {
 		return fmt.Errorf("load users store: %w", err)
 	}
 
-	if err := migrateLegacySingleUserData(logger, usersStore, configDir, paths.StateDir, paths.ConfigFile); err != nil {
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, paths.StateDir, legacyPrefs, legacyPrefsOK); err != nil {
 		logger.Error("legacy single-user data migration failed", "error", err.Error())
 	}
 

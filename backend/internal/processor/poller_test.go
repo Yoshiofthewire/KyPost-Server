@@ -3,8 +3,51 @@ package processor
 import (
 	"testing"
 
+	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/config"
 )
+
+func TestBuildNativeNotificationText(t *testing.T) {
+	tests := []struct {
+		name      string
+		msg       imapadapter.Message
+		wantTitle string
+		wantBody  string
+	}{
+		{
+			name:      "sender and subject",
+			msg:       imapadapter.Message{Sender: "alice@example.com", Subject: "Invoice #42"},
+			wantTitle: "alice@example.com",
+			wantBody:  "Invoice #42",
+		},
+		{
+			name:      "missing subject",
+			msg:       imapadapter.Message{Sender: "bob@example.com"},
+			wantTitle: "bob@example.com",
+			wantBody:  "You have a new email.",
+		},
+		{
+			name:      "missing sender",
+			msg:       imapadapter.Message{Subject: "Meeting notes"},
+			wantTitle: "New Email",
+			wantBody:  "Meeting notes",
+		},
+		{
+			name:      "empty message",
+			msg:       imapadapter.Message{},
+			wantTitle: "New Email",
+			wantBody:  "You have a new email.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			title, body := buildNativeNotificationText(tc.msg)
+			if title != tc.wantTitle || body != tc.wantBody {
+				t.Fatalf("buildNativeNotificationText() = (%q, %q), want (%q, %q)", title, body, tc.wantTitle, tc.wantBody)
+			}
+		})
+	}
+}
 
 func TestShouldSendNotification(t *testing.T) {
 	tests := []struct {

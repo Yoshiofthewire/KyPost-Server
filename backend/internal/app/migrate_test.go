@@ -46,7 +46,14 @@ func TestMigrateLegacySingleUserData(t *testing.T) {
 		t.Fatalf("FirstAdmin: %v", err)
 	}
 
-	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, configFile); err != nil {
+	// app.Run captures the legacy prefs before LoadOrInit rewrites
+	// config.yaml with the trimmed schema; mirror that order here.
+	legacyPrefs, legacyPrefsOK := config.LoadLegacyNotificationPrefs(configFile)
+	if !legacyPrefsOK {
+		t.Fatalf("expected legacy prefs to parse")
+	}
+
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, legacyPrefs, legacyPrefsOK); err != nil {
 		t.Fatalf("migrateLegacySingleUserData: %v", err)
 	}
 
@@ -74,7 +81,7 @@ func TestMigrateLegacySingleUserData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(userConfigDir, "tuning.md"), []byte("customized"), 0o600); err != nil {
 		t.Fatalf("write customized tuning: %v", err)
 	}
-	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, configFile); err != nil {
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, legacyPrefs, legacyPrefsOK); err != nil {
 		t.Fatalf("second migrateLegacySingleUserData: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(userConfigDir, "tuning.md"))

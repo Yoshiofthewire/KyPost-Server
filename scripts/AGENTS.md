@@ -15,7 +15,7 @@ All files under `scripts/`.
 `entrypoint.sh` → `bootstrap.sh` (one-shot, priority 1) → `supervisord` → `api`, `daemon`, `ollama`, `ollama-model` (parallel, priority 10)
 
 - `entrypoint.sh`: creates required directories, chowns to `llamalab` user, launches `supervisord`
-- `bootstrap.sh`: generates scrypt-hashed admin credentials and writes `admin.env`; **must not be re-run on an existing install** — it overwrites credentials
+- `bootstrap.sh`: on a fresh install (neither `users.json` nor `admin.env` present) generates scrypt-hashed admin credentials into `admin.env`, which the backend imports into `users.json` on first start; skipped entirely when either file exists, so it is safe across restarts
 - `start-ollama.sh`: launches Ollama daemon on port 11434
 - `pull-ollama-model.sh`: pulls the model named by `OLLAMA_MODEL` (docker-compose default: `nemotron-3-nano:4b`); requires Ollama daemon to be running first
 
@@ -36,7 +36,7 @@ All files under `scripts/`.
 
 ## Verification
 
-- `bootstrap.sh` must produce a valid `admin.env` with a non-empty scrypt hash
+- On a fresh install `bootstrap.sh` must produce a valid `admin.env` with a non-empty scrypt hash; on an install with `users.json` or `admin.env` present it must leave both untouched
 
 ## Child DOX Index
 

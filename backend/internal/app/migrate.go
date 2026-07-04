@@ -18,7 +18,7 @@ import (
 // the destination already exists — and safe to run concurrently from the
 // api and daemon processes, since each write is atomic and both processes
 // derive identical content from the same sources.
-func migrateLegacySingleUserData(logger *logging.Logger, usersStore *users.Store, configDir, stateDir, configFile string) error {
+func migrateLegacySingleUserData(logger *logging.Logger, usersStore *users.Store, configDir, stateDir string, legacyPrefs config.UserNotificationSettings, legacyPrefsOK bool) error {
 	admin, err := usersStore.FirstAdmin()
 	if err != nil {
 		if errors.Is(err, users.ErrNotFound) {
@@ -53,17 +53,16 @@ func migrateLegacySingleUserData(logger *logging.Logger, usersStore *users.Store
 		}
 	}
 
-	// Notification delivery preferences from the legacy global config.yaml.
+	// Notification delivery preferences captured from the legacy global
+	// config.yaml before LoadOrInit rewrote it with the trimmed schema.
 	userSettingsPath := filepath.Join(userConfigDir, "config.yaml")
-	if _, err := os.Stat(userSettingsPath); errors.Is(err, os.ErrNotExist) {
-		if prefs, ok := config.LoadLegacyNotificationPrefs(configFile); ok {
-			settings := config.DefaultUserSettings()
-			settings.Notifications = prefs
-			if err := config.SaveUserSettings(userSettingsPath, settings); err != nil {
-				logger.Error("failed to migrate legacy notification preferences", "error", err.Error())
-			} else {
-				logger.Info("migrated legacy notification preferences", "user_id", admin.ID)
-			}
+	if _, err := os.Stat(userSettingsPath); errors.Is(err, os.ErrNotExist) && legacyPrefsOK {
+		settings := config.DefaultUserSettings()
+		settings.Notifications = legacyPrefs
+		if err := config.SaveUserSettings(userSettingsPath, settings); err != nil {
+			logger.Error("failed to migrate legacy notification preferences", "error", err.Error())
+		} else {
+			logger.Info("migrated legacy notification preferences", "user_id", admin.ID)
 		}
 	}
 

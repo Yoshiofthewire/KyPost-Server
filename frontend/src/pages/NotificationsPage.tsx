@@ -628,31 +628,31 @@ export function NotificationsPage() {
           {!pairingStatus?.configured ? (
             <p className="notifications-empty">{pairingStatus?.configurationError ?? "Pairing is not configured on the server yet. Set PAIRING_SECRET first."}</p>
           ) : (
-            <>
-              {pairingQrDataUrl ? (
-                <div className="notifications-qr">
-                  <img className="notifications-qr-image" src={pairingQrDataUrl} alt="Native mobile pairing QR code" width={220} height={220} />
-                  {showPairingBar ? (
-                    <div className="notifications-qr-timer-track" style={{ width: `${QR_CODE_WIDTH_PX}px` }} aria-hidden="true">
-                      <div
-                        className="notifications-qr-timer-bar"
-                        style={{ width: `${pairingBarWidth}px`, background: pairingBarBg }}
-                      />
-                    </div>
-                  ) : null}
+            <div className="notifications-pairing">
+              <div className="notifications-pairing-scan">
+                {pairingQrDataUrl ? (
+                  <div className="notifications-qr">
+                    <img className="notifications-qr-image" src={pairingQrDataUrl} alt="Native mobile pairing QR code" width={220} height={220} />
+                    {showPairingBar ? (
+                      <div className="notifications-qr-timer-track" style={{ width: `${QR_CODE_WIDTH_PX}px` }} aria-hidden="true">
+                        <div
+                          className="notifications-qr-timer-bar"
+                          style={{ width: `${pairingBarWidth}px`, background: pairingBarBg }}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="notifications-empty">Preparing pairing code…</p>
+                )}
+
+                {pairingRefreshBusy ? <p className="notifications-qr-hint">Refreshing pairing code...</p> : null}
+
+                <div className="notifications-android-meta">
+                  <span>Subscriber ID</span>
+                  <strong>{pairingStatus.subscriberId || "Not available"}</strong>
                 </div>
-              ) : (
-                <p className="notifications-empty">Preparing pairing code…</p>
-              )}
 
-              {pairingRefreshBusy ? <p className="notifications-qr-hint">Refreshing pairing code...</p> : null}
-
-              <div className="notifications-android-meta">
-                <span>Subscriber ID</span>
-                <strong>{pairingStatus.subscriberId || "Not available"}</strong>
-              </div>
-
-              <div className="notifications-android-tools">
                 <button type="button" className="notifications-ghost" onClick={() => void revokePairedDevices()} disabled={unpairBusy}>
                   {unpairBusy ? "Revoking..." : "Revoke Paired Devices"}
                 </button>
@@ -691,7 +691,7 @@ export function NotificationsPage() {
                 <span className="notifications-store-disabled" title="Store link coming soon">Google Play (coming soon)</span>
                 <span className="notifications-store-disabled" title="Store link coming soon">App Store (coming soon)</span>
               </div>
-            </>
+            </div>
           )}
         </section>
 

@@ -12,7 +12,8 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 - React 18.3, React Router 6.30, TypeScript, Vite, Quill (WYSIWYG compose editor), qrcode (mobile pairing QR)
 - All HTTP calls go through `src/api/client.ts` (`getJSON`, `postJSON`, `putJSON`, `deleteJSON`, `postFormData`) — never use `fetch` directly in page components
-- Auth state is owned by `App.tsx`; pages read it via props, not via direct `/api/auth/me` calls
+- Auth state is owned by `App.tsx` and published through `AuthContext` (`src/auth.tsx`); pages read `{authenticated, userId, username, role, mustChangePassword}` via `useAuth()`, not via direct `/api/auth/me` calls
+- RBAC: `protect(element, adminOnly)` in `App.tsx` gates routes (`/users` and `/logs` are admin-only, redirecting non-admins to `/read`); `settingsNavItems` entries carry an `adminOnly` flag that filters the settings nav; `ConfigPage` shows only the Email Settings tab (plus a local theme card) to non-admins — Application/Labels/Remote LLM tabs are admin-only. Frontend gating is UX only; the server enforces all policy
 - All pages live under `src/pages/`; routing is defined in `App.tsx`
 - Session cookie (`credentials: 'include'`) is required on every API call — this is handled by `client.ts`
 - Compose window is owned by `App.tsx`; it always uses Quill WYSIWYG and sends via `POST /api/mail/send` (window auto-closes after successful SMTP send, including success-with-warning responses) and its surface colors follow the active theme tokens
@@ -30,10 +31,11 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 | `LoginPage.tsx` | `POST /api/auth/login`, `POST /api/auth/password` (`/login` sign-in plus protected `/password` change-password mode) |
 | `ReadPage.tsx` | `GET /api/inbox?limit=500&mailbox=<name>`, `POST /api/inbox/actions` (bulk inbox actions + read/unread state updates, includes current mailbox context; move actions are triggered by drag-drop from this page) |
 | `HealthPage.tsx` | `GET /api/health`, `GET /api/status` (includes `emailsProcessedLastHour`), `POST /api/health/repair` |
-| `ConfigPage.tsx` | `GET/POST /api/imap/config` (also carries SMTP host/port for sending), `POST /api/imap/test` |
-| `NotificationsPage.tsx` | `GET /api/config`, `GET /api/labels`, `PUT /api/config`, `GET /api/notifications/vapid-public-key`, `POST /api/notifications/subscriptions`, `POST /api/notifications/test`, `GET /api/notifications/pairing`, `POST /api/notifications/native/unpair`, `GET /api/notifications/native/devices`, `DELETE /api/notifications/native/devices` (push notification mode, all-email toggle, IMAP keyword selection, browser device subscription/testing, Android/iOS pairing QR, and native paired-device list/removal controls) |
-| `TuningPage.tsx` | `GET/PUT /api/tuning` |
-| `LogsPage.tsx` | `GET /api/logs?file=<name>.log&lines=<n>`, `GET /api/logs/list` |
+| `ConfigPage.tsx` | `GET/PUT /api/config` (admin tabs), `GET/POST/DELETE /api/imap/config` (also carries SMTP host/port for sending), `POST /api/imap/test`, `POST /api/llama/test` (admin tab), `GET /api/labels` |
+| `NotificationsPage.tsx` | `GET/PUT /api/notifications/preferences` (per-user delivery mode + keywords), `GET /api/config` (read-only, for label options), `GET /api/labels`, `GET /api/notifications/vapid-public-key`, `POST /api/notifications/subscriptions`, `POST /api/notifications/test`, `GET /api/notifications/pairing`, `POST /api/notifications/native/unpair`, `GET /api/notifications/native/devices`, `DELETE /api/notifications/native/devices` |
+| `UsersPage.tsx` (admin only) | `GET/POST /api/users`, `PUT /api/users/{id}`, `POST /api/users/{id}/reset-password`, `POST /api/users/{id}/deactivate`, `POST /api/users/{id}/reactivate` via `src/api/users.ts` |
+| `TuningPage.tsx` | `GET/PUT /api/tuning` (caller's own prompt) |
+| `LogsPage.tsx` (admin only) | `GET /api/logs?file=<name>.log&lines=<n>`, `GET /api/logs/list` |
 
 ### App Shell → API Mapping
 
