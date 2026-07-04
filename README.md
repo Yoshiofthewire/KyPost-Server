@@ -133,9 +133,11 @@ Required Novu setup per client/deployment:
 
 Desktop pairing behavior:
 
-- Notifications page renders a QR link with `app`, `sub`, `hash`, and `api`.
-- Mobile app scans QR and registers directly with Novu.
-- Mobile app never calls this backend.
+- Notifications page renders a QR link with `app`, `sub`, `hash`, `api`, `srv`, `relay`, and `pt`.
+- `pt` is a signed pairing token valid for 90 seconds.
+- UI shows a 4px countdown bar under the QR that shrinks over 90 seconds, transitions green to red, and is red during the last 15 seconds.
+- Mobile app scans QR and syncs its device token through `relay` (or `srv + /api/notifications/novu/relay/fcm` fallback).
+- Relay endpoint (`POST /api/notifications/novu/relay/fcm`) validates `pt` and registers token to Novu using server-side credentials to avoid mobile-side 401s.
 
 ## Persistence
 

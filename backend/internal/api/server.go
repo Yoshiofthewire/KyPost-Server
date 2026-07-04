@@ -131,6 +131,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
 	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
 	mux.HandleFunc("GET /api/notifications/novu", s.withAuth(s.handleNotificationNovu))
+	mux.HandleFunc("POST /api/notifications/novu/relay/fcm", s.handleNotificationNovuRelayFCM)
 	mux.HandleFunc("POST /api/notifications/novu/unpair", s.withAuth(s.handleNotificationNovuUnpair))
 	mux.HandleFunc("GET /api/setup", s.handleSetup)
 	mux.HandleFunc("/", s.handleFrontend)
@@ -944,6 +945,9 @@ func (s *Server) handleNotificationNovu(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	configured := s.novuSecretKey != "" && s.novuAppIdentifier != ""
+	serverBaseURL := externalBaseURL(r)
+	relayEndpoint := strings.TrimRight(serverBaseURL, "/") + "/api/notifications/novu/relay/fcm"
+	pairingTTLSeconds := int64(90)
 	if configured {
 		if err := s.ensureNovuSubscriber(r.Context(), subscriberID); err != nil {
 			s.logger.Error("failed to ensure novu subscriber", "subscriber_id", subscriberID, "error", err.Error())
@@ -955,12 +959,77 @@ func (s *Server) handleNotificationNovu(w http.ResponseWriter, r *http.Request) 
 		"applicationIdentifier": s.novuAppIdentifier,
 		"subscriberId":          subscriberID,
 		"apiBase":               s.novuAPIBase,
+		"serverBaseUrl":         serverBaseURL,
+		"relayEndpoint":         relayEndpoint,
+		"pairingTtlSeconds":     pairingTTLSeconds,
 		"configured":            configured,
 	}
 	if configured {
 		resp["subscriberHash"] = s.novuSubscriberHash(subscriberID)
+		token, expiresAt, err := s.createPairingToken(subscriberID, time.Duration(pairingTTLSeconds)*time.Second)
+		if err != nil {
+			s.logger.Error("failed to create pairing token", "subscriber_id", subscriberID, "error", err.Error())
+			http.Error(w, "failed to prepare mobile pairing", http.StatusInternalServerError)
+			return
+		}
+		resp["pairingToken"] = token
+		resp["pairingExpiresAt"] = expiresAt.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type novuRelayFCMRequest struct {
+	SubscriberID   string `json:"subscriberId"`
+	SubscriberHash string `json:"subscriberHash"`
+	PairingToken   string `json:"pairingToken"`
+	DeviceToken    string `json:"deviceToken"`
+}
+
+func (s *Server) handleNotificationNovuRelayFCM(w http.ResponseWriter, r *http.Request) {
+	if s.novuSecretKey == "" {
+		http.Error(w, "novu is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req novuRelayFCMRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	subscriberID := strings.TrimSpace(req.SubscriberID)
+	subscriberHash := strings.ToLower(strings.TrimSpace(req.SubscriberHash))
+	pairingToken := strings.TrimSpace(req.PairingToken)
+	deviceToken := strings.TrimSpace(req.DeviceToken)
+	if subscriberID == "" || pairingToken == "" || deviceToken == "" {
+		http.Error(w, "subscriberId, pairingToken, and deviceToken are required", http.StatusBadRequest)
+		return
+	}
+	if err := s.validatePairingToken(subscriberID, pairingToken, time.Now().UTC()); err != nil {
+		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
+		return
+	}
+
+	if subscriberHash != "" {
+		expectedHash := s.novuSubscriberHash(subscriberID)
+		if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
+			http.Error(w, "invalid subscriber hash", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if err := s.ensureNovuSubscriber(r.Context(), subscriberID); err != nil {
+		s.logger.Error("novu relay ensure subscriber failed", "subscriber_id", subscriberID, "error", err.Error())
+		http.Error(w, "failed to sync device token", http.StatusBadGateway)
+		return
+	}
+	if err := s.upsertNovuFCMCredential(r.Context(), subscriberID, deviceToken); err != nil {
+		s.logger.Error("novu relay fcm token sync failed", "subscriber_id", subscriberID, "error", err.Error())
+		http.Error(w, "failed to sync device token", http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "synced": true})
 }
 
 func (s *Server) handleNotificationNovuUnpair(w http.ResponseWriter, r *http.Request) {
@@ -985,6 +1054,76 @@ func (s *Server) novuSubscriberHash(subscriberID string) string {
 	mac := hmac.New(sha256.New, []byte(s.novuSecretKey))
 	mac.Write([]byte(subscriberID))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+type pairingTokenClaims struct {
+	Sub   string `json:"sub"`
+	Exp   int64  `json:"exp"`
+	Nonce string `json:"n"`
+}
+
+func (s *Server) createPairingToken(subscriberID string, ttl time.Duration) (string, time.Time, error) {
+	if ttl <= 0 {
+		ttl = 90 * time.Second
+	}
+	nonceBytes := make([]byte, 8)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return "", time.Time{}, err
+	}
+
+	expiresAt := time.Now().UTC().Add(ttl)
+	claims := pairingTokenClaims{
+		Sub:   strings.TrimSpace(subscriberID),
+		Exp:   expiresAt.Unix(),
+		Nonce: hex.EncodeToString(nonceBytes),
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	mac := hmac.New(sha256.New, []byte(s.novuSecretKey))
+	mac.Write(payload)
+	sig := mac.Sum(nil)
+
+	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return token, expiresAt, nil
+}
+
+func (s *Server) validatePairingToken(subscriberID, token string, now time.Time) error {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 2 {
+		return errors.New("invalid token format")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return errors.New("invalid token payload")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return errors.New("invalid token signature")
+	}
+
+	mac := hmac.New(sha256.New, []byte(s.novuSecretKey))
+	mac.Write(payload)
+	expectedSig := mac.Sum(nil)
+	if subtle.ConstantTimeCompare(sig, expectedSig) != 1 {
+		return errors.New("signature mismatch")
+	}
+
+	var claims pairingTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return errors.New("invalid token claims")
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(strings.TrimSpace(subscriberID))) != 1 {
+		return errors.New("subscriber mismatch")
+	}
+	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
+		return errors.New("token expired")
+	}
+
+	return nil
 }
 
 func (s *Server) ensureNovuSubscriber(ctx context.Context, subscriberID string) error {
@@ -1012,6 +1151,91 @@ func (s *Server) ensureNovuSubscriber(ctx context.Context, subscriberID string) 
 
 	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return fmt.Errorf("novu ensure subscriber status=%d response=%s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+}
+
+func (s *Server) upsertNovuFCMCredential(ctx context.Context, subscriberID, deviceToken string) error {
+	token := strings.TrimSpace(deviceToken)
+	if token == "" {
+		return errors.New("empty fcm token")
+	}
+
+	trimmedSubscriber := strings.TrimSpace(subscriberID)
+	variants := []struct {
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{
+			method: http.MethodPut,
+			path:   "/v1/subscribers/" + url.PathEscape(trimmedSubscriber) + "/credentials/fcm",
+			body:   map[string]any{"deviceTokens": []string{token}},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/v1/subscribers/" + url.PathEscape(trimmedSubscriber) + "/credentials",
+			body: map[string]any{
+				"providerId": "fcm",
+				"credentials": map[string]any{
+					"deviceTokens": []string{token},
+				},
+			},
+		},
+		{
+			method: http.MethodPatch,
+			path:   "/v1/subscribers/" + url.PathEscape(trimmedSubscriber) + "/credentials/fcm",
+			body:   map[string]any{"deviceTokens": []string{token}},
+		},
+	}
+
+	var lastErr error
+	for _, attempt := range variants {
+		body, err := json.Marshal(attempt.body)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, attempt.method, s.novuAPIBase+attempt.path, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "ApiKey "+s.novuSecretKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("novu credential upsert method=%s path=%s status=%d response=%s", attempt.method, attempt.path, resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("novu credential upsert failed")
+	}
+	return lastErr
+}
+
+func externalBaseURL(r *http.Request) string {
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	if proto == "" {
+		if r.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	host := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0])
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	return proto + "://" + host
 }
 
 func (s *Server) deleteNovuDeviceCredentials(ctx context.Context, subscriberID string) error {

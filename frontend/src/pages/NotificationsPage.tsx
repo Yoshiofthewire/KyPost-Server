@@ -25,9 +25,18 @@ type NovuStatusResponse = {
   applicationIdentifier: string;
   subscriberId: string;
   apiBase: string;
+  serverBaseUrl?: string;
+  relayEndpoint?: string;
   subscriberHash?: string;
+  pairingToken?: string;
+  pairingExpiresAt?: string;
+  pairingTtlSeconds?: number;
   configured: boolean;
 };
+
+const QR_CODE_WIDTH_PX = 220;
+const DEFAULT_PAIRING_TTL_SECONDS = 90;
+const PAIRING_RED_ZONE_SECONDS = 15;
 
 function collectNotificationKeywordOptions(cfg: AppConfig, labelsData: LabelsResponse): string[] {
   const configured = cfg.labels.allowlist ?? [];
@@ -47,7 +56,32 @@ function buildNovuPairingLink(novu: NovuStatusResponse): string {
   if (novu.apiBase) {
     params.set("api", novu.apiBase);
   }
+  if (novu.serverBaseUrl) {
+    params.set("srv", novu.serverBaseUrl);
+  }
+  if (novu.relayEndpoint) {
+    params.set("relay", novu.relayEndpoint);
+  }
+  if (novu.pairingToken) {
+    params.set("pt", novu.pairingToken);
+  }
   return `llamalabels://novu-pair?${params.toString()}`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function pairingBarColor(remainingMs: number, ttlMs: number): string {
+  const redZoneMs = PAIRING_RED_ZONE_SECONDS * 1000;
+  if (remainingMs <= redZoneMs) {
+    return "hsl(0 88% 46%)";
+  }
+  const activeMs = Math.max(ttlMs - redZoneMs, 1);
+  const elapsedMs = clamp(activeMs - (remainingMs - redZoneMs), 0, activeMs);
+  const ratio = elapsedMs / activeMs;
+  const hue = Math.round(120 - ratio * 120);
+  return `hsl(${hue} 88% 44%)`;
 }
 
 export function NotificationsPage() {
@@ -60,8 +94,35 @@ export function NotificationsPage() {
   const [novuStatus, setNovuStatus] = useState<NovuStatusResponse | null>(null);
   const [novuQrDataUrl, setNovuQrDataUrl] = useState("");
   const [unpairBusy, setUnpairBusy] = useState(false);
+  const [pairingExpiresAtMs, setPairingExpiresAtMs] = useState<number | null>(null);
+  const [pairingTtlMs, setPairingTtlMs] = useState(DEFAULT_PAIRING_TTL_SECONDS * 1000);
+  const [pairingClockMs, setPairingClockMs] = useState<number>(() => Date.now());
+  const [pairingRefreshBusy, setPairingRefreshBusy] = useState(false);
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
+
+  function applyNovuStatus(next: NovuStatusResponse | null) {
+    setNovuStatus(next);
+    if (!next) {
+      setPairingExpiresAtMs(null);
+      return;
+    }
+
+    const ttlSeconds = typeof next.pairingTtlSeconds === "number" && next.pairingTtlSeconds > 0
+      ? next.pairingTtlSeconds
+      : DEFAULT_PAIRING_TTL_SECONDS;
+    setPairingTtlMs(ttlSeconds * 1000);
+
+    if (next.pairingExpiresAt) {
+      const expiresMs = Date.parse(next.pairingExpiresAt);
+      setPairingExpiresAtMs(Number.isFinite(expiresMs) ? expiresMs : Date.now() + ttlSeconds * 1000);
+    } else if (next.pairingToken) {
+      setPairingExpiresAtMs(Date.now() + ttlSeconds * 1000);
+    } else {
+      setPairingExpiresAtMs(null);
+    }
+    setPairingClockMs(Date.now());
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -81,11 +142,11 @@ export function NotificationsPage() {
         try {
           const status = await getJSON<NovuStatusResponse>("/api/notifications/novu");
           if (!cancelled) {
-            setNovuStatus(status);
+            applyNovuStatus(status);
           }
         } catch {
           if (!cancelled) {
-            setNovuStatus(null);
+            applyNovuStatus(null);
           }
         }
       } catch {
@@ -100,6 +161,38 @@ export function NotificationsPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!pairingExpiresAtMs) {
+      return;
+    }
+    let cancelled = false;
+    let refreshTriggered = false;
+
+    const tick = () => {
+      if (cancelled) {
+        return;
+      }
+      const now = Date.now();
+      setPairingClockMs(now);
+      if (now >= pairingExpiresAtMs && !refreshTriggered) {
+        refreshTriggered = true;
+        setPairingRefreshBusy(true);
+        void refreshNovuStatus().finally(() => {
+          if (!cancelled) {
+            setPairingRefreshBusy(false);
+          }
+        });
+      }
+    };
+
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pairingExpiresAtMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -236,11 +329,16 @@ export function NotificationsPage() {
   async function refreshNovuStatus() {
     try {
       const next = await getJSON<NovuStatusResponse>("/api/notifications/novu");
-      setNovuStatus(next);
+      applyNovuStatus(next);
     } catch {
-      setNovuStatus(null);
+      applyNovuStatus(null);
     }
   }
+
+  const pairingRemainingMs = pairingExpiresAtMs ? Math.max(0, pairingExpiresAtMs - pairingClockMs) : 0;
+  const pairingBarWidth = Math.round(QR_CODE_WIDTH_PX * clamp(pairingRemainingMs / Math.max(pairingTtlMs, 1), 0, 1));
+  const showPairingBar = pairingRemainingMs > 0 && novuStatus?.configured;
+  const pairingBarBg = pairingBarColor(pairingRemainingMs, pairingTtlMs);
 
   async function revokePairedDevices() {
     setUnpairBusy(true);
@@ -432,11 +530,21 @@ export function NotificationsPage() {
               {novuQrDataUrl ? (
                 <div className="notifications-qr">
                   <img className="notifications-qr-image" src={novuQrDataUrl} alt="Android pairing QR code" width={220} height={220} />
-                  <p className="notifications-qr-hint">Open the Android app, choose Pair Device, and scan this code. The code carries only your Novu app identifier and subscriber id.</p>
+                  {showPairingBar ? (
+                    <div className="notifications-qr-timer-track" style={{ width: `${QR_CODE_WIDTH_PX}px` }} aria-hidden="true">
+                      <div
+                        className="notifications-qr-timer-bar"
+                        style={{ width: `${pairingBarWidth}px`, background: pairingBarBg }}
+                      />
+                    </div>
+                  ) : null}
+                  <p className="notifications-qr-hint">Open the Android app, choose Pair Device, and scan this code. The code includes Novu identifiers plus your server relay endpoint for mobile token sync.</p>
                 </div>
               ) : (
                 <p className="notifications-empty">Preparing pairing code…</p>
               )}
+
+              {pairingRefreshBusy ? <p className="notifications-qr-hint">Refreshing pairing code...</p> : null}
 
               <div className="notifications-android-meta">
                 <span>Subscriber ID</span>

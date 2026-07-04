@@ -994,6 +994,19 @@ pre {
   border: 1px solid var(--line);
 }
 
+.notifications-qr-timer-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 82%, transparent);
+  overflow: hidden;
+}
+
+.notifications-qr-timer-bar {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 180ms linear, background 220ms linear;
+}
+
 .notifications-qr-hint {
   margin: 0;
   font-size: 0.84rem;

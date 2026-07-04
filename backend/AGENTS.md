@@ -79,7 +79,8 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `GET /api/notifications/vapid-public-key` | yes | VAPID public key for browser push subscription setup |
 | `POST\|DELETE /api/notifications/subscriptions` | yes | Upsert or remove a browser push subscription for the signed-in user/device |
 | `POST /api/notifications/test` | yes | Sends a test push notification to all stored subscriptions for the signed-in user and prunes stale endpoints |
-| `GET /api/notifications/novu` | yes | Returns Novu pairing info for the desktop QR code: `applicationIdentifier`, `subscriberId`, `apiBase`, `subscriberHash` (HMAC), `configured`; when Novu is configured it also ensures the Novu subscriber exists before returning payload so mobile token sync does not fail on a missing subscriber |
+| `GET /api/notifications/novu` | yes | Returns Novu pairing info for the desktop QR code: `applicationIdentifier`, `subscriberId`, `apiBase`, `serverBaseUrl`, `relayEndpoint`, `subscriberHash` (HMAC), `pairingToken`, `pairingExpiresAt`, `pairingTtlSeconds`, `configured`; when Novu is configured it ensures subscriber existence and issues a 90-second pairing token |
+| `POST /api/notifications/novu/relay/fcm` | no | Mobile relay endpoint for Android/iOS token sync. Requires `subscriberId`, `pairingToken`, `deviceToken` (optional `subscriberHash`); validates signed 90-second pairing token and syncs FCM credentials to Novu using server-side `NOVU_SECRET_KEY` |
 | `POST /api/notifications/novu/unpair` | yes | Revokes the Novu FCM credentials registered for this subscriber (disconnects paired Android devices) |
 
 ### Environment Variables
