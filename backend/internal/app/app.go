@@ -21,6 +21,7 @@ import (
 	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/processor"
 	"llama-lab/backend/internal/state"
+	"llama-lab/backend/internal/users"
 )
 
 // Run dispatches the process mode and blocks until shutdown for long-running modes.
@@ -67,6 +68,12 @@ func Run(args []string) error {
 		return fmt.Errorf("create state store: %w", err)
 	}
 
+	configDir := envOrDefault("CONFIG_DIR", "/llama_lab/config")
+	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	if err != nil {
+		return fmt.Errorf("load users store: %w", err)
+	}
+
 	healthSvc := health.NewService()
 	healthSvc.MarkHealthy()
 
@@ -74,9 +81,9 @@ func Run(args []string) error {
 	case "daemon":
 		return runDaemon(cfg, paths.ConfigFile, logger, store, healthSvc)
 	case "server":
-		return runServer(cfg, logger, store, healthSvc)
+		return runServer(cfg, logger, store, healthSvc, usersStore)
 	case "all":
-		return runAll(cfg, paths.ConfigFile, logger, store, healthSvc)
+		return runAll(cfg, paths.ConfigFile, logger, store, healthSvc, usersStore)
 	default:
 		return errors.New("invalid mode; expected daemon, server, or all")
 	}
@@ -100,12 +107,12 @@ func runDaemon(cfg config.Config, configPath string, logger *logging.Logger, sto
 	return nil
 }
 
-func runServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service) error {
-	srv := api.NewServer(cfg, logger, store, healthSvc, newMailClient(), nil)
+func runServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service, usersStore *users.Store) error {
+	srv := api.NewServer(cfg, logger, store, healthSvc, usersStore, newMailClient(), nil)
 	return srv.Run()
 }
 
-func runAll(cfg config.Config, configPath string, logger *logging.Logger, store *state.Store, healthSvc *health.Service) error {
+func runAll(cfg config.Config, configPath string, logger *logging.Logger, store *state.Store, healthSvc *health.Service, usersStore *users.Store) error {
 	// Restore the sticky AI-credits flag onto the health status so a restart
 	// keeps surfacing it until a successful classify clears it.
 	if exhausted, at := store.AICreditsExhausted(); exhausted {
@@ -118,7 +125,7 @@ func runAll(cfg config.Config, configPath string, logger *logging.Logger, store 
 		return err
 	}
 	poller.SetConfigPath(configPath)
-	srv := api.NewServer(cfg, logger, store, healthSvc, mailClient, poller.UpdateConfig)
+	srv := api.NewServer(cfg, logger, store, healthSvc, usersStore, mailClient, poller.UpdateConfig)
 	warmupLlamaOnStartup(logger, llamaClient, poller)
 
 	stop := make(chan os.Signal, 1)

@@ -1,0 +1,436 @@
+// Package users provides the multi-user identity/role store, replacing the
+// legacy single-admin admin.env file.
+package users
+
+import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"llama-lab/backend/internal/fsutil"
+
+	"golang.org/x/crypto/scrypt"
+)
+
+type Role string
+
+const (
+	RoleAdmin Role = "admin"
+	RoleUser  Role = "user"
+)
+
+// User is a single account record. Files/directories owned by a user are
+// always keyed by ID, never Username, so a rename never requires moving data.
+type User struct {
+	ID                 string `json:"id"`
+	Username           string `json:"username"`
+	PasswordHash       string `json:"passwordHash"`
+	Role               Role   `json:"role"`
+	Active             bool   `json:"active"`
+	MustChangePassword bool   `json:"mustChangePassword"`
+	CreatedAt          string `json:"createdAt"`
+	UpdatedAt          string `json:"updatedAt"`
+	DeactivatedAt      string `json:"deactivatedAt,omitempty"`
+}
+
+// Public is the JSON-safe view returned to API clients (no password hash).
+type Public struct {
+	ID                 string `json:"id"`
+	Username           string `json:"username"`
+	Role               Role   `json:"role"`
+	Active             bool   `json:"active"`
+	MustChangePassword bool   `json:"mustChangePassword"`
+	CreatedAt          string `json:"createdAt"`
+	UpdatedAt          string `json:"updatedAt"`
+	DeactivatedAt      string `json:"deactivatedAt,omitempty"`
+}
+
+func (u User) Public() Public {
+	return Public{
+		ID:                 u.ID,
+		Username:           u.Username,
+		Role:               u.Role,
+		Active:             u.Active,
+		MustChangePassword: u.MustChangePassword,
+		CreatedAt:          u.CreatedAt,
+		UpdatedAt:          u.UpdatedAt,
+		DeactivatedAt:      u.DeactivatedAt,
+	}
+}
+
+var (
+	ErrNotFound      = errors.New("user not found")
+	ErrUsernameTaken = errors.New("username already in use")
+)
+
+type usersFile struct {
+	Version int    `json:"version"`
+	Users   []User `json:"users"`
+}
+
+// Store is the on-disk users.json store. It re-reads from disk before every
+// mutation so the api and daemon processes (which never share memory, see
+// supervisord.conf) never race a lost update against each other.
+type Store struct {
+	mu   sync.RWMutex
+	path string
+}
+
+func newStore(path string) *Store {
+	return &Store{path: path}
+}
+
+// LoadOrMigrate opens CONFIG_DIR/users.json, creating it on first run by
+// best-effort importing the legacy single-admin admin.env, or minting a
+// fresh default admin if neither exists. This is intentionally simple:
+// there is no production data to preserve, so a clean reset is an
+// acceptable fallback if the legacy file is missing or unparseable.
+func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
+	path := filepath.Join(configDir, "users.json")
+	store := newStore(path)
+
+	if _, err := os.Stat(path); err == nil {
+		if _, err := store.readLocked(); err != nil {
+			return nil, err
+		}
+		return store, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	if admin, ok := readLegacyAdminEnv(legacyAdminEnvPath); ok {
+		now := time.Now().UTC().Format(time.RFC3339)
+		id, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return nil, err
+		}
+		u := User{
+			ID:                 id,
+			Username:           admin["ADMIN_USER"],
+			PasswordHash:       admin["ADMIN_PASS_HASH"],
+			Role:               RoleAdmin,
+			Active:             true,
+			MustChangePassword: strings.EqualFold(admin["MUST_CHANGE_PASSWORD"], "true"),
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		if u.PasswordHash == "" && admin["ADMIN_PASS"] != "" {
+			hash, err := HashPassword(admin["ADMIN_PASS"])
+			if err != nil {
+				return nil, err
+			}
+			u.PasswordHash = hash
+		}
+		if u.Username == "" {
+			u.Username = "admin"
+		}
+		if err := store.writeLocked(usersFile{Version: 1, Users: []User{u}}); err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+
+	// Fresh install with no legacy admin.env: mint a default admin. In the
+	// normal container flow scripts/bootstrap.sh runs first and admin.env
+	// will already exist, so this path is mainly a defensive fallback for
+	// running the server standalone (e.g. local dev).
+	randomPassword, err := randomPassword()
+	if err != nil {
+		return nil, err
+	}
+	hash, err := HashPassword(randomPassword)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	id, err := fsutil.NewUUIDv4()
+	if err != nil {
+		return nil, err
+	}
+	u := User{
+		ID:                 id,
+		Username:           "admin",
+		PasswordHash:       hash,
+		Role:               RoleAdmin,
+		Active:             true,
+		MustChangePassword: true,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	if err := store.writeLocked(usersFile{Version: 1, Users: []User{u}}); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "Generated first-run admin credentials\nUsername: %s\nPassword: %s\nPassword change is required on first login\n", u.Username, randomPassword)
+	return store, nil
+}
+
+func randomPassword() (string, error) {
+	b := make([]byte, 18)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func readLegacyAdminEnv(path string) (map[string]string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out[parts[0]] = parts[1]
+	}
+	if out["ADMIN_USER"] == "" {
+		return nil, false
+	}
+	return out, true
+}
+
+func (s *Store) readLocked() (usersFile, error) {
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		return usersFile{}, err
+	}
+	var f usersFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		return usersFile{}, err
+	}
+	return f, nil
+}
+
+func (s *Store) writeLocked(f usersFile) error {
+	if f.Version == 0 {
+		f.Version = 1
+	}
+	b, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsutil.AtomicWriteFile(s.path, b, 0o600)
+}
+
+// List returns every user (including deactivated ones), sorted by username.
+func (s *Store) List() ([]User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return nil, err
+	}
+	return f.Users, nil
+}
+
+// Get returns a user by ID.
+func (s *Store) Get(id string) (User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return User{}, err
+	}
+	for _, u := range f.Users {
+		if u.ID == id {
+			return u, nil
+		}
+	}
+	return User{}, ErrNotFound
+}
+
+// GetByUsername returns a user by username (case-sensitive).
+func (s *Store) GetByUsername(username string) (User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return User{}, err
+	}
+	for _, u := range f.Users {
+		if u.Username == username {
+			return u, nil
+		}
+	}
+	return User{}, ErrNotFound
+}
+
+// Create adds a new user with the given username/password/role.
+func (s *Store) Create(username, password string, role Role) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return User{}, err
+	}
+	for _, u := range f.Users {
+		if u.Username == username {
+			return User{}, ErrUsernameTaken
+		}
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return User{}, err
+	}
+	id, err := fsutil.NewUUIDv4()
+	if err != nil {
+		return User{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	u := User{
+		ID:                 id,
+		Username:           username,
+		PasswordHash:       hash,
+		Role:               role,
+		Active:             true,
+		MustChangePassword: true,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	f.Users = append(f.Users, u)
+	if err := s.writeLocked(f); err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
+// mutate re-reads the store, applies fn to the matching user, and persists
+// the result. fn returns an error to abort without writing.
+func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return User{}, err
+	}
+	for i := range f.Users {
+		if f.Users[i].ID == id {
+			if err := fn(&f.Users[i]); err != nil {
+				return User{}, err
+			}
+			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			if err := s.writeLocked(f); err != nil {
+				return User{}, err
+			}
+			return f.Users[i], nil
+		}
+	}
+	return User{}, ErrNotFound
+}
+
+// SetRole updates a user's role.
+func (s *Store) SetRole(id string, role Role) (User, error) {
+	return s.mutate(id, func(u *User) error {
+		u.Role = role
+		return nil
+	})
+}
+
+// SetPassword sets a new password. If requireChange is true the user must
+// change it again on next login (used for admin-initiated resets).
+func (s *Store) SetPassword(id, newPassword string, requireChange bool) (User, error) {
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return User{}, err
+	}
+	return s.mutate(id, func(u *User) error {
+		u.PasswordHash = hash
+		u.MustChangePassword = requireChange
+		return nil
+	})
+}
+
+// Deactivate soft-deletes a user: their sessions stop being accepted and
+// they can no longer log in, but their data is retained.
+func (s *Store) Deactivate(id string) (User, error) {
+	return s.mutate(id, func(u *User) error {
+		u.Active = false
+		u.DeactivatedAt = time.Now().UTC().Format(time.RFC3339)
+		return nil
+	})
+}
+
+// Reactivate restores a previously deactivated user.
+func (s *Store) Reactivate(id string) (User, error) {
+	return s.mutate(id, func(u *User) error {
+		u.Active = true
+		u.DeactivatedAt = ""
+		return nil
+	})
+}
+
+// VerifyPassword checks a candidate password against a user's stored hash.
+func VerifyPassword(u User, candidate string) bool {
+	return verifyScryptHash(u.PasswordHash, candidate)
+}
+
+// HashPassword produces a scrypt-encoded hash string in the same format
+// used historically by admin.env's ADMIN_PASS_HASH field.
+func HashPassword(password string) (string, error) {
+	const (
+		n      = 16384
+		r      = 8
+		p      = 1
+		keyLen = 32
+	)
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	hash, err := scrypt.Key([]byte(password), salt, n, r, p, keyLen)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"scrypt$%d$%d$%d$%s$%s",
+		n, r, p,
+		base64.StdEncoding.EncodeToString(salt),
+		base64.StdEncoding.EncodeToString(hash),
+	), nil
+}
+
+func verifyScryptHash(encoded, candidate string) bool {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 || parts[0] != "scrypt" {
+		return false
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	r, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return false
+	}
+	p, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return false
+	}
+	salt, err := base64.StdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false
+	}
+	expected, err := base64.StdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return false
+	}
+	if len(expected) == 0 {
+		return false
+	}
+	derived, err := scrypt.Key([]byte(candidate), salt, n, r, p, len(expected))
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(derived, expected) == 1
+}

@@ -38,15 +38,32 @@ import (
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/adapters/llama"
 	"llama-lab/backend/internal/config"
+	"llama-lab/backend/internal/fsutil"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/processor"
 	"llama-lab/backend/internal/state"
+	"llama-lab/backend/internal/users"
 
 	goimap "github.com/BrianLeishman/go-imap"
 	"github.com/SherClockHolmes/webpush-go"
-	"golang.org/x/crypto/scrypt"
 )
+
+// Session tracks who a live session token belongs to. Role is deliberately
+// not stored here: currentUser looks the user up live from the users store
+// on every request so a role change or deactivation take effect on the very
+// next request rather than only at next login.
+type Session struct {
+	UserID    string
+	ExpiresAt time.Time
+}
+
+// AuthContext identifies the caller of an authenticated request.
+type AuthContext struct {
+	UserID   string
+	Username string
+	Role     users.Role
+}
 
 type Server struct {
 	mu                sync.RWMutex
@@ -55,23 +72,22 @@ type Server struct {
 	logger            *logging.Logger
 	store             *state.Store
 	health            *health.Service
+	users             *users.Store
 	configPath        string
 	logPath           string
-	adminPath         string
 	tuningPath        string
 	imapConfigPath    string
 	imapConfigKeyPath string
 	mail              imapadapter.Client
-	sessions          map[string]time.Time
+	sessions          map[string]Session
 	pairingSecret     string
 	serverBaseURL     string
 	nativeSenders     []processor.NativeSender
 }
 
-func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service, mailClient imapadapter.Client, onConfigUpdated func(config.Config)) *Server {
+func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service, usersStore *users.Store, mailClient imapadapter.Client, onConfigUpdated func(config.Config)) *Server {
 	configPath := filepath.Join(envOrDefault("CONFIG_DIR", "/llama_lab/config"), "config.yaml")
 	logPath := filepath.Join(envOrDefault("LOG_DIR", "/llama_lab/logs"), "app.log")
-	adminPath := filepath.Join(envOrDefault("CONFIG_DIR", "/llama_lab/config"), "admin.env")
 	tuningPath := resolveTuningPath()
 	imapConfigPath := envOrDefault("IMAP_CONFIG_FILE", "/llama_lab/private/imap-config.json")
 	imapConfigKeyPath := envOrDefault("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key")
@@ -82,14 +98,14 @@ func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, he
 		logger:            logger,
 		store:             store,
 		health:            healthSvc,
+		users:             usersStore,
 		configPath:        configPath,
 		logPath:           logPath,
-		adminPath:         adminPath,
 		tuningPath:        tuningPath,
 		imapConfigPath:    imapConfigPath,
 		imapConfigKeyPath: imapConfigKeyPath,
 		mail:              mailClient,
-		sessions:          map[string]time.Time{},
+		sessions:          map[string]Session{},
 		pairingSecret:     pairingSecret,
 		serverBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
 		nativeSenders:     processor.NewNativeSendersFromEnv(logger),
@@ -1770,16 +1786,32 @@ func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	admin, err := readAdminEnv(s.adminPath)
+	all, err := s.users.List()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeJSON(w, http.StatusOK, map[string]any{"configured": false})
-			return
-		}
 		http.Error(w, "failed to read setup state", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "setup": map[string]any{"admin_user": admin["ADMIN_USER"], "must_change_password": strings.EqualFold(admin["MUST_CHANGE_PASSWORD"], "true")}})
+	if len(all) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"configured": false})
+		return
+	}
+	admin := firstAdmin(all)
+	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "setup": map[string]any{"admin_user": admin.Username, "must_change_password": admin.MustChangePassword}})
+}
+
+// firstAdmin returns the earliest-created active admin, used only for the
+// pre-login /api/setup hint (prefilling the login form's username).
+func firstAdmin(all []users.User) users.User {
+	var best users.User
+	for _, u := range all {
+		if u.Role != users.RoleAdmin || !u.Active {
+			continue
+		}
+		if best.ID == "" || u.CreatedAt < best.CreatedAt {
+			best = u
+		}
+	}
+	return best
 }
 
 func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
@@ -1797,12 +1829,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	admin, err := readAdminEnv(s.adminPath)
-	if err != nil {
-		http.Error(w, "auth config unavailable", http.StatusInternalServerError)
-		return
-	}
-	if req.Username != admin["ADMIN_USER"] || !verifyAdminPassword(admin, req.Password) {
+	u, err := s.users.GetByUsername(req.Username)
+	if err != nil || !u.Active || !users.VerifyPassword(u, req.Password) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -1812,10 +1840,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	s.sessions[token] = time.Now().Add(24 * time.Hour)
+	s.sessions[token] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour)}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mustChangePassword": strings.EqualFold(admin["MUST_CHANGE_PASSWORD"], "true")})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mustChangePassword": u.MustChangePassword})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -1830,27 +1858,34 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	if !s.authorize(r) {
+	ac, ok := s.currentUser(r)
+	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
 	subscriberID, _ := s.store.GetOrCreateSubscriberID()
-	admin, err := readAdminEnv(s.adminPath)
+	u, err := s.users.Get(ac.UserID)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "subscriberId": subscriberID})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated":      true,
-		"username":           admin["ADMIN_USER"],
-		"mustChangePassword": strings.EqualFold(admin["MUST_CHANGE_PASSWORD"], "true"),
+		"userId":             u.ID,
+		"username":           u.Username,
+		"role":               u.Role,
+		"mustChangePassword": u.MustChangePassword,
 		"subscriberId":       subscriberID,
 	})
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
 	var req struct {
-		Username    string `json:"username"`
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
 	}
@@ -1862,29 +1897,20 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "new password required", http.StatusBadRequest)
 		return
 	}
-	admin, err := readAdminEnv(s.adminPath)
+	u, err := s.users.Get(ac.UserID)
 	if err != nil {
-		http.Error(w, "auth config unavailable", http.StatusInternalServerError)
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
 	}
-	mustChange := strings.EqualFold(admin["MUST_CHANGE_PASSWORD"], "true")
-	if !mustChange && !verifyAdminPassword(admin, req.OldPassword) {
+	if !u.MustChangePassword && !users.VerifyPassword(u, req.OldPassword) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	if mustChange && strings.TrimSpace(req.OldPassword) != "" && !verifyAdminPassword(admin, req.OldPassword) {
+	if u.MustChangePassword && strings.TrimSpace(req.OldPassword) != "" && !users.VerifyPassword(u, req.OldPassword) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	hash, err := hashAdminPassword(req.NewPassword)
-	if err != nil {
-		http.Error(w, "failed to update password", http.StatusInternalServerError)
-		return
-	}
-	admin["ADMIN_PASS_HASH"] = hash
-	delete(admin, "ADMIN_PASS")
-	admin["MUST_CHANGE_PASSWORD"] = "false"
-	if err := writeAdminEnv(s.adminPath, admin); err != nil {
+	if _, err := s.users.SetPassword(u.ID, req.NewPassword, false); err != nil {
 		http.Error(w, "failed to update password", http.StatusInternalServerError)
 		return
 	}
@@ -1979,34 +2005,59 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.authorize(r) {
+		ac, ok := s.currentUser(r)
+		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
 }
 
-func (s *Server) authorize(r *http.Request) bool {
+type authContextKey struct{}
+
+// authFromContext retrieves the AuthContext injected by withAuth. It only
+// returns ok=false if called on a request that never passed through
+// withAuth (a programming error), since withAuth already rejects the
+// request before next() runs otherwise.
+func authFromContext(r *http.Request) (AuthContext, bool) {
+	ac, ok := r.Context().Value(authContextKey{}).(AuthContext)
+	return ac, ok
+}
+
+// currentUser validates the session cookie and looks the owning user up
+// live from the users store (not snapshotted into the session), so a role
+// change or deactivation take effect on the request immediately following
+// it rather than only at next login.
+func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 	cookie, err := r.Cookie("llama_session")
 	if err != nil {
-		return false
+		return AuthContext{}, false
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	expiresAt, ok := s.sessions[cookie.Value]
+	sess, ok := s.sessions[cookie.Value]
 	if !ok {
-		return false
+		s.mu.Unlock()
+		return AuthContext{}, false
 	}
-	if time.Now().After(expiresAt) {
+	if time.Now().After(sess.ExpiresAt) {
 		delete(s.sessions, cookie.Value)
-		return false
+		s.mu.Unlock()
+		return AuthContext{}, false
 	}
-
 	// Sliding window session expiry for active users.
-	s.sessions[cookie.Value] = time.Now().Add(24 * time.Hour)
-	return true
+	s.sessions[cookie.Value] = Session{UserID: sess.UserID, ExpiresAt: time.Now().Add(24 * time.Hour)}
+	s.mu.Unlock()
+
+	u, err := s.users.Get(sess.UserID)
+	if err != nil || !u.Active {
+		s.mu.Lock()
+		delete(s.sessions, cookie.Value)
+		s.mu.Unlock()
+		return AuthContext{}, false
+	}
+	return AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -2121,105 +2172,6 @@ func tailLines(path string, limit int) ([]string, error) {
 	return buf, nil
 }
 
-func readAdminEnv(path string) (map[string]string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		out[parts[0]] = parts[1]
-	}
-	return out, nil
-}
-
-func writeAdminEnv(path string, kv map[string]string) error {
-	content := fmt.Sprintf("ADMIN_USER=%s\n", kv["ADMIN_USER"])
-	if hash := strings.TrimSpace(kv["ADMIN_PASS_HASH"]); hash != "" {
-		content += fmt.Sprintf("ADMIN_PASS_HASH=%s\n", hash)
-	} else {
-		content += fmt.Sprintf("ADMIN_PASS=%s\n", kv["ADMIN_PASS"])
-	}
-	content += fmt.Sprintf("MUST_CHANGE_PASSWORD=%s\n", kv["MUST_CHANGE_PASSWORD"])
-	return os.WriteFile(path, []byte(content), 0o600)
-}
-
-func verifyAdminPassword(admin map[string]string, candidate string) bool {
-	hash := strings.TrimSpace(admin["ADMIN_PASS_HASH"])
-	if hash != "" {
-		return verifyScryptHash(hash, candidate)
-	}
-	legacy := admin["ADMIN_PASS"]
-	if legacy == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(legacy), []byte(candidate)) == 1
-}
-
-func hashAdminPassword(password string) (string, error) {
-	const (
-		n      = 16384
-		r      = 8
-		p      = 1
-		keyLen = 32
-	)
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	hash, err := scrypt.Key([]byte(password), salt, n, r, p, keyLen)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(
-		"scrypt$%d$%d$%d$%s$%s",
-		n,
-		r,
-		p,
-		base64.StdEncoding.EncodeToString(salt),
-		base64.StdEncoding.EncodeToString(hash),
-	), nil
-}
-
-func verifyScryptHash(encoded, candidate string) bool {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 6 || parts[0] != "scrypt" {
-		return false
-	}
-	n, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return false
-	}
-	r, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return false
-	}
-	p, err := strconv.Atoi(parts[3])
-	if err != nil {
-		return false
-	}
-	salt, err := base64.StdEncoding.DecodeString(parts[4])
-	if err != nil {
-		return false
-	}
-	expected, err := base64.StdEncoding.DecodeString(parts[5])
-	if err != nil {
-		return false
-	}
-	if len(expected) == 0 {
-		return false
-	}
-	derived, err := scrypt.Key([]byte(candidate), salt, n, r, p, len(expected))
-	if err != nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare(derived, expected) == 1
-}
-
 func randomToken(size int) (string, error) {
 	b := make([]byte, size)
 	if _, err := rand.Read(b); err != nil {
@@ -2229,29 +2181,5 @@ func randomToken(size int) (string, error) {
 }
 
 func atomicWritePrivateFile(path string, payload []byte) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, base+".tmp.*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpName)
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(payload); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return fsutil.AtomicWriteFile(path, payload, 0o600)
 }

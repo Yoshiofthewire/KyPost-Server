@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/state"
+	"llama-lab/backend/internal/users"
 )
 
 type stubMailClient struct{}
@@ -85,15 +87,25 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("state.New: %v", err)
 	}
 
-	srv := NewServer(config.Default(), logger, store, health.NewService(), &stubMailClient{}, nil)
+	configDir := t.TempDir()
+	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	if err != nil {
+		t.Fatalf("users.LoadOrMigrate: %v", err)
+	}
+
+	srv := NewServer(config.Default(), logger, store, health.NewService(), usersStore, &stubMailClient{}, nil)
 	srv.pairingSecret = "test-pairing-secret"
 	return srv
 }
 
 func authRequest(s *Server, req *http.Request) {
+	all, err := s.users.List()
+	if err != nil || len(all) == 0 {
+		panic("authRequest: no test user available")
+	}
 	token := "session-token"
 	s.mu.Lock()
-	s.sessions[token] = time.Now().Add(24 * time.Hour)
+	s.sessions[token] = Session{UserID: all[0].ID, ExpiresAt: time.Now().Add(24 * time.Hour)}
 	s.mu.Unlock()
 	req.AddCookie(&http.Cookie{Name: "llama_session", Value: token})
 }
