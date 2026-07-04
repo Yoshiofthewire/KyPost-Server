@@ -171,9 +171,9 @@ func (s *fcmSender) Send(ctx context.Context, device state.NativeDevice, message
 				"body":  message.Body,
 			},
 			"data": message.Data,
-		},
-		"android": map[string]any{
-			"priority": "HIGH",
+			"android": map[string]any{
+				"priority": "HIGH",
+			},
 		},
 	}
 	body, err := json.Marshal(payload)
