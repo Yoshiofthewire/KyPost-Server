@@ -92,7 +92,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, he
 		sessions:          map[string]time.Time{},
 		pairingSecret:     pairingSecret,
 		serverBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
-		nativeSenders:     processor.NewNativeSendersFromEnv(),
+		nativeSenders:     processor.NewNativeSendersFromEnv(logger),
 	}
 }
 
@@ -931,7 +931,11 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	nativeSent := 0
 	nativeFailed := 0
 	nativeRemoved := 0
-	if len(nativeDevices) > 0 && len(s.nativeSenders) > 0 {
+	nativeError := ""
+	if len(nativeDevices) > 0 && len(s.nativeSenders) == 0 {
+		nativeError = "no native push sender configured on the server (set FCM_SERVICE_ACCOUNT_FILE and FCM_PROJECT_ID)"
+		s.logger.Error("test native notification skipped", "reason", nativeError, "devices", strconv.Itoa(len(nativeDevices)))
+	} else if len(nativeDevices) > 0 {
 		nativeMessage := processor.NativePushMessage{
 			Title: title,
 			Body:  body,
@@ -941,6 +945,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 			sender := processor.SelectNativeSender(s.nativeSenders, device.Platform)
 			if sender == nil {
 				nativeFailed++
+				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "error", "no sender for platform")
 				continue
 			}
 			sendCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
@@ -953,14 +958,15 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 						nativeRemoved++
 					}
 				}
+				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "sender", sender.Name(), "error", err.Error())
 				continue
 			}
 			nativeSent++
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                  failed == 0 && nativeFailed == 0,
+	resp := map[string]any{
+		"ok":                  failed == 0 && nativeFailed == 0 && nativeError == "",
 		"subscriptions":       len(subs),
 		"sent":                sent,
 		"failed":              failed,
@@ -970,7 +976,11 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		"nativeSent":          nativeSent,
 		"nativeFailed":        nativeFailed,
 		"nativeRemovedStale":  nativeRemoved,
-	})
+	}
+	if nativeError != "" {
+		resp["nativeError"] = nativeError
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Request) {

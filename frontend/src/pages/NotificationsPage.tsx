@@ -23,6 +23,7 @@ type NotificationTestResponse = {
   nativeSent?: number;
   nativeFailed?: number;
   nativeRemovedStale?: number;
+  nativeError?: string;
 };
 
 type PairingStatusResponse = {
@@ -343,7 +344,8 @@ export function NotificationsPage() {
       const nativeSent = result.nativeSent ?? 0;
       const webSummary = `${result.sent}/${result.subscriptions} web`;
       const nativeSummary = nativeDevices > 0 ? `, ${nativeSent}/${nativeDevices} mobile` : "";
-      setStatus(`Test sent: ${webSummary}${nativeSummary} device(s) delivered.`);
+      const nativeErrorSuffix = result.nativeError ? ` Mobile failed: ${result.nativeError}.` : "";
+      setStatus(`Test sent: ${webSummary}${nativeSummary} device(s) delivered.${nativeErrorSuffix}`);
     } catch (error: unknown) {
       const detail = toErrorMessage(error, "unknown error");
       setStatus(`Failed to send test notification: ${detail}`);

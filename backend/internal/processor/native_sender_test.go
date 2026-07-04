@@ -39,9 +39,9 @@ func TestFCMSenderSendSuccess(t *testing.T) {
 	t.Setenv("FCM_PROJECT_ID", "demo-project")
 	t.Setenv("FCM_SEND_URL", ts.URL+"/send")
 
-	sender := newFCMSenderFromEnv()
+	sender := newFCMSenderFromEnv(nil)
 	if sender == nil {
-		t.Fatal("newFCMSenderFromEnv() returned nil")
+		t.Fatal("newFCMSenderFromEnv(nil) returned nil")
 	}
 	sender.client = ts.Client()
 
@@ -75,9 +75,9 @@ func TestFCMSenderSendReturnsStaleError(t *testing.T) {
 	t.Setenv("FCM_PROJECT_ID", "demo-project")
 	t.Setenv("FCM_SEND_URL", ts.URL+"/send")
 
-	sender := newFCMSenderFromEnv()
+	sender := newFCMSenderFromEnv(nil)
 	if sender == nil {
-		t.Fatal("newFCMSenderFromEnv() returned nil")
+		t.Fatal("newFCMSenderFromEnv(nil) returned nil")
 	}
 	sender.client = ts.Client()
 

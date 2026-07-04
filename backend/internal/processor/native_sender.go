@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/state"
 )
 
@@ -63,15 +64,22 @@ type fcmServiceAccount struct {
 	TokenURI    string `json:"token_uri"`
 }
 
-func NewNativeSendersFromEnv() []NativeSender {
+func NewNativeSendersFromEnv(log *logging.Logger) []NativeSender {
 	out := make([]NativeSender, 0, 1)
-	if sender := newFCMSenderFromEnv(); sender != nil {
+	if sender := newFCMSenderFromEnv(log); sender != nil {
 		out = append(out, sender)
 	}
 	return out
 }
 
-func newFCMSenderFromEnv() *fcmSender {
+func logNativeSenderError(log *logging.Logger, reason, detail string) {
+	if log == nil {
+		return
+	}
+	log.Error("fcm native sender not configured", "reason", reason, "detail", detail)
+}
+
+func newFCMSenderFromEnv(log *logging.Logger) *fcmSender {
 	serviceAccountPath := strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE"))
 	if serviceAccountPath == "" {
 		return nil
@@ -79,19 +87,23 @@ func newFCMSenderFromEnv() *fcmSender {
 
 	serviceAccountData, err := os.ReadFile(serviceAccountPath)
 	if err != nil {
+		logNativeSenderError(log, "failed to read FCM_SERVICE_ACCOUNT_FILE", fmt.Sprintf("path=%s error=%s", serviceAccountPath, err.Error()))
 		return nil
 	}
 
 	var sa fcmServiceAccount
 	if err := json.Unmarshal(serviceAccountData, &sa); err != nil {
+		logNativeSenderError(log, "failed to parse FCM_SERVICE_ACCOUNT_FILE as JSON", fmt.Sprintf("path=%s error=%s", serviceAccountPath, err.Error()))
 		return nil
 	}
 	clientEmail := strings.TrimSpace(sa.ClientEmail)
 	if clientEmail == "" {
+		logNativeSenderError(log, "FCM service account JSON missing client_email", fmt.Sprintf("path=%s", serviceAccountPath))
 		return nil
 	}
 	privateKey, err := parseFCMPrivateKey(sa.PrivateKey)
 	if err != nil {
+		logNativeSenderError(log, "failed to parse FCM service account private_key", fmt.Sprintf("path=%s error=%s", serviceAccountPath, err.Error()))
 		return nil
 	}
 
@@ -100,6 +112,7 @@ func newFCMSenderFromEnv() *fcmSender {
 		projectID = strings.TrimSpace(sa.ProjectID)
 	}
 	if projectID == "" {
+		logNativeSenderError(log, "FCM project id missing", "set FCM_PROJECT_ID or include project_id in the service account JSON")
 		return nil
 	}
 

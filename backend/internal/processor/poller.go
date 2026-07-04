@@ -49,7 +49,7 @@ func New(cfg config.Config, log *logging.Logger, store *state.Store, healthSvc *
 	if err != nil {
 		return nil, err
 	}
-	p := &Poller{cfg: cfg, log: log, store: store, health: healthSvc, mail: mailClient, llama: llamaClient, redaction: re, processed: []time.Time{}, nativeSenders: NewNativeSendersFromEnv()}
+	p := &Poller{cfg: cfg, log: log, store: store, health: healthSvc, mail: mailClient, llama: llamaClient, redaction: re, processed: []time.Time{}, nativeSenders: NewNativeSendersFromEnv(log)}
 	p.tickSem = make(chan struct{}, 1)
 	p.tickSem <- struct{}{}
 	return p, nil
