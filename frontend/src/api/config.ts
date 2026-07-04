@@ -1,3 +1,5 @@
+// Global/system config document (admin-editable). Per-user notification
+// delivery preferences moved to /api/notifications/preferences.
 export type AppConfig = {
   timezone: string;
   logLevel: string;
@@ -5,10 +7,6 @@ export type AppConfig = {
   rateLimits: { perMinute: number; perHour: number };
   labels: { allowlist: string[]; keywordMappings: Record<string, string[]> };
   llama: { baseUrl: string; apiKey: string; classifyPath: string };
-  notifications: {
-    mode: "all" | "keywords" | "none";
-    keywords: string[];
-  };
 };
 
 export function uniqueLabels(labels: string[]): string[] {
@@ -41,7 +39,6 @@ export function normalizeConfig(input: unknown): AppConfig {
   const llama = source.llama ?? {};
   const scan = source.scan ?? {};
   const rateLimits = source.rateLimits ?? {};
-  const notifications = source.notifications ?? {};
 
   return {
     timezone: source.timezone ?? "UTC",
@@ -58,11 +55,7 @@ export function normalizeConfig(input: unknown): AppConfig {
     llama: {
       baseUrl: llama.baseUrl ?? "",
       apiKey: llama.apiKey ?? "",
-      classifyPath: llama.classifyPath ?? "/"
-    },
-    notifications: {
-      mode: notifications.mode ?? "none",
-      keywords: Array.isArray(notifications.keywords) ? notifications.keywords.map(String) : []
+      classifyPath: llama.classifyPath ?? ""
     }
   };
 }

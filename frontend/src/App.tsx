@@ -3,6 +3,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
+import { AuthContext, type AuthState } from "./auth";
 import { ConfigPage } from "./pages/ConfigPage";
 import { HealthPage } from "./pages/HealthPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -10,25 +11,21 @@ import { LogsPage } from "./pages/LogsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { ReadPage } from "./pages/ReadPage";
 import { TuningPage } from "./pages/TuningPage";
+import { UsersPage } from "./pages/UsersPage";
 
-const settingsNavItems = [
-  ["/login", "Login"],
-  ["/health", "System Health"],
-  ["/config", "Configuration"],
-  ["/notifications", "Notifications"],
-  ["/tuning", "Prompt Tuning"],
-  ["/logs", "System Logs"]
-] as const;
+const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: boolean }> = [
+  { to: "/login", label: "Login" },
+  { to: "/health", label: "System Health" },
+  { to: "/config", label: "Configuration" },
+  { to: "/notifications", label: "Notifications" },
+  { to: "/tuning", label: "Prompt Tuning" },
+  { to: "/users", label: "Manage Users", adminOnly: true },
+  { to: "/logs", label: "System Logs", adminOnly: true }
+];
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-};
-
-type AuthState = {
-  authenticated: boolean;
-  username?: string;
-  mustChangePassword?: boolean;
 };
 
 type InboxFolder = {
@@ -524,14 +521,20 @@ export function App() {
     );
   }
 
-  function protect(element: JSX.Element) {
+  const isAdmin = auth.role === "admin";
+
+  function protect(element: JSX.Element, adminOnly = false) {
     if (!auth.authenticated) {
       return <Navigate to="/login" replace />;
+    }
+    if (adminOnly && !isAdmin) {
+      return <Navigate to="/read" replace />;
     }
     return element;
   }
 
   return (
+    <AuthContext.Provider value={auth}>
     <div className="shell">
       <aside className="sidebar">
         <div className="sidebar-logo">
@@ -714,7 +717,9 @@ export function App() {
 
           {settingsOpen ? (
             <div className="nav-group">
-              {settingsNavItems.map(([to, label]) => (
+              {settingsNavItems
+                .filter(({ adminOnly }) => !adminOnly || isAdmin)
+                .map(({ to, label }) => (
                 <Link
                   key={to}
                   className={(to === "/login" && auth.authenticated ? "/password" : to) === location.pathname ? "sidebar-link-active" : ""}
@@ -758,7 +763,8 @@ export function App() {
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/notifications" element={protect(<NotificationsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
-          <Route path="/logs" element={protect(<LogsPage />)} />
+          <Route path="/users" element={protect(<UsersPage />, true)} />
+          <Route path="/logs" element={protect(<LogsPage />, true)} />
         </Routes>
       </main>
       <dialog
@@ -824,5 +830,6 @@ export function App() {
           </section>
       </dialog>
     </div>
+    </AuthContext.Provider>
   );
 }

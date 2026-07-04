@@ -1,0 +1,198 @@
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"llama-lab/backend/internal/users"
+)
+
+// withAdmin layers an admin-role requirement on top of withAuth. Handlers
+// wrapped by it can rely on authFromContext returning an admin.
+func (s *Server) withAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		ac, ok := authFromContext(r)
+		if !ok || ac.Role != users.RoleAdmin {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin access required"})
+			return
+		}
+		next(w, r)
+	})
+}
+
+func (s *Server) handleUsersList(w http.ResponseWriter, r *http.Request) {
+	all, err := s.users.List()
+	if err != nil {
+		http.Error(w, "failed to list users", http.StatusInternalServerError)
+		return
+	}
+	out := make([]users.Public, 0, len(all))
+	for _, u := range all {
+		out = append(out, u.Public())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": out})
+}
+
+func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" {
+		http.Error(w, "username required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		http.Error(w, "password required", http.StatusBadRequest)
+		return
+	}
+	role, err := parseRole(req.Role)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.Create(req.Username, req.Password, role)
+	if err != nil {
+		if errors.Is(err, users.ErrUsernameTaken) {
+			http.Error(w, "username already in use", http.StatusConflict)
+			return
+		}
+		http.Error(w, "failed to create user", http.StatusInternalServerError)
+		return
+	}
+	s.logger.Info("user created", "user_id", u.ID, "username", u.Username, "role", string(u.Role))
+	writeJSON(w, http.StatusCreated, u.Public())
+}
+
+func (s *Server) handleUsersUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	role, err := parseRole(req.Role)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if role != users.RoleAdmin {
+		if blocked, err := s.isLastActiveAdmin(id); err != nil {
+			http.Error(w, "failed to update user", http.StatusInternalServerError)
+			return
+		} else if blocked {
+			http.Error(w, "cannot demote the last active admin", http.StatusBadRequest)
+			return
+		}
+	}
+	u, err := s.users.SetRole(id, role)
+	if err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("user role updated", "user_id", u.ID, "role", string(u.Role))
+	writeJSON(w, http.StatusOK, u.Public())
+}
+
+func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		http.Error(w, "password required", http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.SetPassword(id, req.Password, true)
+	if err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("user password reset by admin", "user_id", u.ID)
+	writeJSON(w, http.StatusOK, u.Public())
+}
+
+func (s *Server) handleUsersDeactivate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if blocked, err := s.isLastActiveAdmin(id); err != nil {
+		http.Error(w, "failed to deactivate user", http.StatusInternalServerError)
+		return
+	} else if blocked {
+		http.Error(w, "cannot deactivate the last active admin", http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.Deactivate(id)
+	if err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("user deactivated", "user_id", u.ID)
+	writeJSON(w, http.StatusOK, u.Public())
+}
+
+func (s *Server) handleUsersReactivate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u, err := s.users.Reactivate(id)
+	if err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("user reactivated", "user_id", u.ID)
+	writeJSON(w, http.StatusOK, u.Public())
+}
+
+// isLastActiveAdmin reports whether the given user is the only active admin
+// left, in which case deactivating or demoting them would lock everyone out
+// of user management permanently.
+func (s *Server) isLastActiveAdmin(id string) (bool, error) {
+	all, err := s.users.List()
+	if err != nil {
+		return false, err
+	}
+	target := false
+	otherActiveAdmins := 0
+	for _, u := range all {
+		if u.Role != users.RoleAdmin || !u.Active {
+			continue
+		}
+		if u.ID == id {
+			target = true
+		} else {
+			otherActiveAdmins++
+		}
+	}
+	return target && otherActiveAdmins == 0, nil
+}
+
+func parseRole(raw string) (users.Role, error) {
+	switch users.Role(strings.TrimSpace(raw)) {
+	case users.RoleAdmin:
+		return users.RoleAdmin, nil
+	case users.RoleUser, "":
+		return users.RoleUser, nil
+	default:
+		return "", errors.New("invalid role; expected admin or user")
+	}
+}
+
+func writeUserStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, users.ErrNotFound) {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	http.Error(w, "user store error", http.StatusInternalServerError)
+}

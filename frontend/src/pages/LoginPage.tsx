@@ -1,12 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getJSON, postJSON } from "../api/client";
-
-type AuthState = {
-  authenticated: boolean;
-  username?: string;
-  mustChangePassword?: boolean;
-};
+import type { AuthState } from "../auth";
 
 type SetupState = {
   configured: boolean;

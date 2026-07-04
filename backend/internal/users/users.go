@@ -133,7 +133,7 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 		if u.Username == "" {
 			u.Username = "admin"
 		}
-		if err := store.writeLocked(usersFile{Version: 1, Users: []User{u}}); err != nil {
+		if _, err := store.createInitial(usersFile{Version: 1, Users: []User{u}}); err != nil {
 			return nil, err
 		}
 		return store, nil
@@ -166,11 +166,56 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
-	if err := store.writeLocked(usersFile{Version: 1, Users: []User{u}}); err != nil {
+	won, err := store.createInitial(usersFile{Version: 1, Users: []User{u}})
+	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "Generated first-run admin credentials\nUsername: %s\nPassword: %s\nPassword change is required on first login\n", u.Username, randomPassword)
+	if won {
+		fmt.Fprintf(os.Stderr, "Generated first-run admin credentials\nUsername: %s\nPassword: %s\nPassword change is required on first login\n", u.Username, randomPassword)
+	}
 	return store, nil
+}
+
+// createInitial writes the very first users.json atomically and exclusively.
+// The api and daemon processes start at the same time on first boot; if the
+// other process creates the file first, the loser silently adopts the
+// winner's copy so both agree on the admin's user ID.
+func (s *Store) createInitial(f usersFile) (won bool, err error) {
+	if f.Version == 0 {
+		f.Version = 1
+	}
+	b, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(dir, ".users.json.tmp.*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Link(tmpName, s.path); err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func randomPassword() (string, error) {
@@ -221,6 +266,29 @@ func (s *Store) writeLocked(f usersFile) error {
 		return err
 	}
 	return fsutil.AtomicWriteFile(s.path, b, 0o600)
+}
+
+// FirstAdmin returns the earliest-created active admin. Used by the legacy
+// single-user migration to decide which user inherits the global data, and
+// by the pre-login setup hint.
+func (s *Store) FirstAdmin() (User, error) {
+	all, err := s.List()
+	if err != nil {
+		return User{}, err
+	}
+	var best User
+	for _, u := range all {
+		if u.Role != RoleAdmin || !u.Active {
+			continue
+		}
+		if best.ID == "" || u.CreatedAt < best.CreatedAt {
+			best = u
+		}
+	}
+	if best.ID == "" {
+		return User{}, ErrNotFound
+	}
+	return best, nil
 }
 
 // List returns every user (including deactivated ones), sorted by username.

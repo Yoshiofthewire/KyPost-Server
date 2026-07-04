@@ -6,13 +6,16 @@ import (
 )
 
 type Client interface {
-	Classify(ctx context.Context, allowedLabels []string, sender, subject, body string) (string, error)
+	// Classify labels one email. tuning is the caller's tuning prompt text,
+	// passed per call so one shared client (with its serialized pacing
+	// toward the single model backend) can serve every user's mailbox.
+	Classify(ctx context.Context, allowedLabels []string, sender, subject, body, tuning string) (string, error)
 }
 
 // StubClient is a temporary no-op implementation used during scaffolding.
 type StubClient struct{}
 
-func (s *StubClient) Classify(_ context.Context, allowedLabels []string, _, _, _ string) (string, error) {
+func (s *StubClient) Classify(_ context.Context, allowedLabels []string, _, _, _, _ string) (string, error) {
 	if len(allowedLabels) == 0 {
 		return "", nil
 	}

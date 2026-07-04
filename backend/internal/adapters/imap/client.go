@@ -72,6 +72,11 @@ type APIClient struct {
 	username string
 	password string
 	mailbox  string
+
+	// configPath/configKeyPath override the process-wide default stored
+	// config location so one client can be built per user's credential file.
+	configPath    string
+	configKeyPath string
 }
 
 type storedIMAPConfig struct {
@@ -113,6 +118,17 @@ func NewAPIClientFromEnv() *APIClient {
 	}
 }
 
+// NewAPIClientFromStoredConfig builds a client that loads its credentials
+// from a specific encrypted config file (per-user), never from env vars.
+func NewAPIClientFromStoredConfig(configPath, configKeyPath string) *APIClient {
+	return &APIClient{
+		port:          993,
+		mailbox:       "INBOX",
+		configPath:    configPath,
+		configKeyPath: configKeyPath,
+	}
+}
+
 func defaultConfigPath() string {
 	path := strings.TrimSpace(os.Getenv("IMAP_CONFIG_FILE"))
 	if path == "" {
@@ -134,7 +150,16 @@ func (c *APIClient) ensureCredentialsFromStoredConfigLocked() error {
 		return nil
 	}
 
-	raw, err := os.ReadFile(defaultConfigPath())
+	configPath := c.configPath
+	if strings.TrimSpace(configPath) == "" {
+		configPath = defaultConfigPath()
+	}
+	keyPath := c.configKeyPath
+	if strings.TrimSpace(keyPath) == "" {
+		keyPath = defaultConfigKeyPath()
+	}
+
+	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -142,7 +167,7 @@ func (c *APIClient) ensureCredentialsFromStoredConfigLocked() error {
 		return fmt.Errorf("read imap config: %w", err)
 	}
 
-	plain, err := decryptStoredPayload(raw, defaultConfigKeyPath())
+	plain, err := decryptStoredPayload(raw, keyPath)
 	if err != nil {
 		return fmt.Errorf("decrypt imap config: %w", err)
 	}

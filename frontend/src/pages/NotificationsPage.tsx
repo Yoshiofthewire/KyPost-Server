@@ -53,15 +53,28 @@ type NativeDevicesResponse = {
   devices: NativeDevice[];
 };
 
+// Per-user delivery preferences, stored server-side per account (the global
+// config no longer carries notification mode/keywords).
+type NotificationPrefs = {
+  mode: "all" | "keywords" | "none";
+  keywords: string[];
+};
+
+function normalizePrefs(input: unknown): NotificationPrefs {
+  const source = (input ?? {}) as Record<string, unknown>;
+  const mode = source.mode === "all" || source.mode === "keywords" ? source.mode : "none";
+  const keywords = Array.isArray(source.keywords) ? source.keywords.map(String) : [];
+  return { mode, keywords };
+}
+
 const QR_CODE_WIDTH_PX = 220;
 const DEFAULT_PAIRING_TTL_SECONDS = 90;
 const PAIRING_RED_ZONE_SECONDS = 15;
 
-function collectNotificationKeywordOptions(cfg: AppConfig, labelsData: LabelsResponse): string[] {
+function collectNotificationKeywordOptions(cfg: AppConfig, labelsData: LabelsResponse, selected: string[]): string[] {
   const configured = cfg.labels.allowlist ?? [];
   const mapped = Object.values(cfg.labels.keywordMappings ?? {}).flat();
   const imap = labelsData.imap ?? [];
-  const selected = cfg.notifications.keywords ?? [];
   return uniqueLabels([...configured, ...mapped, ...imap, ...selected]);
 }
 
@@ -131,6 +144,7 @@ function pairingBarColor(remainingMs: number, ttlMs: number): string {
 
 export function NotificationsPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
+  const [prefs, setPrefs] = useState<NotificationPrefs | null>(null);
   const [availableKeywords, setAvailableKeywords] = useState<string[]>([]);
   const [settingsTab, setSettingsTab] = useState<"delivery" | "keywords">("delivery");
   const [status, setStatus] = useState("");
@@ -177,16 +191,19 @@ export function NotificationsPage() {
 
     async function load() {
       try {
-        const [nextConfig, labelsData] = await Promise.all([
+        const [nextConfig, labelsData, rawPrefs] = await Promise.all([
           getJSON<unknown>("/api/config"),
-          getJSON<LabelsResponse>("/api/labels")
+          getJSON<LabelsResponse>("/api/labels"),
+          getJSON<unknown>("/api/notifications/preferences")
         ]);
         if (cancelled) {
           return;
         }
         const normalized = normalizeConfig(nextConfig);
+        const nextPrefs = normalizePrefs(rawPrefs);
         setCfg(normalized);
-        setAvailableKeywords(collectNotificationKeywordOptions(normalized, labelsData));
+        setPrefs(nextPrefs);
+        setAvailableKeywords(collectNotificationKeywordOptions(normalized, labelsData, nextPrefs.keywords));
         try {
           const status = await getJSON<PairingStatusResponse>("/api/notifications/pairing");
           if (!cancelled) {
@@ -268,21 +285,18 @@ export function NotificationsPage() {
   }, [pairingStatus]);
 
   async function save() {
-    if (!cfg) {
+    if (!prefs) {
       return;
     }
 
-    const next: AppConfig = {
-      ...cfg,
-      notifications: {
-        ...cfg.notifications,
-        keywords: uniqueLabels(cfg.notifications.keywords)
-      }
+    const next: NotificationPrefs = {
+      mode: prefs.mode,
+      keywords: uniqueLabels(prefs.keywords)
     };
 
     try {
-      await putJSON<{ ok: boolean }>("/api/config", next);
-      setCfg(next);
+      await putJSON<{ ok: boolean }>("/api/notifications/preferences", next);
+      setPrefs(next);
       setStatus("Notification settings saved.");
     } catch {
       setStatus("Failed to save notification settings.");
@@ -441,14 +455,14 @@ export function NotificationsPage() {
     }
   }
 
-  function setMode(mode: AppConfig["notifications"]["mode"]) {
-    setCfg((prev) => {
+  function setMode(mode: NotificationPrefs["mode"]) {
+    setPrefs((prev) => {
       if (!prev) {
         return prev;
       }
 
       const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-      if (prev.notifications.mode === "none" && mode !== "none" && isMobile) {
+      if (prev.mode === "none" && mode !== "none" && isMobile) {
         window.alert("To help insure notifications work, please remove your browser from sleep state.");
       }
 
@@ -456,29 +470,29 @@ export function NotificationsPage() {
         setSettingsTab("keywords");
       }
 
-      return { ...prev, notifications: { ...prev.notifications, mode } };
+      return { ...prev, mode };
     });
   }
 
   function setAllKeywords() {
-    setCfg((prev) => (prev ? { ...prev, notifications: { ...prev.notifications, keywords: uniqueLabels(availableKeywords) } } : prev));
+    setPrefs((prev) => (prev ? { ...prev, keywords: uniqueLabels(availableKeywords) } : prev));
   }
 
   function clearKeywords() {
-    setCfg((prev) => (prev ? { ...prev, notifications: { ...prev.notifications, keywords: [] } } : prev));
+    setPrefs((prev) => (prev ? { ...prev, keywords: [] } : prev));
   }
 
   function toggleKeyword(keyword: string, checked: boolean) {
-    setCfg((prev) => {
+    setPrefs((prev) => {
       if (!prev) return prev;
       const nextKeywords = checked
-        ? uniqueLabels([...prev.notifications.keywords, keyword])
-        : prev.notifications.keywords.filter((item) => item !== keyword);
-      return { ...prev, notifications: { ...prev.notifications, keywords: nextKeywords } };
+        ? uniqueLabels([...prev.keywords, keyword])
+        : prev.keywords.filter((item) => item !== keyword);
+      return { ...prev, keywords: nextKeywords };
     });
   }
 
-  if (!cfg) {
+  if (!cfg || !prefs) {
     return (
       <section className="panel">
         <h2>Notifications</h2>
@@ -523,33 +537,33 @@ export function NotificationsPage() {
               <p className="notifications-muted">Switch between disabled alerts, all-email alerts, or keyword-only alerts.</p>
 
               <div className="notifications-mode-grid">
-                <label className={`notifications-mode-option${cfg.notifications.mode === "none" ? " active" : ""}`}>
+                <label className={`notifications-mode-option${prefs.mode === "none" ? " active" : ""}`}>
                   <input
                     className="notifications-mode-input"
                     type="radio"
-                    checked={cfg.notifications.mode === "none"}
+                    checked={prefs.mode === "none"}
                     onChange={() => setMode("none")}
                   />
                   <span className="notifications-mode-title">No email</span>
                   <span className="notifications-mode-copy">Pause browser notifications.</span>
                 </label>
 
-                <label className={`notifications-mode-option${cfg.notifications.mode === "all" ? " active" : ""}`}>
+                <label className={`notifications-mode-option${prefs.mode === "all" ? " active" : ""}`}>
                   <input
                     className="notifications-mode-input"
                     type="radio"
-                    checked={cfg.notifications.mode === "all"}
+                    checked={prefs.mode === "all"}
                     onChange={() => setMode("all")}
                   />
                   <span className="notifications-mode-title">All emails</span>
                   <span className="notifications-mode-copy">Notify for every new message.</span>
                 </label>
 
-                <label className={`notifications-mode-option${cfg.notifications.mode === "keywords" ? " active" : ""}`}>
+                <label className={`notifications-mode-option${prefs.mode === "keywords" ? " active" : ""}`}>
                   <input
                     className="notifications-mode-input"
                     type="radio"
-                    checked={cfg.notifications.mode === "keywords"}
+                    checked={prefs.mode === "keywords"}
                     onChange={() => setMode("keywords")}
                   />
                   <span className="notifications-mode-title">IMAP keywords</span>
@@ -564,14 +578,14 @@ export function NotificationsPage() {
                   <h3>IMAP Keywords</h3>
                   <p className="notifications-muted">Select which IMAP keywords can trigger notifications.</p>
                 </div>
-                <span className="notifications-count">{cfg.notifications.keywords.length} selected</span>
+                <span className="notifications-count">{prefs.keywords.length} selected</span>
               </div>
 
               <div className="notifications-keywords-tools">
                 <button type="button" className="notifications-secondary" onClick={setAllKeywords} disabled={availableKeywords.length === 0}>
                   Select All
                 </button>
-                <button type="button" className="notifications-ghost" onClick={clearKeywords} disabled={cfg.notifications.keywords.length === 0}>
+                <button type="button" className="notifications-ghost" onClick={clearKeywords} disabled={prefs.keywords.length === 0}>
                   Clear
                 </button>
               </div>
@@ -581,10 +595,10 @@ export function NotificationsPage() {
               ) : (
                 <div className="notifications-keywords-grid">
                   {availableKeywords.map((keyword) => (
-                    <label key={keyword} className={`notifications-keyword-option${cfg.notifications.keywords.includes(keyword) ? " selected" : ""}`}>
+                    <label key={keyword} className={`notifications-keyword-option${prefs.keywords.includes(keyword) ? " selected" : ""}`}>
                       <input
                         type="checkbox"
-                        checked={cfg.notifications.keywords.includes(keyword)}
+                        checked={prefs.keywords.includes(keyword)}
                         onChange={(event) => toggleKeyword(keyword, event.target.checked)}
                       />
                       <span>{keyword}</span>
@@ -593,7 +607,7 @@ export function NotificationsPage() {
                 </div>
               )}
 
-              {cfg.notifications.mode !== "keywords" ? (
+              {prefs.mode !== "keywords" ? (
                 <p className="notifications-hint">Selections are saved now and will be used when Delivery Mode is set to IMAP keywords.</p>
               ) : null}
             </div>

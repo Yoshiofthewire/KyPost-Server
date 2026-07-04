@@ -9,10 +9,11 @@ It polls unread mail, classifies messages, applies IMAP keywords, and includes a
 ## Features
 
 - Docker-first single-container runtime managed by supervisord
+- Multi-user with roles: admins manage users and system settings; each user connects their own IMAP mailbox
 - IMAP inbox reader with folder management and drag/drop move actions
-- Automatic keyword labeling for unread mail
+- Automatic keyword labeling for unread mail (each active user's mailbox is polled independently)
 - Built-in compose flow with SMTP send and IMAP draft save
-- Browser push notifications (all mail or keyword-only)
+- Browser push notifications (all mail or keyword-only), per user
 - Config UI for IMAP, SMTP, model auth, tuning, logs, health, and decisions
 - A dozen Theme presets 
 
@@ -79,6 +80,23 @@ docker compose up --build -d
 - Login sessions expire after 24 hours of inactivity.
 - Session expiry is sliding (each authenticated request extends TTL by 24h).
 - Logout invalidates the server-side session and clears the cookie.
+- Deactivating a user or changing their role takes effect on their very next request, not just at next login.
+
+## Users and Roles
+
+Accounts live in `/llama_lab/config/users.json` (roles: `admin`, `user`).
+
+- Admins: manage users (create, change role, reset password, deactivate/reactivate) via the Manage Users page, view system logs, edit global settings (Application, Labels, Remote LLM), and trigger health repair.
+- Users: connect their own IMAP/SMTP account, read and label their own mail, pair their own devices, set their own notification preferences, and tune their own prompt.
+- Deactivation is a soft delete: the user can no longer sign in, but their data is retained on disk until removed manually.
+- The last active admin cannot be deactivated or demoted.
+
+Per-user data layout:
+
+- `/llama_lab/config/users/<userID>/`: encrypted IMAP credentials, tuning prompt (`tuning.md`), notification preferences (`config.yaml`)
+- `/llama_lab/state/users/<userID>/`: mailbox checkpoint + processed set (`state.json`), decision history (`decisions.json`), push subscriptions, paired devices
+
+Upgrading from a single-admin install: on first start the legacy `admin.env` account is imported into `users.json`, and the legacy global mailbox state, IMAP credentials, tuning file, and notification preferences are copied into that admin's per-user directories. Legacy files are left in place but no longer read. There is no automated rollback; deleting `users.json` and the `users/` directories resets to a fresh multi-user state.
 
 ## Ports
 
@@ -161,14 +179,15 @@ Host bind mount:
 
 Important files:
 
-- `/llama_lab/config/config.yaml`
-- `/llama_lab/config/admin.env`
-- `/llama_lab/config/TUNING.md`
-- `/llama_lab/config/notifications-vapid-private.pem`
-- `/llama_lab/private/imap-config.json`
-- `/llama_lab/private/imap-config.key`
-- `/llama_lab/state/state.json`
-- `/llama_lab/state/decisions.json`
+- `/llama_lab/config/config.yaml` (global system config)
+- `/llama_lab/config/users.json` (user accounts and roles)
+- `/llama_lab/config/users/<userID>/` (per-user IMAP credentials, tuning, notification preferences)
+- `/llama_lab/config/TUNING.md` (default tuning for new users)
+- `/llama_lab/config/notifications-vapid-private.pem` (shared web-push signing key)
+- `/llama_lab/private/imap-config.key` (master encryption key for stored IMAP credentials)
+- `/llama_lab/state/state.json` (global state: AI-credits flag)
+- `/llama_lab/state/users/<userID>/` (per-user mailbox state, decisions, devices, subscriptions)
+- `/llama_lab/config/admin.env` (legacy single-admin seed; imported once, then unused)
 
 ## API Highlights
 
@@ -179,18 +198,26 @@ Auth:
 - `POST /api/auth/logout`
 - `POST /api/auth/password`
 
+User management (admin only):
+
+- `GET|POST /api/users`
+- `PUT /api/users/{id}` (change role)
+- `POST /api/users/{id}/reset-password`
+- `POST /api/users/{id}/deactivate`
+- `POST /api/users/{id}/reactivate`
+
 Runtime:
 
 - `GET /api/status`
 - `GET /api/health`
-- `POST /api/health/repair`
+- `POST /api/health/repair` (admin only)
 
 Config and data:
 
-- `GET|PUT /api/config`
+- `GET|PUT /api/config` (PUT of Remote LLM fields is admin only)
 - `GET /api/labels`
-- `GET /api/decisions`
-- `GET|PUT /api/tuning`
+- `GET /api/decisions` (caller's own decisions)
+- `GET|PUT /api/tuning` (caller's own tuning prompt)
 
 IMAP and inbox:
 
@@ -205,8 +232,9 @@ Mail:
 - `POST /api/mail/send`
 - `POST /api/mail/draft`
 
-Notifications:
+Notifications (all scoped to the signed-in user):
 
+- `GET|PUT /api/notifications/preferences`
 - `GET /api/notifications/vapid-public-key`
 - `POST|DELETE /api/notifications/subscriptions`
 - `POST /api/notifications/test`
@@ -215,7 +243,7 @@ Notifications:
 - `GET|DELETE /api/notifications/native/devices`
 - `POST /api/notifications/native/unpair`
 
-Logs:
+Logs (admin only):
 
 - `GET /api/logs?file=<name>.log&lines=<n>`
 - `GET /api/logs/list`

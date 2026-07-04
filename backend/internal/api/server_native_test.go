@@ -82,20 +82,31 @@ func newTestServer(t *testing.T) *Server {
 		_ = logger.Close()
 	})
 
-	store, err := state.New(stateDir)
-	if err != nil {
-		t.Fatalf("state.New: %v", err)
-	}
-
 	configDir := t.TempDir()
 	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("users.LoadOrMigrate: %v", err)
 	}
 
-	srv := NewServer(config.Default(), logger, store, health.NewService(), usersStore, &stubMailClient{}, nil)
+	srv := NewServer(config.Default(), logger, health.NewService(), usersStore, nil)
 	srv.pairingSecret = "test-pairing-secret"
+	srv.stateDir = stateDir
+	srv.configDir = configDir
 	return srv
+}
+
+// testUserStore returns the bootstrap user's per-user state store.
+func testUserStore(t *testing.T, s *Server) *state.Store {
+	t.Helper()
+	all, err := s.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	store, err := s.userStore(all[0].ID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	return store
 }
 
 func authRequest(s *Server, req *http.Request) {
@@ -112,7 +123,14 @@ func authRequest(s *Server, req *http.Request) {
 
 func TestNativeRegisterStoresDevice(t *testing.T) {
 	srv := newTestServer(t)
-	subscriberID := "subscriber-1"
+	// The subscriber ID is minted from the owning user's store, exactly as
+	// the pairing endpoint does, so the register handler can resolve it
+	// back to that user.
+	store := testUserStore(t, srv)
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
 	token, _, err := srv.createPairingToken(subscriberID, time.Minute)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
@@ -138,7 +156,7 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	devices := srv.store.ListNativeDevices()
+	devices := store.ListNativeDevices()
 	if len(devices) != 1 {
 		t.Fatalf("len(devices) = %d, want 1", len(devices))
 	}
@@ -174,7 +192,8 @@ func TestNativeRegisterRejectsInvalidPairingToken(t *testing.T) {
 
 func TestNativeDevicesListAndDelete(t *testing.T) {
 	srv := newTestServer(t)
-	if err := srv.store.UpsertNativeDevice(state.NativeDevice{
+	store := testUserStore(t, srv)
+	if err := store.UpsertNativeDevice(state.NativeDevice{
 		DeviceID:  "device-b",
 		Platform:  "android",
 		PushToken: "token-b",
@@ -208,7 +227,7 @@ func TestNativeDevicesListAndDelete(t *testing.T) {
 		t.Fatalf("DELETE status = %d, want %d", delRec.Code, http.StatusOK)
 	}
 
-	devices := srv.store.ListNativeDevices()
+	devices := store.ListNativeDevices()
 	if len(devices) != 0 {
 		t.Fatalf("len(devices) = %d, want 0", len(devices))
 	}

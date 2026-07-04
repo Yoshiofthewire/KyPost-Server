@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/adapters/llama"
 	"llama-lab/backend/internal/api"
 	"llama-lab/backend/internal/config"
@@ -74,68 +73,93 @@ func Run(args []string) error {
 		return fmt.Errorf("load users store: %w", err)
 	}
 
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, paths.StateDir, paths.ConfigFile); err != nil {
+		logger.Error("legacy single-user data migration failed", "error", err.Error())
+	}
+
 	healthSvc := health.NewService()
 	healthSvc.MarkHealthy()
 
+	deps := runDeps{
+		cfg:        cfg,
+		configPath: paths.ConfigFile,
+		configDir:  configDir,
+		stateDir:   paths.StateDir,
+		logger:     logger,
+		store:      store,
+		users:      usersStore,
+		health:     healthSvc,
+	}
+
 	switch *mode {
 	case "daemon":
-		return runDaemon(cfg, paths.ConfigFile, logger, store, healthSvc)
+		return runDaemon(deps)
 	case "server":
-		return runServer(cfg, logger, store, healthSvc, usersStore)
+		return runServer(deps)
 	case "all":
-		return runAll(cfg, paths.ConfigFile, logger, store, healthSvc, usersStore)
+		return runAll(deps)
 	default:
 		return errors.New("invalid mode; expected daemon, server, or all")
 	}
 }
 
-func runDaemon(cfg config.Config, configPath string, logger *logging.Logger, store *state.Store, healthSvc *health.Service) error {
-	llamaClient := newLlamaClient(cfg)
-	poller, err := processor.New(cfg, logger, store, healthSvc, newMailClient(), llamaClient)
+type runDeps struct {
+	cfg        config.Config
+	configPath string
+	configDir  string
+	stateDir   string
+	logger     *logging.Logger
+	store      *state.Store
+	users      *users.Store
+	health     *health.Service
+}
+
+func runDaemon(d runDeps) error {
+	llamaClient := newLlamaClient(d.cfg)
+	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, llamaClient)
 	if err != nil {
 		return err
 	}
-	poller.SetConfigPath(configPath)
-	warmupLlamaOnStartup(logger, llamaClient, poller)
+	poller.SetConfigPath(d.configPath)
+	warmupLlamaOnStartup(d.logger, llamaClient, poller)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go poller.Run()
-	logger.Info("poller goroutine started")
-	go monitorHealth(logger, healthSvc)
+	d.logger.Info("poller goroutine started")
+	go monitorHealth(d.logger, d.health)
 	<-stop
 	poller.Stop()
 	return nil
 }
 
-func runServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service, usersStore *users.Store) error {
-	srv := api.NewServer(cfg, logger, store, healthSvc, usersStore, newMailClient(), nil)
+func runServer(d runDeps) error {
+	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil)
 	return srv.Run()
 }
 
-func runAll(cfg config.Config, configPath string, logger *logging.Logger, store *state.Store, healthSvc *health.Service, usersStore *users.Store) error {
+func runAll(d runDeps) error {
 	// Restore the sticky AI-credits flag onto the health status so a restart
 	// keeps surfacing it until a successful classify clears it.
-	if exhausted, at := store.AICreditsExhausted(); exhausted {
-		healthSvc.SetAICreditsExhausted(at)
+	if exhausted, at := d.store.AICreditsExhausted(); exhausted {
+		d.health.SetAICreditsExhausted(at)
 	}
-	mailClient := newMailClient()
-	llamaClient := newLlamaClient(cfg)
-	poller, err := processor.New(cfg, logger, store, healthSvc, mailClient, llamaClient)
+	llamaClient := newLlamaClient(d.cfg)
+	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, llamaClient)
 	if err != nil {
 		return err
 	}
-	poller.SetConfigPath(configPath)
-	srv := api.NewServer(cfg, logger, store, healthSvc, usersStore, mailClient, poller.UpdateConfig)
-	warmupLlamaOnStartup(logger, llamaClient, poller)
+	poller.SetConfigPath(d.configPath)
+	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, poller.UpdateConfig)
+	warmupLlamaOnStartup(d.logger, llamaClient, poller)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go poller.Run()
-	logger.Info("poller goroutine started")
-	go monitorHealth(logger, healthSvc)
+	d.logger.Info("poller goroutine started")
+	go monitorHealth(d.logger, d.health)
 	go func() {
 		if err := srv.Run(); err != nil {
-			logger.Error("api server stopped", "error", err.Error())
+			d.logger.Error("api server stopped", "error", err.Error())
 		}
 	}()
 	<-stop
@@ -180,28 +204,46 @@ func monitorHealth(logger *logging.Logger, healthSvc *health.Service) {
 	}
 }
 
+// newLlamaClient builds the one shared LLM client. config.yaml wins when it
+// points somewhere real; the OLLAMA_* env vars are the fallback so existing
+// env-only deployments keep working. The persisted legacy config default
+// ("http://127.0.0.1:3333" with path "/") predates the Ollama runtime and
+// is treated as unset.
 func newLlamaClient(cfg config.Config) llama.Client {
-	baseURL := strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL"))
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("LLAMA_BASE_URL"))
+	const legacyDeadDefault = "http://127.0.0.1:3333"
+
+	baseURL := strings.TrimSpace(cfg.Llama.BaseURL)
+	fromConfig := baseURL != "" && baseURL != legacyDeadDefault
+	if !fromConfig {
+		baseURL = strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL"))
+		if baseURL == "" {
+			baseURL = strings.TrimSpace(os.Getenv("LLAMA_BASE_URL"))
+		}
+		if baseURL == "" {
+			baseURL = "http://127.0.0.1:11434"
+		}
 	}
-	if baseURL == "" {
-		baseURL = "http://127.0.0.1:11434"
+
+	apiKey := strings.TrimSpace(cfg.Llama.APIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
 	}
-	if baseURL == "" {
-		return &llama.StubClient{}
+
+	classifyPath := ""
+	if fromConfig {
+		classifyPath = strings.TrimSpace(cfg.Llama.ClassifyPath)
 	}
-	apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
-	classifyPath := strings.TrimSpace(os.Getenv("OLLAMA_GENERATE_PATH"))
+	if classifyPath == "" || classifyPath == "/" {
+		classifyPath = strings.TrimSpace(os.Getenv("OLLAMA_GENERATE_PATH"))
+	}
 	if classifyPath == "" {
 		classifyPath = "/api/generate"
 	}
+
+	// The default tuning text only backstops callers that pass no per-call
+	// tuning (e.g. users who have not customized their prompt yet).
 	tuning := llama.LoadTuningText()
 	return llama.NewHTTPClient(baseURL, apiKey, classifyPath, tuning, 3*time.Minute)
-}
-
-func newMailClient() imapadapter.Client {
-	return imapadapter.NewAPIClientFromEnv()
 }
 
 func warmupLlamaOnStartup(logger *logging.Logger, client llama.Client, trigger interface{ TriggerNow() }) {

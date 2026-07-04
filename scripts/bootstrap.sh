@@ -3,7 +3,9 @@ set -eu
 
 mkdir -p "${CONFIG_DIR:-/llama_lab/config}" "${LOG_DIR:-/llama_lab/logs}" "${STATE_DIR:-/llama_lab/state}"
 
-if [ ! -f "${CONFIG_DIR:-/llama_lab/config}/admin.env" ]; then
+# users.json is the multi-user store; admin.env is only the legacy seed that
+# the backend imports into users.json on first start. Skip if either exists.
+if [ ! -f "${CONFIG_DIR:-/llama_lab/config}/users.json" ] && [ ! -f "${CONFIG_DIR:-/llama_lab/config}/admin.env" ]; then
   user="${BOOTSTRAP_ADMIN_USER:-admin}"
   pass="${BOOTSTRAP_ADMIN_PASS:-ChangeMeNow123!}"
   pass_hash="$(PASS="$pass" node -e '

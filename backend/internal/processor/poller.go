@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,36 +25,140 @@ import (
 	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/redaction"
 	"llama-lab/backend/internal/state"
+	"llama-lab/backend/internal/users"
 
 	"github.com/SherClockHolmes/webpush-go"
 )
 
+// maxConcurrentUserTicks bounds how many user mailboxes are polled in
+// parallel. The shared Llama client serializes classify calls anyway, so
+// this mainly overlaps IMAP fetch latency across users.
+const maxConcurrentUserTicks = 4
+
+// Poller polls every active user's mailbox each tick. Global config (scan
+// interval, rate-limit policy, labels, redaction) is shared; IMAP
+// credentials, checkpoint/processed state, tuning prompt, and notification
+// preferences are loaded per user.
 type Poller struct {
-	cfg           config.Config
-	cfgMu         sync.RWMutex
-	cfgPath       string
-	log           *logging.Logger
-	store         *state.Store
+	cfg     config.Config
+	cfgMu   sync.RWMutex
+	cfgPath string
+
+	log   *logging.Logger
+	users *users.Store
+	// globalStore holds install-wide state: the sticky AI-credits flag for
+	// the one shared LLM backend. Per-user mailbox state lives in stores.
+	globalStore   *state.Store
 	health        *health.Service
-	mail          imapadapter.Client
 	llama         llama.Client
 	redaction     *redaction.Engine
 	nativeSenders []NativeSender
 	cancel        context.CancelFunc
-	mu            sync.Mutex
 	tickSem       chan struct{}
-	processed     []time.Time
+
+	stateDir    string
+	configDir   string
+	imapKeyPath string
+
+	userMu      sync.Mutex
+	stores      map[string]*state.Store
+	mailClients map[string]*mailClientEntry
+	rate        map[string][]time.Time
 }
 
-func New(cfg config.Config, log *logging.Logger, store *state.Store, healthSvc *health.Service, mailClient imapadapter.Client, llamaClient llama.Client) (*Poller, error) {
+type mailClientEntry struct {
+	client  imapadapter.Client
+	modTime time.Time
+}
+
+// userCtx bundles one user's per-tick dependencies.
+type userCtx struct {
+	id       string
+	username string
+	store    *state.Store
+	mail     imapadapter.Client
+	tuning   string
+	settings config.UserNotificationSettings
+}
+
+func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, llamaClient llama.Client) (*Poller, error) {
 	re, err := redaction.New(cfg.Redaction.Patterns)
 	if err != nil {
 		return nil, err
 	}
-	p := &Poller{cfg: cfg, log: log, store: store, health: healthSvc, mail: mailClient, llama: llamaClient, redaction: re, processed: []time.Time{}, nativeSenders: NewNativeSendersFromEnv(log)}
+	p := &Poller{
+		cfg:           cfg,
+		log:           log,
+		users:         usersStore,
+		globalStore:   globalStore,
+		health:        healthSvc,
+		llama:         llamaClient,
+		redaction:     re,
+		nativeSenders: NewNativeSendersFromEnv(log),
+		stateDir:      stateDir,
+		configDir:     configDir,
+		imapKeyPath:   envOrDefaultProc("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key"),
+		stores:        map[string]*state.Store{},
+		mailClients:   map[string]*mailClientEntry{},
+		rate:          map[string][]time.Time{},
+	}
 	p.tickSem = make(chan struct{}, 1)
 	p.tickSem <- struct{}{}
 	return p, nil
+}
+
+func envOrDefaultProc(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func (p *Poller) userStateDir(userID string) string {
+	return filepath.Join(p.stateDir, "users", userID)
+}
+
+func (p *Poller) userConfigDir(userID string) string {
+	return filepath.Join(p.configDir, "users", userID)
+}
+
+func (p *Poller) userIMAPConfigPath(userID string) string {
+	return filepath.Join(p.userConfigDir(userID), "imap-config.json")
+}
+
+func (p *Poller) userTuningPath(userID string) string {
+	return filepath.Join(p.userConfigDir(userID), "tuning.md")
+}
+
+func (p *Poller) userSettingsPath(userID string) string {
+	return filepath.Join(p.userConfigDir(userID), "config.yaml")
+}
+
+func (p *Poller) userStore(userID string) (*state.Store, error) {
+	p.userMu.Lock()
+	defer p.userMu.Unlock()
+	if st, ok := p.stores[userID]; ok {
+		return st, nil
+	}
+	st, err := state.New(p.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	p.stores[userID] = st
+	return st, nil
+}
+
+// userMailClient returns the cached IMAP client for a user, rebuilding it
+// when their encrypted credential file changed on disk.
+func (p *Poller) userMailClient(userID string, configModTime time.Time) imapadapter.Client {
+	p.userMu.Lock()
+	defer p.userMu.Unlock()
+	if entry, ok := p.mailClients[userID]; ok && entry.modTime.Equal(configModTime) {
+		return entry.client
+	}
+	client := imapadapter.NewAPIClientFromStoredConfig(p.userIMAPConfigPath(userID), p.imapKeyPath)
+	p.mailClients[userID] = &mailClientEntry{client: client, modTime: configModTime}
+	return client
 }
 
 func (p *Poller) SetConfigPath(path string) {
@@ -94,16 +200,44 @@ func (p *Poller) TriggerNow() {
 	p.tick()
 }
 
+// TriggerUnreadSweep resets every active user's checkpoint so the next tick
+// reconsiders all unread mail, then runs a tick.
 func (p *Poller) TriggerUnreadSweep() {
-	if err := p.store.SetCheckpoint(""); err != nil {
-		p.log.Error("failed to reset checkpoint for unread sweep", "error", err.Error())
+	all, err := p.users.List()
+	if err != nil {
+		p.log.Error("failed to list users for unread sweep", "error", err.Error())
+	} else {
+		for _, u := range all {
+			if !u.Active {
+				continue
+			}
+			store, err := p.userStore(u.ID)
+			if err != nil {
+				p.log.Error("failed to open user store for unread sweep", "user_id", u.ID, "error", err.Error())
+				continue
+			}
+			if err := store.SetCheckpoint(""); err != nil {
+				p.log.Error("failed to reset checkpoint for unread sweep", "user_id", u.ID, "error", err.Error())
+			}
+		}
 	}
 	p.tick()
 }
 
+// UpdateConfig swaps the global config and rebuilds the shared redaction
+// engine when the patterns changed (previously edits to redaction patterns
+// never took effect until restart).
 func (p *Poller) UpdateConfig(cfg config.Config) {
 	p.cfgMu.Lock()
+	patternsChanged := !slices.Equal(p.cfg.Redaction.Patterns, cfg.Redaction.Patterns)
 	p.cfg = cfg
+	if patternsChanged {
+		if re, err := redaction.New(cfg.Redaction.Patterns); err == nil {
+			p.redaction = re
+		} else {
+			p.log.Error("failed to rebuild redaction engine after config update", "error", err.Error())
+		}
+	}
 	p.cfgMu.Unlock()
 }
 
@@ -111,6 +245,12 @@ func (p *Poller) currentConfig() config.Config {
 	p.cfgMu.RLock()
 	defer p.cfgMu.RUnlock()
 	return p.cfg
+}
+
+func (p *Poller) currentRedaction() *redaction.Engine {
+	p.cfgMu.RLock()
+	defer p.cfgMu.RUnlock()
+	return p.redaction
 }
 
 func (p *Poller) tick() {
@@ -126,20 +266,103 @@ func (p *Poller) tick() {
 	}
 	defer func() { p.tickSem <- struct{}{} }()
 
-	if err := p.store.Cleanup(30); err != nil {
-		p.log.Error("state cleanup failed", "error", err.Error())
-		p.health.MarkUnhealthy("state cleanup failed")
+	all, err := p.users.List()
+	if err != nil {
+		p.log.Error("failed to list users for poll tick", "error", err.Error())
+		p.health.MarkUnhealthy("users store unreadable")
 		return
 	}
+
+	sem := make(chan struct{}, maxConcurrentUserTicks)
+	var wg sync.WaitGroup
+	var resMu sync.Mutex
+	usersPolled := 0
+	usersFailed := 0
+
+	for _, u := range all {
+		if !u.Active {
+			continue
+		}
+		fi, err := os.Stat(p.userIMAPConfigPath(u.ID))
+		if err != nil {
+			// No mailbox configured for this user yet — nothing to poll.
+			continue
+		}
+		usersPolled++
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(u users.User, modTime time.Time) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					p.log.Error("user poll tick panic", "user_id", u.ID, "panic", fmt.Sprint(r))
+					resMu.Lock()
+					usersFailed++
+					resMu.Unlock()
+				}
+			}()
+			if err := p.tickUser(u, modTime); err != nil {
+				resMu.Lock()
+				usersFailed++
+				resMu.Unlock()
+			}
+		}(u, fi.ModTime())
+	}
+	wg.Wait()
+
+	p.log.Info("poll tick completed", "users_polled", strconv.Itoa(usersPolled), "users_failed", strconv.Itoa(usersFailed))
+
+	// Fault isolation: one broken mailbox must not restart the container.
+	// Only flip global health when every polled mailbox failed.
+	if usersPolled > 0 && usersFailed == usersPolled {
+		p.health.MarkUnhealthy("imap unreachable for all users")
+		return
+	}
+	p.health.MarkHealthy()
+}
+
+// tickUser polls one user's mailbox. Errors are logged with the user id and
+// reported to the caller for the all-users-failed health check; they never
+// affect other users.
+func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
+	store, err := p.userStore(u.ID)
+	if err != nil {
+		p.log.Error("failed to open user state store", "user_id", u.ID, "error", err.Error())
+		return err
+	}
+	if err := store.Cleanup(30); err != nil {
+		p.log.Error("state cleanup failed", "user_id", u.ID, "error", err.Error())
+	}
+
+	settings, err := config.LoadUserSettings(p.userSettingsPath(u.ID))
+	if err != nil {
+		p.log.Error("failed to load user settings, using defaults", "user_id", u.ID, "error", err.Error())
+		settings = config.DefaultUserSettings()
+	}
+
+	tuning := ""
+	if b, err := os.ReadFile(p.userTuningPath(u.ID)); err == nil {
+		tuning = strings.TrimSpace(string(b))
+	}
+
+	uc := userCtx{
+		id:       u.ID,
+		username: u.Username,
+		store:    store,
+		mail:     p.userMailClient(u.ID, imapConfigModTime),
+		tuning:   tuning,
+		settings: settings.Notifications,
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
-	checkpoint := p.store.Checkpoint()
-	messages, nextCheckpoint, err := p.mail.ListUnreadInbox(ctx, checkpoint)
+	checkpoint := store.Checkpoint()
+	messages, nextCheckpoint, err := uc.mail.ListUnreadInbox(ctx, checkpoint)
 	if err != nil {
-		p.log.Error("fetch unread inbox failed", "error", err.Error())
-		p.health.MarkUnhealthy("imap unreachable")
-		return
+		p.log.Error("fetch unread inbox failed", "user_id", u.ID, "error", err.Error())
+		return err
 	}
 
 	processedCount := 0
@@ -147,22 +370,22 @@ func (p *Poller) tick() {
 	failedCount := 0
 	rateLimitedCount := 0
 	for _, msg := range messages {
-		if p.store.Seen(msg.ID) {
+		if store.Seen(msg.ID) {
 			skippedSeenCount++
 			continue
 		}
-		if !p.allowByRate() {
-			p.log.Info("rate limit reached, deferring remaining emails")
+		if !p.allowByRate(u.ID) {
+			p.log.Info("rate limit reached, deferring remaining emails", "user_id", u.ID)
 			rateLimitedCount = len(messages) - processedCount - skippedSeenCount - failedCount
 			break
 		}
 		messageCtx, messageCancel := context.WithTimeout(context.Background(), 4*time.Minute)
-		err := p.handleMessage(messageCtx, msg)
+		err := p.handleMessage(messageCtx, uc, msg)
 		messageCancel()
 		if err != nil {
 			failedCount++
-			p.log.Error("message processing failed", "message_id", msg.ID, "error", err.Error())
-			_ = p.store.AddDecision(state.Decision{
+			p.log.Error("message processing failed", "user_id", u.ID, "message_id", msg.ID, "error", err.Error())
+			_ = store.AddDecision(state.Decision{
 				MessageID: msg.ID,
 				Sender:    msg.Sender,
 				SentTo:    msg.SentTo,
@@ -171,30 +394,31 @@ func (p *Poller) tick() {
 				Detail:    err.Error(),
 			})
 			// Retire the message so it is not retried on the next tick.
-			_ = p.store.MarkProcessed(msg.ID)
-			p.maybeSendPushNotification(msg, "", nil)
-			p.maybeSendNativePushNotification(msg, "", nil)
+			_ = store.MarkProcessed(msg.ID)
+			p.maybeSendPushNotification(uc, msg, "", nil)
+			p.maybeSendNativePushNotification(uc, msg, "", nil)
 			continue
 		}
 		processedCount++
 	}
 
 	if nextCheckpoint != "" {
-		if err := p.store.SetCheckpoint(nextCheckpoint); err != nil {
-			p.log.Error("failed to persist checkpoint", "error", err.Error())
+		if err := store.SetCheckpoint(nextCheckpoint); err != nil {
+			p.log.Error("failed to persist checkpoint", "user_id", u.ID, "error", err.Error())
 		}
 	}
 
 	p.log.Info(
-		"poll tick summary",
+		"user poll tick summary",
+		"user_id", u.ID,
+		"username", u.Username,
 		"fetched", strconv.Itoa(len(messages)),
 		"processed", strconv.Itoa(processedCount),
 		"skipped_seen", strconv.Itoa(skippedSeenCount),
 		"failed", strconv.Itoa(failedCount),
 		"deferred_rate_limited", strconv.Itoa(rateLimitedCount),
 	)
-	p.log.Info("poll tick completed")
-	p.health.MarkHealthy()
+	return nil
 }
 
 func (p *Poller) reloadConfigIfNeeded() {
@@ -213,8 +437,8 @@ func (p *Poller) reloadConfigIfNeeded() {
 }
 
 // recentDecisionsContext returns a short summary of the last N applied decisions to give Llama labelling context.
-func (p *Poller) recentDecisionsContext(limit int) string {
-	all := p.store.Decisions(50)
+func recentDecisionsContext(store *state.Store, limit int) string {
+	all := store.Decisions(50)
 	var applied []state.Decision
 	for _, d := range all {
 		if d.Status == "applied" && d.Label != "" {
@@ -243,16 +467,16 @@ func (p *Poller) recentDecisionsContext(limit int) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) error {
+func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.Message) error {
 	cfg := p.currentConfig()
 
 	body := strings.TrimSpace(msg.Body)
 	if len(body) > 2000 {
 		body = body[:2000]
 	}
-	redacted := p.redaction.Apply(body)
+	redacted := p.currentRedaction().Apply(body)
 
-	decisionsCtx := p.recentDecisionsContext(10)
+	decisionsCtx := recentDecisionsContext(uc.store, 10)
 	bodyWithContext := redacted
 	if decisionsCtx != "" {
 		if bodyWithContext != "" {
@@ -262,7 +486,7 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 		}
 	}
 
-	label, err := classifyWithRetry(ctx, p.llama, cfg.Labels.Allowlist, msg.Sender, msg.Subject, bodyWithContext)
+	label, err := classifyWithRetry(ctx, p.llama, cfg.Labels.Allowlist, msg.Sender, msg.Subject, bodyWithContext, uc.tuning)
 	if err != nil {
 		if isAICreditsExhaustedError(err) {
 			p.flagAICreditsExhausted()
@@ -271,11 +495,11 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 	}
 	// A successful classification means Llama has credits again; clear any flag.
 	p.clearAICreditsExhausted()
-	p.log.Info("classification result", "message_id", msg.ID, "raw_label", strings.TrimSpace(label), "sender", msg.Sender, "subject", msg.Subject)
+	p.log.Info("classification result", "user_id", uc.id, "message_id", msg.ID, "raw_label", strings.TrimSpace(label), "sender", msg.Sender, "subject", msg.Subject)
 	selected := llama.SelectLabelFromText(cfg.Labels.Allowlist, label)
 	if selected == "" {
-		p.log.Info("classification skipped", "message_id", msg.ID, "reason", "no known label returned", "raw_label", strings.TrimSpace(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
-		_ = p.store.AddDecision(state.Decision{
+		p.log.Info("classification skipped", "user_id", uc.id, "message_id", msg.ID, "reason", "no known label returned", "raw_label", strings.TrimSpace(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
+		_ = uc.store.AddDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
@@ -283,31 +507,32 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 			Status:    "skipped",
 			Detail:    "no known label returned",
 		})
-		if err := p.store.MarkProcessed(msg.ID); err != nil {
+		if err := uc.store.MarkProcessed(msg.ID); err != nil {
 			return err
 		}
-		p.maybeSendPushNotification(msg, "", nil)
-		p.maybeSendNativePushNotification(msg, "", nil)
+		p.maybeSendPushNotification(uc, msg, "", nil)
+		p.maybeSendNativePushNotification(uc, msg, "", nil)
 		return nil
 	}
 	keywords := keywordsForSelectedLabel(selected, cfg.Labels.KeywordMappings)
 	p.log.Info(
 		"applying label",
+		"user_id", uc.id,
 		"message_id", msg.ID,
 		"selected_label", selected,
 		"keywords", strings.Join(keywords, ","),
 		"sender", msg.Sender,
 		"subject", msg.Subject,
 	)
-	if err := applyKeywordsWithRetry(ctx, p.mail, msg.ID, keywords); err != nil {
-		p.log.Error("label apply failed", "message_id", msg.ID, "selected_label", selected, "error", err.Error())
+	if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
+		p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", selected, "error", err.Error())
 		return err
 	}
-	p.log.Info("label applied", "message_id", msg.ID, "selected_label", selected, "keywords", strings.Join(keywords, ","))
-	if err := p.store.MarkProcessed(msg.ID); err != nil {
+	p.log.Info("label applied", "user_id", uc.id, "message_id", msg.ID, "selected_label", selected, "keywords", strings.Join(keywords, ","))
+	if err := uc.store.MarkProcessed(msg.ID); err != nil {
 		return err
 	}
-	if err := p.store.AddDecision(state.Decision{
+	if err := uc.store.AddDecision(state.Decision{
 		MessageID: msg.ID,
 		Sender:    msg.Sender,
 		SentTo:    msg.SentTo,
@@ -318,31 +543,33 @@ func (p *Poller) handleMessage(ctx context.Context, msg imapadapter.Message) err
 	}); err != nil {
 		return err
 	}
-	p.maybeSendPushNotification(msg, selected, keywords)
-	p.maybeSendNativePushNotification(msg, selected, keywords)
+	p.maybeSendPushNotification(uc, msg, selected, keywords)
+	p.maybeSendNativePushNotification(uc, msg, selected, keywords)
 	return nil
 }
 
-func (p *Poller) maybeSendPushNotification(msg imapadapter.Message, selectedLabel string, messageKeywords []string) {
+func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, selectedLabel string, messageKeywords []string) {
 	cfg := p.currentConfig()
-	if !shouldSendNotification(cfg.Notifications, selectedLabel, messageKeywords) {
+	if !shouldSendNotification(uc.settings, selectedLabel, messageKeywords) {
 		p.log.Info(
 			"new-email push notification skipped",
 			"reason", "notification mode/keywords did not match",
+			"user_id", uc.id,
 			"message_id", msg.ID,
-			"mode", strings.ToLower(strings.TrimSpace(cfg.Notifications.Mode)),
+			"mode", strings.ToLower(strings.TrimSpace(uc.settings.Mode)),
 			"selected_label", strings.TrimSpace(selectedLabel),
 			"message_keywords", strings.Join(messageKeywords, ","),
-			"configured_keywords", strings.Join(cfg.Notifications.Keywords, ","),
+			"configured_keywords", strings.Join(uc.settings.Keywords, ","),
 		)
 		return
 	}
 
-	subs := p.store.ListNotificationSubscriptions()
+	subs := uc.store.ListNotificationSubscriptions()
 	if len(subs) == 0 {
 		p.log.Info(
 			"new-email push notification skipped",
 			"reason", "no active push subscriptions",
+			"user_id", uc.id,
 			"message_id", msg.ID,
 		)
 		return
@@ -409,7 +636,7 @@ func (p *Poller) maybeSendPushNotification(msg imapadapter.Message, selectedLabe
 
 	removed := 0
 	for _, endpoint := range staleEndpoints {
-		ok, err := p.store.RemoveNotificationSubscription(endpoint)
+		ok, err := uc.store.RemoveNotificationSubscription(endpoint)
 		if err == nil && ok {
 			removed++
 		}
@@ -417,6 +644,7 @@ func (p *Poller) maybeSendPushNotification(msg imapadapter.Message, selectedLabe
 
 	p.log.Info(
 		"new-email push notification attempt",
+		"user_id", uc.id,
 		"message_id", msg.ID,
 		"subscriptions", strconv.Itoa(len(subs)),
 		"sent", strconv.Itoa(sent),
@@ -425,19 +653,19 @@ func (p *Poller) maybeSendPushNotification(msg imapadapter.Message, selectedLabe
 	)
 }
 
-func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, selectedLabel string, messageKeywords []string) {
-	cfg := p.currentConfig()
-	if !shouldSendNotification(cfg.Notifications, selectedLabel, messageKeywords) {
+func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Message, selectedLabel string, messageKeywords []string) {
+	if !shouldSendNotification(uc.settings, selectedLabel, messageKeywords) {
 		return
 	}
 
-	devices := p.store.ListNativeDevices()
+	devices := uc.store.ListNativeDevices()
 	if len(devices) == 0 {
 		return
 	}
 	if len(p.nativeSenders) == 0 {
 		p.log.Info(
 			"new-email native notification skipped",
+			"user_id", uc.id,
 			"message_id", msg.ID,
 			"reason", "no native sender configured",
 		)
@@ -464,6 +692,7 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 			failed++
 			p.log.Error(
 				"native notification failed",
+				"user_id", uc.id,
 				"message_id", msg.ID,
 				"device_id", strings.TrimSpace(device.DeviceID),
 				"platform", strings.TrimSpace(device.Platform),
@@ -478,13 +707,14 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 		if err != nil {
 			failed++
 			if errors.Is(err, ErrNativeDeviceStale) && strings.TrimSpace(device.DeviceID) != "" {
-				ok, rmErr := p.store.RemoveNativeDevice(device.DeviceID)
+				ok, rmErr := uc.store.RemoveNativeDevice(device.DeviceID)
 				if rmErr == nil && ok {
 					removed++
 				}
 			}
 			p.log.Error(
 				"native notification failed",
+				"user_id", uc.id,
 				"message_id", msg.ID,
 				"device_id", strings.TrimSpace(device.DeviceID),
 				"platform", strings.TrimSpace(device.Platform),
@@ -499,6 +729,7 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 
 	p.log.Info(
 		"new-email native notification attempt",
+		"user_id", uc.id,
 		"message_id", msg.ID,
 		"devices", strconv.Itoa(len(devices)),
 		"sent", strconv.Itoa(sent),
@@ -507,7 +738,7 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 	)
 }
 
-func shouldSendNotification(settings config.NotificationSettings, selectedLabel string, messageKeywords []string) bool {
+func shouldSendNotification(settings config.UserNotificationSettings, selectedLabel string, messageKeywords []string) bool {
 	mode := strings.ToLower(strings.TrimSpace(settings.Mode))
 	switch mode {
 	case "none", "":
@@ -581,11 +812,11 @@ func encodeVAPIDPrivateKey(key *ecdsa.PrivateKey) string {
 	return base64.RawURLEncoding.EncodeToString(out)
 }
 
-func classifyWithRetry(ctx context.Context, c llama.Client, labels []string, sender, subject, body string) (string, error) {
+func classifyWithRetry(ctx context.Context, c llama.Client, labels []string, sender, subject, body, tuning string) (string, error) {
 	var out string
 	var err error
 	for i := 0; i < 3; i++ {
-		out, err = c.Classify(ctx, labels, sender, subject, body)
+		out, err = c.Classify(ctx, labels, sender, subject, body, tuning)
 		if err == nil && out != "" {
 			return out, nil
 		}
@@ -636,7 +867,7 @@ func isAICreditsExhaustedError(err error) bool {
 // health status, and logs once on the false->true transition.
 func (p *Poller) flagAICreditsExhausted() {
 	now := time.Now().UTC().Format(time.RFC3339)
-	newly, err := p.store.SetAICreditsExhausted(now)
+	newly, err := p.globalStore.SetAICreditsExhausted(now)
 	if err != nil {
 		p.log.Error("failed to persist ai credits exhausted flag", "error", err.Error())
 	}
@@ -649,10 +880,10 @@ func (p *Poller) flagAICreditsExhausted() {
 
 // clearAICreditsExhausted resets the AI-credits flag after a successful classify.
 func (p *Poller) clearAICreditsExhausted() {
-	if exhausted, _ := p.store.AICreditsExhausted(); !exhausted {
+	if exhausted, _ := p.globalStore.AICreditsExhausted(); !exhausted {
 		return
 	}
-	cleared, err := p.store.ClearAICreditsExhausted()
+	cleared, err := p.globalStore.ClearAICreditsExhausted()
 	if err != nil {
 		p.log.Error("failed to clear ai credits exhausted flag", "error", err.Error())
 	}
@@ -720,32 +951,32 @@ func keywordsForSelectedLabel(label string, mappings map[string][]string) []stri
 	return unique
 }
 
-func (p *Poller) allowByRate() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// allowByRate applies the global rate-limit policy as an independent budget
+// per user, so one busy mailbox cannot starve the others.
+func (p *Poller) allowByRate(userID string) bool {
+	p.userMu.Lock()
+	defer p.userMu.Unlock()
 	cfg := p.currentConfig()
 	now := time.Now()
 	minuteCutoff := now.Add(-1 * time.Minute)
 	hourCutoff := now.Add(-1 * time.Hour)
-	trimmed := make([]time.Time, 0, len(p.processed))
-	for _, t := range p.processed {
+	window := p.rate[userID]
+	trimmed := make([]time.Time, 0, len(window))
+	for _, t := range window {
 		if t.After(hourCutoff) {
 			trimmed = append(trimmed, t)
 		}
 	}
-	p.processed = trimmed
 	minuteCount := 0
-	for _, t := range p.processed {
+	for _, t := range trimmed {
 		if t.After(minuteCutoff) {
 			minuteCount++
 		}
 	}
-	if minuteCount >= cfg.RateLimits.PerMinute {
+	if minuteCount >= cfg.RateLimits.PerMinute || len(trimmed) >= cfg.RateLimits.PerHour {
+		p.rate[userID] = trimmed
 		return false
 	}
-	if len(p.processed) >= cfg.RateLimits.PerHour {
-		return false
-	}
-	p.processed = append(p.processed, now)
+	p.rate[userID] = append(trimmed, now)
 	return true
 }

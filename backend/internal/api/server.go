@@ -25,7 +25,6 @@ import (
 	"net/mail"
 	"net/smtp"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -70,52 +69,58 @@ type Server struct {
 	cfg               config.Config
 	onConfigUpdated   func(config.Config)
 	logger            *logging.Logger
-	store             *state.Store
 	health            *health.Service
 	users             *users.Store
+	configDir         string
+	stateDir          string
 	configPath        string
 	logPath           string
-	tuningPath        string
-	imapConfigPath    string
 	imapConfigKeyPath string
-	mail              imapadapter.Client
 	sessions          map[string]Session
 	pairingSecret     string
 	serverBaseURL     string
 	nativeSenders     []processor.NativeSender
+
+	// Per-user resources, lazily created and cached. userMu also guards the
+	// subscriberID -> userID index used by the unauthenticated native
+	// pairing registration endpoint.
+	userMu     sync.Mutex
+	userStores map[string]*state.Store
+	userMail   map[string]*serverMailEntry
+	subIndex   map[string]string
 }
 
-func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service, usersStore *users.Store, mailClient imapadapter.Client, onConfigUpdated func(config.Config)) *Server {
-	configPath := filepath.Join(envOrDefault("CONFIG_DIR", "/llama_lab/config"), "config.yaml")
+func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config)) *Server {
+	configDir := envOrDefault("CONFIG_DIR", "/llama_lab/config")
+	stateDir := envOrDefault("STATE_DIR", "/llama_lab/state")
 	logPath := filepath.Join(envOrDefault("LOG_DIR", "/llama_lab/logs"), "app.log")
-	tuningPath := resolveTuningPath()
-	imapConfigPath := envOrDefault("IMAP_CONFIG_FILE", "/llama_lab/private/imap-config.json")
 	imapConfigKeyPath := envOrDefault("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key")
 	pairingSecret := strings.TrimSpace(os.Getenv("PAIRING_SECRET"))
 	return &Server{
 		cfg:               cfg,
 		onConfigUpdated:   onConfigUpdated,
 		logger:            logger,
-		store:             store,
 		health:            healthSvc,
 		users:             usersStore,
-		configPath:        configPath,
+		configDir:         configDir,
+		stateDir:          stateDir,
+		configPath:        filepath.Join(configDir, "config.yaml"),
 		logPath:           logPath,
-		tuningPath:        tuningPath,
-		imapConfigPath:    imapConfigPath,
 		imapConfigKeyPath: imapConfigKeyPath,
-		mail:              mailClient,
 		sessions:          map[string]Session{},
 		pairingSecret:     pairingSecret,
 		serverBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
 		nativeSenders:     processor.NewNativeSendersFromEnv(logger),
+		userStores:        map[string]*state.Store{},
+		userMail:          map[string]*serverMailEntry{},
+		subIndex:          map[string]string{},
 	}
 }
 
 func (s *Server) Run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("POST /api/health/repair", s.withAuth(s.handleRepair))
+	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/me", s.handleMe)
 	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.handleLogout))
@@ -131,8 +136,14 @@ func (s *Server) Run() error {
 	mux.HandleFunc("PUT /api/inbox/folders", s.withAuth(s.handleInboxFolders))
 	mux.HandleFunc("DELETE /api/inbox/folders", s.withAuth(s.handleInboxFolders))
 	mux.HandleFunc("POST /api/inbox/actions", s.withAuth(s.handleInboxActions))
-	mux.HandleFunc("GET /api/logs", s.withAuth(s.handleLogs))
-	mux.HandleFunc("GET /api/logs/list", s.withAuth(s.handleLogsList))
+	mux.HandleFunc("GET /api/logs", s.withAdmin(s.handleLogs))
+	mux.HandleFunc("GET /api/logs/list", s.withAdmin(s.handleLogsList))
+	mux.HandleFunc("GET /api/users", s.withAdmin(s.handleUsersList))
+	mux.HandleFunc("POST /api/users", s.withAdmin(s.handleUsersCreate))
+	mux.HandleFunc("PUT /api/users/{id}", s.withAdmin(s.handleUsersUpdate))
+	mux.HandleFunc("POST /api/users/{id}/reset-password", s.withAdmin(s.handleUsersResetPassword))
+	mux.HandleFunc("POST /api/users/{id}/deactivate", s.withAdmin(s.handleUsersDeactivate))
+	mux.HandleFunc("POST /api/users/{id}/reactivate", s.withAdmin(s.handleUsersReactivate))
 	mux.HandleFunc("GET /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))
@@ -142,6 +153,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/llama/test", s.withAuth(s.handleLlamaTest))
 	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
+	mux.HandleFunc("PUT /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
 	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
 	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
 	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
@@ -168,16 +181,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, status, st)
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.cfg
 	s.mu.RUnlock()
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
 	processedSince := time.Now().UTC().Add(-1 * time.Hour)
 	resp := map[string]any{
 		"scanIntervalSeconds":     cfg.Scan.IntervalSeconds,
 		"rateLimits":              cfg.RateLimits,
-		"checkpoint":              s.store.Checkpoint(),
-		"emailsProcessedLastHour": s.store.ProcessedSince(processedSince),
+		"checkpoint":              store.Checkpoint(),
+		"emailsProcessedLastHour": store.ProcessedSince(processedSince),
 		"serverTimeUtc":           time.Now().UTC().Format(time.RFC3339),
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -214,20 +232,26 @@ func normalizeIMAPPayload(p imapConfigPayload) imapConfigPayload {
 }
 
 func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	imapConfigPath := s.userIMAPConfigPath(ac.UserID)
 	switch r.Method {
 	case http.MethodGet:
-		payload, exists, err := readIMAPConfigPayload(s.imapConfigPath, s.imapConfigKeyPath)
+		payload, exists, err := readIMAPConfigPayload(imapConfigPath, s.imapConfigKeyPath)
 		if err != nil {
 			http.Error(w, "failed to read imap configuration", http.StatusInternalServerError)
 			return
 		}
 		if !exists {
-			writeJSON(w, http.StatusOK, map[string]any{"configured": false, "path": s.imapConfigPath, "keyPath": s.imapConfigKeyPath})
+			writeJSON(w, http.StatusOK, map[string]any{"configured": false, "path": imapConfigPath, "keyPath": s.imapConfigKeyPath})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"configured":      true,
-			"path":            s.imapConfigPath,
+			"path":            imapConfigPath,
 			"keyPath":         s.imapConfigKeyPath,
 			"host":            payload.Host,
 			"port":            payload.Port,
@@ -252,19 +276,20 @@ func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		payload.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-		if err := os.MkdirAll(filepath.Dir(s.imapConfigPath), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(imapConfigPath), 0o700); err != nil {
 			http.Error(w, "failed to create imap configuration directory", http.StatusInternalServerError)
 			return
 		}
-		if err := writeIMAPConfigPayload(s.imapConfigPath, s.imapConfigKeyPath, payload); err != nil {
+		if err := writeIMAPConfigPayload(imapConfigPath, s.imapConfigKeyPath, payload); err != nil {
 			http.Error(w, "failed to save imap configuration", http.StatusInternalServerError)
 			return
 		}
+		s.invalidateUserMail(ac.UserID)
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":              true,
 			"configured":      true,
-			"path":            s.imapConfigPath,
+			"path":            imapConfigPath,
 			"keyPath":         s.imapConfigKeyPath,
 			"host":            payload.Host,
 			"port":            payload.Port,
@@ -276,20 +301,26 @@ func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 			"encryptedAtRest": true,
 		})
 	case http.MethodDelete:
-		if err := os.Remove(s.imapConfigPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(imapConfigPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "failed to remove imap configuration", http.StatusInternalServerError)
 			return
 		}
+		s.invalidateUserMail(ac.UserID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "configured": false})
 	}
 }
 
 func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
 	var req imapConfigPayload
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
 
 	if strings.TrimSpace(req.Host) == "" || strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
-		stored, exists, err := readIMAPConfigPayload(s.imapConfigPath, s.imapConfigKeyPath)
+		stored, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 		if err != nil {
 			http.Error(w, "failed to load imap configuration", http.StatusInternalServerError)
 			return
@@ -498,7 +529,12 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	toList, ccList, bccList := req.To, req.CC, req.BCC
 
-	payload, exists, err := readIMAPConfigPayload(s.imapConfigPath, s.imapConfigKeyPath)
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	payload, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 	if err != nil {
 		http.Error(w, "failed to read mail credentials", http.StatusInternalServerError)
 		return
@@ -576,8 +612,8 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 
 	warning := ""
 	sentSaved := true
-	if s.mail != nil {
-		if err := s.mail.SaveSent(r.Context(), imapadapter.DraftMessage{
+	if mailClient, mailErr := s.userMailClient(ac.UserID); mailErr == nil {
+		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{
 			To:      toList,
 			CC:      ccList,
 			BCC:     bccList,
@@ -596,7 +632,12 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMailDraft(w http.ResponseWriter, r *http.Request) {
-	if s.mail == nil {
+	mailClient, err := s.mailFor(r)
+	if err != nil {
+		if errors.Is(err, errIMAPNotConfigured) {
+			http.Error(w, "imap configuration is required before saving drafts", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -607,7 +648,7 @@ func (s *Server) handleMailDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.mail.SaveDraft(r.Context(), imapadapter.DraftMessage{
+	if err := mailClient.SaveDraft(r.Context(), imapadapter.DraftMessage{
 		To:      req.To,
 		CC:      req.CC,
 		BCC:     req.BCC,
@@ -759,7 +800,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.mu.RLock()
-		cfg := sanitizeConfigForClient(s.cfg)
+		cfg := s.cfg
 		s.mu.RUnlock()
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
@@ -769,9 +810,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.RLock()
-		next.Notifications.PublicKey = s.cfg.Notifications.PublicKey
-		next.Notifications.PrivateKeyPath = s.cfg.Notifications.PrivateKeyPath
+		llamaChanged := next.Llama != s.cfg.Llama
+		// VAPID key material is server-owned and json:"-" on the wire;
+		// carry it across the round-trip.
+		next.Notifications = s.cfg.Notifications
 		s.mu.RUnlock()
+		// Remote LLM settings are admin-only. Reject (rather than silently
+		// drop) a non-admin change so a broken save is never masked.
+		if ac, ok := authFromContext(r); llamaChanged && (!ok || ac.Role != users.RoleAdmin) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "remote llm settings require admin access"})
+			return
+		}
 		if err := config.Save(s.configPath, next); err != nil {
 			http.Error(w, "failed to save config", http.StatusInternalServerError)
 			return
@@ -787,10 +836,43 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func sanitizeConfigForClient(cfg config.Config) config.Config {
-	cfg.Notifications.PublicKey = ""
-	cfg.Notifications.PrivateKeyPath = ""
-	return cfg
+// handleNotificationPreferences reads/writes the calling user's delivery
+// preferences (mode/keywords), which moved out of the global config.
+func (s *Server) handleNotificationPreferences(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	path := s.userSettingsPath(ac.UserID)
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := config.LoadUserSettings(path)
+		if err != nil {
+			http.Error(w, "failed to read notification preferences", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings.Notifications)
+	case http.MethodPut:
+		var prefs config.UserNotificationSettings
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&prefs); err != nil {
+			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
+			return
+		}
+		settings, err := config.LoadUserSettings(path)
+		if err != nil {
+			settings = config.DefaultUserSettings()
+		}
+		if prefs.Keywords == nil {
+			prefs.Keywords = []string{}
+		}
+		settings.Notifications = prefs
+		if err := config.SaveUserSettings(path, settings); err != nil {
+			http.Error(w, "failed to save notification preferences", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}
 }
 
 type notificationSubscriptionPayload struct {
@@ -818,6 +900,11 @@ func (s *Server) handleNotificationVAPIDPublicKey(w http.ResponseWriter, r *http
 }
 
 func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
 	switch r.Method {
 	case http.MethodPost:
 		var payload notificationSubscriptionPayload
@@ -840,11 +927,11 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 			UserAgent: strings.TrimSpace(r.Header.Get("User-Agent")),
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := s.store.UpsertNotificationSubscription(sub); err != nil {
+		if err := store.UpsertNotificationSubscription(sub); err != nil {
 			http.Error(w, "failed to persist notification subscription", http.StatusInternalServerError)
 			return
 		}
-		count := len(s.store.ListNotificationSubscriptions())
+		count := len(store.ListNotificationSubscriptions())
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subscriptions": count})
 	case http.MethodDelete:
 		var payload struct {
@@ -859,17 +946,22 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 			http.Error(w, "endpoint is required", http.StatusBadRequest)
 			return
 		}
-		removed, err := s.store.RemoveNotificationSubscription(endpoint)
+		removed, err := store.RemoveNotificationSubscription(endpoint)
 		if err != nil {
 			http.Error(w, "failed to remove notification subscription", http.StatusInternalServerError)
 			return
 		}
-		count := len(s.store.ListNotificationSubscriptions())
+		count := len(store.ListNotificationSubscriptions())
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "subscriptions": count})
 	}
 }
 
 func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
 	var payload notificationTestPayload
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload)
 	title := strings.TrimSpace(payload.Title)
@@ -893,7 +985,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	subs := s.store.ListNotificationSubscriptions()
+	subs := store.ListNotificationSubscriptions()
 	sent := 0
 	failed := 0
 	removed := 0
@@ -936,14 +1028,14 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		}
 
 		for _, endpoint := range staleEndpoints {
-			ok, err := s.store.RemoveNotificationSubscription(endpoint)
+			ok, err := store.RemoveNotificationSubscription(endpoint)
 			if err == nil && ok {
 				removed++
 			}
 		}
 	}
 
-	nativeDevices := s.store.ListNativeDevices()
+	nativeDevices := store.ListNativeDevices()
 	nativeSent := 0
 	nativeFailed := 0
 	nativeRemoved := 0
@@ -970,7 +1062,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 			if err != nil {
 				nativeFailed++
 				if errors.Is(err, processor.ErrNativeDeviceStale) && strings.TrimSpace(device.DeviceID) != "" {
-					if ok, rmErr := s.store.RemoveNativeDevice(device.DeviceID); rmErr == nil && ok {
+					if ok, rmErr := store.RemoveNativeDevice(device.DeviceID); rmErr == nil && ok {
 						nativeRemoved++
 					}
 				}
@@ -987,7 +1079,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		"sent":                sent,
 		"failed":              failed,
 		"removedStale":        removed,
-		"activeSubscriptions": len(s.store.ListNotificationSubscriptions()),
+		"activeSubscriptions": len(store.ListNotificationSubscriptions()),
 		"nativeDevices":       len(nativeDevices),
 		"nativeSent":          nativeSent,
 		"nativeFailed":        nativeFailed,
@@ -1000,11 +1092,26 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Request) {
-	subscriberID, err := s.store.GetOrCreateSubscriberID()
+	ac, okAuth := authFromContext(r)
+	if !okAuth {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	store, err := s.userStore(ac.UserID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
 	if err != nil {
 		http.Error(w, "failed to load subscriber id", http.StatusInternalServerError)
 		return
 	}
+	// Keep the unauthenticated register endpoint's subscriber -> user index
+	// warm so a device pairing right after this call resolves immediately.
+	s.userMu.Lock()
+	s.subIndex[subscriberID] = ac.UserID
+	s.userMu.Unlock()
 	configured := s.pairingSecret != ""
 	configurationError := ""
 	if !configured {
@@ -1086,6 +1193,19 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
+	// The pairing token proved this device was handed a QR minted by a
+	// signed-in user; resolve which user's device list to write into.
+	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
+	if !okOwner {
+		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
+		return
+	}
+	store, err := s.userStore(ownerID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
 	device := state.NativeDevice{
 		DeviceID:   strings.TrimSpace(req.DeviceID),
 		Platform:   normalizeNativePlatform(req.Platform),
@@ -1094,12 +1214,12 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		AppVersion: strings.TrimSpace(req.AppVersion),
 		UserAgent:  strings.TrimSpace(r.Header.Get("User-Agent")),
 	}
-	if err := s.store.UpsertNativeDevice(device); err != nil {
+	if err := store.UpsertNativeDevice(device); err != nil {
 		http.Error(w, "failed to persist native device", http.StatusInternalServerError)
 		return
 	}
 
-	devices := s.store.ListNativeDevices()
+	devices := store.ListNativeDevices()
 	registeredDeviceID := device.DeviceID
 	if registeredDeviceID == "" {
 		for i := len(devices) - 1; i >= 0; i-- {
@@ -1119,9 +1239,14 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 }
 
 func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"devices": s.store.ListNativeDevices()})
+		writeJSON(w, http.StatusOK, map[string]any{"devices": store.ListNativeDevices()})
 	case http.MethodDelete:
 		var payload struct {
 			DeviceID string `json:"deviceId"`
@@ -1135,12 +1260,12 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 			http.Error(w, "deviceId is required", http.StatusBadRequest)
 			return
 		}
-		removed, err := s.store.RemoveNativeDevice(deviceID)
+		removed, err := store.RemoveNativeDevice(deviceID)
 		if err != nil {
 			http.Error(w, "failed to remove native device", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(s.store.ListNativeDevices())})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
 	}
 }
 
@@ -1155,13 +1280,18 @@ func normalizeNativePlatform(platform string) string {
 }
 
 func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.Request) {
-	devices := s.store.ListNativeDevices()
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	devices := store.ListNativeDevices()
 	removed := 0
 	for _, device := range devices {
 		if strings.TrimSpace(device.DeviceID) == "" {
 			continue
 		}
-		ok, err := s.store.RemoveNativeDevice(device.DeviceID)
+		ok, err := store.RemoveNativeDevice(device.DeviceID)
 		if err != nil {
 			http.Error(w, "failed to revoke paired devices", http.StatusInternalServerError)
 			return
@@ -1170,7 +1300,7 @@ func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.R
 			removed++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(s.store.ListNativeDevices())})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
 }
 
 func (s *Server) pairingSubscriberHash(subscriberID string) string {
@@ -1292,13 +1422,18 @@ func encodeVAPIDPrivateKey(key *ecdsa.PrivateKey) string {
 }
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 1000 {
 			limit = v
 		}
 	}
-	writeJSON(w, http.StatusOK, s.store.Decisions(limit))
+	writeJSON(w, http.StatusOK, store.Decisions(limit))
 }
 
 type inboxEmail struct {
@@ -1450,13 +1585,16 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	const uncategorizedTab = "Uncategorized"
 	byTab[uncategorizedTab] = []inboxEmail{}
 
-	if s.mail == nil {
+	mailClient, err := s.mailFor(r)
+	if err != nil {
+		// No mailbox configured yet — show the empty tab scaffold rather
+		// than an error so the page still renders.
 		tabs = append(tabs, uncategorizedTab)
 		writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
 		return
 	}
 
-	unread, err := s.mail.ListUnreadMessages(r.Context(), mailbox, limit)
+	unread, err := mailClient.ListUnreadMessages(r.Context(), mailbox, limit)
 	if err != nil {
 		http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
 		return
@@ -1499,7 +1637,12 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
-	if s.mail == nil {
+	mailClient, err := s.mailFor(r)
+	if err != nil {
+		if errors.Is(err, errIMAPNotConfigured) {
+			http.Error(w, "imap configuration is required", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -1508,7 +1651,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		parent := strings.TrimSpace(r.URL.Query().Get("parent"))
 
-		folders, err := s.mail.ListSubfolders(r.Context(), parent)
+		folders, err := mailClient.ListSubfolders(r.Context(), parent)
 		if err != nil {
 			http.Error(w, "failed to fetch inbox folders", http.StatusBadGateway)
 			return
@@ -1534,7 +1677,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		folder, err := s.mail.CreateFolder(r.Context(), parent, name)
+		folder, err := mailClient.CreateFolder(r.Context(), parent, name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1570,7 +1713,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		renamed, err := s.mail.RenameFolder(r.Context(), folder, name)
+		renamed, err := mailClient.RenameFolder(r.Context(), folder, name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1596,7 +1739,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "folder must have a parent mailbox", http.StatusBadRequest)
 			return
 		}
-		if err := s.mail.DeleteFolder(r.Context(), folder); err != nil {
+		if err := mailClient.DeleteFolder(r.Context(), folder); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -1609,7 +1752,12 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
-	if s.mail == nil {
+	mailClient, err := s.mailFor(r)
+	if err != nil {
+		if errors.Is(err, errIMAPNotConfigured) {
+			http.Error(w, "imap configuration is required", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -1664,7 +1812,7 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 	failures := make([]inboxActionFailure, 0)
 	processed := 0
 	for _, messageID := range uniqueIDs {
-		if err := s.mail.ApplyInboxAction(r.Context(), messageID, action, mailbox, targetMailbox); err != nil {
+		if err := mailClient.ApplyInboxAction(r.Context(), messageID, action, mailbox, targetMailbox); err != nil {
 			failures = append(failures, inboxActionFailure{MessageID: messageID, Error: err.Error()})
 			continue
 		}
@@ -1686,8 +1834,8 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	imapLabels := []string{}
-	if s.mail != nil {
-		found, err := s.mail.ListLabels(r.Context())
+	if mailClient, err := s.mailFor(r); err == nil {
+		found, err := mailClient.ListLabels(r.Context())
 		if err == nil {
 			imapLabels = found
 		}
@@ -1697,14 +1845,21 @@ func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	tuningPath := s.userTuningPath(ac.UserID)
 	switch r.Method {
 	case http.MethodGet:
-		b, err := os.ReadFile(s.tuningPath)
+		b, err := os.ReadFile(tuningPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
+				// New users start from the install's default tuning prompt.
 				fallback := strings.TrimSpace(llama.LoadTuningText())
 				if fallback != "" {
-					writeJSON(w, http.StatusOK, map[string]any{"content": fallback, "path": s.tuningPath})
+					writeJSON(w, http.StatusOK, map[string]any{"content": fallback, "path": tuningPath})
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"content": ""})
@@ -1713,7 +1868,7 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to read tuning file", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"content": string(b), "path": s.tuningPath})
+		writeJSON(w, http.StatusOK, map[string]any{"content": string(b), "path": tuningPath})
 	case http.MethodPut:
 		var req struct {
 			Content string `json:"content"`
@@ -1722,23 +1877,17 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if err := os.MkdirAll(filepath.Dir(s.tuningPath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(tuningPath), 0o755); err != nil {
 			http.Error(w, "failed to create tuning directory", http.StatusInternalServerError)
 			return
 		}
-		if err := os.WriteFile(s.tuningPath, []byte(req.Content), 0o600); err != nil {
+		if err := os.WriteFile(tuningPath, []byte(req.Content), 0o600); err != nil {
 			http.Error(w, "failed to save tuning file", http.StatusInternalServerError)
 			return
 		}
-		restartOk := true
-		restartError := ""
-		if err := restartLlamaProcess(r.Context()); err != nil {
-			restartOk = false
-			restartError = err.Error()
-		} else {
-			llama.ResetWarmupState()
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": s.tuningPath, "restartOk": restartOk, "restartError": restartError})
+		// Tuning is now passed to the model per classify call, so no llama
+		// process restart is needed for edits to take effect.
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": tuningPath, "restartOk": true, "restartError": ""})
 	}
 }
 
@@ -1863,7 +2012,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
-	subscriberID, _ := s.store.GetOrCreateSubscriberID()
+	subscriberID := ""
+	if store, err := s.userStore(ac.UserID); err == nil {
+		subscriberID, _ = store.GetOrCreateSubscriberID()
+	}
 	u, err := s.users.Get(ac.UserID)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "subscriberId": subscriberID})
@@ -1963,7 +2115,7 @@ func (s *Server) handleLlamaTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	result, err := client.Classify(ctx, allowed, "", "", prompt)
+	result, err := client.Classify(ctx, allowed, "", "", prompt, tuning)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -2095,60 +2247,6 @@ func envOrDefault(name, fallback string) string {
 		return fallback
 	}
 	return v
-}
-
-func resolveTuningPath() string {
-	if envPath := strings.TrimSpace(os.Getenv("TUNING_FILE")); envPath != "" {
-		return envPath
-	}
-	candidates := []string{"/llama_lab/config/TUNING.md", "TUNING.md", "/opt/llama-lab/TUNING.md"}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return "/llama_lab/config/TUNING.md"
-}
-
-func restartProcess(ctx context.Context, processName string, onSuccess func()) error {
-	run := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, "supervisorctl", args...)
-		cmd.Env = os.Environ()
-		out, err := cmd.CombinedOutput()
-		return strings.TrimSpace(string(out)), err
-	}
-
-	out, err := run("-c", "/etc/supervisord.conf", "restart", processName)
-	if err == nil {
-		if onSuccess != nil {
-			onSuccess()
-		}
-		return nil
-	}
-
-	msg := out
-	if msg == "" {
-		msg = err.Error()
-	}
-	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "not running") || strings.Contains(lower, "spawn error") || strings.Contains(lower, "fatal") {
-		startOut, startErr := run("-c", "/etc/supervisord.conf", "start", processName)
-		if startErr == nil {
-			if onSuccess != nil {
-				onSuccess()
-			}
-			return nil
-		}
-		if strings.TrimSpace(startOut) != "" {
-			msg = msg + "; start attempt: " + strings.TrimSpace(startOut)
-		}
-	}
-
-	return fmt.Errorf("restart %s: %s", processName, msg)
-}
-
-func restartLlamaProcess(ctx context.Context) error {
-	return restartProcess(ctx, "llama", func() { llama.ResetWarmupState() })
 }
 
 func tailLines(path string, limit int) ([]string, error) {

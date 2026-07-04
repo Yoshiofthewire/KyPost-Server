@@ -85,7 +85,7 @@ func (c *HTTPClient) Warmup(ctx context.Context) error {
 	return c.ensureWarm(ctx)
 }
 
-func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sender, subject, body string) (string, error) {
+func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sender, subject, body, tuning string) (string, error) {
 	if err := c.ensureWarm(ctx); err != nil {
 		appendLlamaErrorLog(err.Error())
 		return "", err
@@ -101,7 +101,11 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 
 	appendLlamaServerLog(fmt.Sprintf("[CLASSIFY] From: %s | Subject: [%s]", sender, subject))
 
-	prompt := buildRuntimePrompt(c.tuningTemplate, allowedLabels, sender, subject, body)
+	tuning = strings.TrimSpace(tuning)
+	if tuning == "" {
+		tuning = c.tuningTemplate
+	}
+	prompt := buildRuntimePrompt(tuning, allowedLabels, sender, subject, body)
 	for attempt := 0; attempt < 3; attempt++ {
 		result, err := c.classifyOnce(ctx, prompt)
 		if err != nil {

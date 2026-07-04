@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"llama-lab/backend/internal/fsutil"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,14 +51,81 @@ type Config struct {
 		KeywordMappings map[string][]string `yaml:"keywordMappings" json:"keywordMappings"`
 	} `yaml:"labels" json:"labels"`
 
-	Notifications NotificationSettings `yaml:"notifications" json:"notifications"`
+	Notifications NotificationKeys `yaml:"notifications" json:"-"`
 }
 
-type NotificationSettings struct {
-	Mode           string   `yaml:"mode" json:"mode"`
-	Keywords       []string `yaml:"keywords" json:"keywords"`
-	PublicKey      string   `yaml:"publicKey" json:"-"`
-	PrivateKeyPath string   `yaml:"privateKeyPath" json:"-"`
+// NotificationKeys is the shared VAPID signing identity for the whole
+// install. Delivery preferences (mode/keywords) are per-user and live in
+// UserSettings instead.
+type NotificationKeys struct {
+	PublicKey      string `yaml:"publicKey" json:"-"`
+	PrivateKeyPath string `yaml:"privateKeyPath" json:"-"`
+}
+
+// UserSettings is the small per-user preferences document stored at
+// CONFIG_DIR/users/<userID>/config.yaml.
+type UserSettings struct {
+	Notifications UserNotificationSettings `yaml:"notifications" json:"notifications"`
+}
+
+type UserNotificationSettings struct {
+	Mode     string   `yaml:"mode" json:"mode"`
+	Keywords []string `yaml:"keywords" json:"keywords"`
+}
+
+func DefaultUserSettings() UserSettings {
+	var s UserSettings
+	s.Notifications.Mode = "none"
+	s.Notifications.Keywords = []string{}
+	return s
+}
+
+// LoadUserSettings reads a per-user settings file, returning defaults if it
+// does not exist yet.
+func LoadUserSettings(path string) (UserSettings, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return DefaultUserSettings(), nil
+		}
+		return UserSettings{}, err
+	}
+	s := DefaultUserSettings()
+	if err := yaml.Unmarshal(b, &s); err != nil {
+		return UserSettings{}, err
+	}
+	if s.Notifications.Keywords == nil {
+		s.Notifications.Keywords = []string{}
+	}
+	return s, nil
+}
+
+func SaveUserSettings(path string, s UserSettings) error {
+	b, err := yaml.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return fsutil.AtomicWriteFile(path, b, 0o600)
+}
+
+// LoadLegacyNotificationPrefs extracts the pre-multi-user mode/keywords
+// fields from a legacy global config.yaml, for one-time migration into the
+// first admin user's settings file.
+func LoadLegacyNotificationPrefs(path string) (UserNotificationSettings, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return UserNotificationSettings{}, false
+	}
+	var legacy struct {
+		Notifications UserNotificationSettings `yaml:"notifications"`
+	}
+	if err := yaml.Unmarshal(b, &legacy); err != nil {
+		return UserNotificationSettings{}, false
+	}
+	if strings.TrimSpace(legacy.Notifications.Mode) == "" {
+		return UserNotificationSettings{}, false
+	}
+	return legacy.Notifications, true
 }
 
 type Pattern struct {
@@ -70,9 +139,10 @@ func Default() Config {
 		Timezone: "America/New_York",
 		LogLevel: "info",
 	}
-	cfg.Llama.BaseURL = "http://127.0.0.1:3333"
+	// Empty means "fall back to the OLLAMA_* env vars"; see newLlamaClient.
+	cfg.Llama.BaseURL = ""
 	cfg.Llama.APIKey = ""
-	cfg.Llama.ClassifyPath = "/"
+	cfg.Llama.ClassifyPath = ""
 	cfg.Scan.IntervalSeconds = 90
 	cfg.RateLimits.PerMinute = 10
 	cfg.RateLimits.PerHour = 20
@@ -84,8 +154,6 @@ func Default() Config {
 		{Name: "card", Regex: `\\b(?:\\d[ -]*?){13,19}\\b`, Replacement: "[REDACTED_CARD]"},
 	}
 	cfg.Labels.KeywordMappings = map[string][]string{}
-	cfg.Notifications.Mode = "none"
-	cfg.Notifications.Keywords = []string{}
 	return cfg
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import { normalizeConfig, uniqueLabels, type AppConfig } from "../api/config";
+import { useAuth } from "../auth";
 import { applyTheme, getStoredTheme, THEME_OPTIONS, type ThemeName } from "../theme";
 
 type LabelsResponse = {
@@ -81,6 +82,11 @@ function textToMapping(raw: string): Record<string, string[]> {
 export function ConfigPage() {
   const testPrompt = "Email Address: test@example.com Subject Line: Llama connectivity test Return only the label Updates";
 
+  // Application, Labels, and Remote LLM settings are global/system-owned
+  // and admin-only; every user manages their own Email (IMAP/SMTP) settings.
+  const auth = useAuth();
+  const isAdmin = auth.role === "admin";
+
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [allowlistText, setAllowlistText] = useState("");
   const [keywordMappingText, setKeywordMappingText] = useState("");
@@ -103,7 +109,7 @@ export function ConfigPage() {
 
   const [llamaTestBusy, setLlamaTestBusy] = useState(false);
   const [llamaTestResult, setLlamaTestResult] = useState("");
-  const [activeTab, setActiveTab] = useState<"application" | "email" | "labels" | "llm">("application");
+  const [activeTab, setActiveTab] = useState<"application" | "email" | "labels" | "llm">(isAdmin ? "application" : "email");
   const configStatusTone = configStatus.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
   const effectiveAllowlist = useMemo(() => {
@@ -307,17 +313,23 @@ export function ConfigPage() {
     <section className="panel config-page">
       <div className="config-header">
         <h2>Configuration</h2>
-        <p>Manage system behavior, email connectivity, labels, and model integration.</p>
+        <p>{isAdmin ? "Manage system behavior, email connectivity, labels, and model integration." : "Manage your email connectivity."}</p>
       </div>
 
       <div className="config-tabs" role="tablist" aria-label="Configuration sections">
-        <button type="button" role="tab" aria-selected={activeTab === "application"} className={`config-tab${activeTab === "application" ? " active" : ""}`} onClick={() => setActiveTab("application")}>Application</button>
+        {isAdmin ? (
+          <button type="button" role="tab" aria-selected={activeTab === "application"} className={`config-tab${activeTab === "application" ? " active" : ""}`} onClick={() => setActiveTab("application")}>Application</button>
+        ) : null}
         <button type="button" role="tab" aria-selected={activeTab === "email"} className={`config-tab${activeTab === "email" ? " active" : ""}`} onClick={() => setActiveTab("email")}>Email Settings</button>
-        <button type="button" role="tab" aria-selected={activeTab === "labels"} className={`config-tab${activeTab === "labels" ? " active" : ""}`} onClick={() => setActiveTab("labels")}>Labels</button>
-        <button type="button" role="tab" aria-selected={activeTab === "llm"} className={`config-tab${activeTab === "llm" ? " active" : ""}`} onClick={() => setActiveTab("llm")}>Remote LLM</button>
+        {isAdmin ? (
+          <button type="button" role="tab" aria-selected={activeTab === "labels"} className={`config-tab${activeTab === "labels" ? " active" : ""}`} onClick={() => setActiveTab("labels")}>Labels</button>
+        ) : null}
+        {isAdmin ? (
+          <button type="button" role="tab" aria-selected={activeTab === "llm"} className={`config-tab${activeTab === "llm" ? " active" : ""}`} onClick={() => setActiveTab("llm")}>Remote LLM</button>
+        ) : null}
       </div>
 
-      {activeTab === "application" ? (
+      {activeTab === "application" && isAdmin ? (
         <div className="config-card" role="tabpanel">
           <h3>Application</h3>
           <p className="config-muted">Core runtime and interface settings.</p>
@@ -380,6 +392,28 @@ export function ConfigPage() {
           <div className="config-actions">
             <button type="button" onClick={saveTheme}>Apply Theme</button>
             <button type="button" onClick={saveConfig}>Save Configuration</button>
+          </div>
+        </div>
+      ) : null}
+
+      {!isAdmin ? (
+        <div className="config-card">
+          <h3>Appearance</h3>
+          <p className="config-muted">Theme is stored in this browser only.</p>
+          <div className="config-grid config-grid-two">
+            <label>
+              <div>Theme</div>
+              <select value={selectedTheme} onChange={(event) => setSelectedTheme(event.target.value as ThemeName)}>
+                {THEME_OPTIONS.map((theme) => (
+                  <option key={theme} value={theme}>
+                    {theme}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="config-actions">
+            <button type="button" onClick={saveTheme}>Apply Theme</button>
           </div>
         </div>
       ) : null}
@@ -466,7 +500,7 @@ export function ConfigPage() {
         </div>
       ) : null}
 
-      {activeTab === "labels" ? (
+      {activeTab === "labels" && isAdmin ? (
         <div className="config-card" role="tabpanel">
           <h3>Label Rules</h3>
           <p className="config-muted">One label per line. Use keyword mappings to route alternate IMAP keywords.</p>
@@ -493,7 +527,7 @@ export function ConfigPage() {
         </div>
       ) : null}
 
-      {activeTab === "llm" ? (
+      {activeTab === "llm" && isAdmin ? (
         <div className="config-card" role="tabpanel">
           <h3>Remote LLM Model</h3>
           <p className="config-muted">Connection settings for model classification calls.</p>
