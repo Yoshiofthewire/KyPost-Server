@@ -37,7 +37,7 @@ type Poller struct {
 	mail          imapadapter.Client
 	llama         llama.Client
 	redaction     *redaction.Engine
-	nativeSenders []nativeSender
+	nativeSenders []NativeSender
 	cancel        context.CancelFunc
 	mu            sync.Mutex
 	tickSem       chan struct{}
@@ -49,7 +49,7 @@ func New(cfg config.Config, log *logging.Logger, store *state.Store, healthSvc *
 	if err != nil {
 		return nil, err
 	}
-	p := &Poller{cfg: cfg, log: log, store: store, health: healthSvc, mail: mailClient, llama: llamaClient, redaction: re, processed: []time.Time{}, nativeSenders: newNativeSendersFromEnv()}
+	p := &Poller{cfg: cfg, log: log, store: store, health: healthSvc, mail: mailClient, llama: llamaClient, redaction: re, processed: []time.Time{}, nativeSenders: NewNativeSendersFromEnv()}
 	p.tickSem = make(chan struct{}, 1)
 	p.tickSem <- struct{}{}
 	return p, nil
@@ -444,7 +444,7 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 		return
 	}
 
-	notification := nativePushMessage{
+	notification := NativePushMessage{
 		Title: "New Email",
 		Body:  buildNotificationBody(msg),
 		Data: map[string]string{
@@ -459,7 +459,7 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 	failed := 0
 	removed := 0
 	for _, device := range devices {
-		sender := selectNativeSender(p.nativeSenders, device.Platform)
+		sender := SelectNativeSender(p.nativeSenders, device.Platform)
 		if sender == nil {
 			failed++
 			p.log.Error(
@@ -477,7 +477,7 @@ func (p *Poller) maybeSendNativePushNotification(msg imapadapter.Message, select
 		cancel()
 		if err != nil {
 			failed++
-			if errors.Is(err, errNativeDeviceStale) && strings.TrimSpace(device.DeviceID) != "" {
+			if errors.Is(err, ErrNativeDeviceStale) && strings.TrimSpace(device.DeviceID) != "" {
 				ok, rmErr := p.store.RemoveNativeDevice(device.DeviceID)
 				if rmErr == nil && ok {
 					removed++

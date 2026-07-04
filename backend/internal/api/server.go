@@ -40,6 +40,7 @@ import (
 	"llama-lab/backend/internal/config"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
+	"llama-lab/backend/internal/processor"
 	"llama-lab/backend/internal/state"
 
 	goimap "github.com/BrianLeishman/go-imap"
@@ -64,6 +65,7 @@ type Server struct {
 	sessions          map[string]time.Time
 	pairingSecret     string
 	serverBaseURL     string
+	nativeSenders     []processor.NativeSender
 }
 
 func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, healthSvc *health.Service, mailClient imapadapter.Client, onConfigUpdated func(config.Config)) *Server {
@@ -90,6 +92,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, store *state.Store, he
 		sessions:          map[string]time.Time{},
 		pairingSecret:     pairingSecret,
 		serverBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
+		nativeSenders:     processor.NewNativeSendersFromEnv(),
 	}
 }
 
@@ -874,66 +877,99 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	privateKey, err := loadVAPIDPrivateKey(s.cfg.Notifications.PrivateKeyPath)
-	if err != nil {
-		http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
-		return
-	}
-
 	subs := s.store.ListNotificationSubscriptions()
-	if len(subs) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subscriptions": 0, "sent": 0, "failed": 0})
-		return
-	}
-
-	options := &webpush.Options{
-		Subscriber:      "mailto:noreply@localhost",
-		VAPIDPublicKey:  s.cfg.Notifications.PublicKey,
-		VAPIDPrivateKey: privateKey,
-		TTL:             3600,
-	}
-
 	sent := 0
 	failed := 0
-	staleEndpoints := []string{}
-	for _, sub := range subs {
-		resp, err := webpush.SendNotification(payloadBytes, &webpush.Subscription{
-			Endpoint: sub.Endpoint,
-			Keys: webpush.Keys{
-				Auth:   sub.Auth,
-				P256dh: sub.P256DH,
-			},
-		}, options)
+	removed := 0
+	if len(subs) > 0 {
+		privateKey, err := loadVAPIDPrivateKey(s.cfg.Notifications.PrivateKeyPath)
 		if err != nil {
+			http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
+			return
+		}
+
+		options := &webpush.Options{
+			Subscriber:      "mailto:noreply@localhost",
+			VAPIDPublicKey:  s.cfg.Notifications.PublicKey,
+			VAPIDPrivateKey: privateKey,
+			TTL:             3600,
+		}
+
+		staleEndpoints := []string{}
+		for _, sub := range subs {
+			resp, err := webpush.SendNotification(payloadBytes, &webpush.Subscription{
+				Endpoint: sub.Endpoint,
+				Keys: webpush.Keys{
+					Auth:   sub.Auth,
+					P256dh: sub.P256DH,
+				},
+			}, options)
+			if err != nil {
+				failed++
+				continue
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusCreated {
+				sent++
+				continue
+			}
 			failed++
-			continue
+			if resp.StatusCode == http.StatusGone || resp.StatusCode == http.StatusNotFound {
+				staleEndpoints = append(staleEndpoints, sub.Endpoint)
+			}
 		}
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusCreated {
-			sent++
-			continue
-		}
-		failed++
-		if resp.StatusCode == http.StatusGone || resp.StatusCode == http.StatusNotFound {
-			staleEndpoints = append(staleEndpoints, sub.Endpoint)
+
+		for _, endpoint := range staleEndpoints {
+			ok, err := s.store.RemoveNotificationSubscription(endpoint)
+			if err == nil && ok {
+				removed++
+			}
 		}
 	}
 
-	removed := 0
-	for _, endpoint := range staleEndpoints {
-		ok, err := s.store.RemoveNotificationSubscription(endpoint)
-		if err == nil && ok {
-			removed++
+	nativeDevices := s.store.ListNativeDevices()
+	nativeSent := 0
+	nativeFailed := 0
+	nativeRemoved := 0
+	if len(nativeDevices) > 0 && len(s.nativeSenders) > 0 {
+		nativeMessage := processor.NativePushMessage{
+			Title: title,
+			Body:  body,
+			Data:  map[string]string{"url": "/notifications"},
+		}
+		for _, device := range nativeDevices {
+			sender := processor.SelectNativeSender(s.nativeSenders, device.Platform)
+			if sender == nil {
+				nativeFailed++
+				continue
+			}
+			sendCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+			err := sender.Send(sendCtx, device, nativeMessage)
+			cancel()
+			if err != nil {
+				nativeFailed++
+				if errors.Is(err, processor.ErrNativeDeviceStale) && strings.TrimSpace(device.DeviceID) != "" {
+					if ok, rmErr := s.store.RemoveNativeDevice(device.DeviceID); rmErr == nil && ok {
+						nativeRemoved++
+					}
+				}
+				continue
+			}
+			nativeSent++
 		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                  failed == 0,
+		"ok":                  failed == 0 && nativeFailed == 0,
 		"subscriptions":       len(subs),
 		"sent":                sent,
 		"failed":              failed,
 		"removedStale":        removed,
 		"activeSubscriptions": len(s.store.ListNotificationSubscriptions()),
+		"nativeDevices":       len(nativeDevices),
+		"nativeSent":          nativeSent,
+		"nativeFailed":        nativeFailed,
+		"nativeRemovedStale":  nativeRemoved,
 	})
 }
 

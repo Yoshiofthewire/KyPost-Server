@@ -19,6 +19,10 @@ type NotificationTestResponse = {
   failed: number;
   removedStale?: number;
   activeSubscriptions?: number;
+  nativeDevices?: number;
+  nativeSent?: number;
+  nativeFailed?: number;
+  nativeRemovedStale?: number;
 };
 
 type PairingStatusResponse = {
@@ -335,7 +339,11 @@ export function NotificationsPage() {
         title: "Llama Mail Test Notification",
         body: "This test notification was sent to all of your subscribed devices."
       });
-      setStatus(`Test sent: ${result.sent}/${result.subscriptions} device(s) delivered.`);
+      const nativeDevices = result.nativeDevices ?? 0;
+      const nativeSent = result.nativeSent ?? 0;
+      const webSummary = `${result.sent}/${result.subscriptions} web`;
+      const nativeSummary = nativeDevices > 0 ? `, ${nativeSent}/${nativeDevices} mobile` : "";
+      setStatus(`Test sent: ${webSummary}${nativeSummary} device(s) delivered.`);
     } catch (error: unknown) {
       const detail = toErrorMessage(error, "unknown error");
       setStatus(`Failed to send test notification: ${detail}`);

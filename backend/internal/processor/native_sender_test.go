@@ -45,7 +45,7 @@ func TestFCMSenderSendSuccess(t *testing.T) {
 	}
 	sender.client = ts.Client()
 
-	err := sender.Send(context.Background(), state.NativeDevice{PushToken: "device-token"}, nativePushMessage{Title: "Title", Body: "Body", Data: map[string]string{"messageId": "m1"}})
+	err := sender.Send(context.Background(), state.NativeDevice{PushToken: "device-token"}, NativePushMessage{Title: "Title", Body: "Body", Data: map[string]string{"messageId": "m1"}})
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
@@ -81,9 +81,9 @@ func TestFCMSenderSendReturnsStaleError(t *testing.T) {
 	}
 	sender.client = ts.Client()
 
-	err := sender.Send(context.Background(), state.NativeDevice{PushToken: "device-token"}, nativePushMessage{Title: "Title", Body: "Body"})
-	if !errors.Is(err, errNativeDeviceStale) {
-		t.Fatalf("Send() error = %v, want errNativeDeviceStale", err)
+	err := sender.Send(context.Background(), state.NativeDevice{PushToken: "device-token"}, NativePushMessage{Title: "Title", Body: "Body"})
+	if !errors.Is(err, ErrNativeDeviceStale) {
+		t.Fatalf("Send() error = %v, want ErrNativeDeviceStale", err)
 	}
 }
 

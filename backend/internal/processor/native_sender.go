@@ -24,22 +24,22 @@ import (
 	"llama-lab/backend/internal/state"
 )
 
-var errNativeDeviceStale = errors.New("native device token is stale")
+var ErrNativeDeviceStale = errors.New("native device token is stale")
 
 const (
 	fcmOAuthScope = "https://www.googleapis.com/auth/firebase.messaging"
 )
 
-type nativePushMessage struct {
+type NativePushMessage struct {
 	Title string
 	Body  string
 	Data  map[string]string
 }
 
-type nativeSender interface {
+type NativeSender interface {
 	Name() string
 	Supports(platform string) bool
-	Send(ctx context.Context, device state.NativeDevice, message nativePushMessage) error
+	Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error
 }
 
 type fcmSender struct {
@@ -63,8 +63,8 @@ type fcmServiceAccount struct {
 	TokenURI    string `json:"token_uri"`
 }
 
-func newNativeSendersFromEnv() []nativeSender {
-	out := make([]nativeSender, 0, 1)
+func NewNativeSendersFromEnv() []NativeSender {
+	out := make([]NativeSender, 0, 1)
 	if sender := newFCMSenderFromEnv(); sender != nil {
 		out = append(out, sender)
 	}
@@ -140,7 +140,7 @@ func (s *fcmSender) Supports(platform string) bool {
 	}
 }
 
-func (s *fcmSender) Send(ctx context.Context, device state.NativeDevice, message nativePushMessage) error {
+func (s *fcmSender) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
 	registrationToken := strings.TrimSpace(device.PushToken)
 	if registrationToken == "" {
 		return errors.New("missing push token")
@@ -185,7 +185,7 @@ func (s *fcmSender) Send(ctx context.Context, device state.NativeDevice, message
 	trimmed := strings.TrimSpace(string(respBody))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if isFCMStaleResponse(resp.StatusCode, trimmed) {
-			return fmt.Errorf("%w: status=%d response=%s", errNativeDeviceStale, resp.StatusCode, trimmed)
+			return fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)
 		}
 		return fmt.Errorf("fcm send failed: status=%d response=%s", resp.StatusCode, trimmed)
 	}
@@ -293,7 +293,7 @@ func signServiceAccountAssertion(clientEmail string, privateKey *rsa.PrivateKey,
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-func selectNativeSender(senders []nativeSender, platform string) nativeSender {
+func SelectNativeSender(senders []NativeSender, platform string) NativeSender {
 	for _, sender := range senders {
 		if sender.Supports(platform) {
 			return sender
