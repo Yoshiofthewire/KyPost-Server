@@ -1168,6 +1168,7 @@ func (s *Server) upsertNovuFCMCredential(ctx context.Context, subscriberID, devi
 	}
 
 	trimmedSubscriber := strings.TrimSpace(subscriberID)
+	// Novu v1 credentials upsert/update uses /credentials with providerId in body.
 	variants := []struct {
 		method string
 		path   string
@@ -1192,26 +1193,6 @@ func (s *Server) upsertNovuFCMCredential(ctx context.Context, subscriberID, devi
 					"deviceTokens": []string{token},
 				},
 			},
-		},
-		{
-			method: http.MethodPut,
-			path:   "/v1/subscribers/" + url.PathEscape(trimmedSubscriber) + "/credentials/fcm",
-			body:   map[string]any{"deviceTokens": []string{token}},
-		},
-		{
-			method: http.MethodPost,
-			path:   "/v1/subscribers/" + url.PathEscape(trimmedSubscriber) + "/credentials",
-			body: map[string]any{
-				"providerId": "fcm",
-				"credentials": map[string]any{
-					"deviceTokens": []string{token},
-				},
-			},
-		},
-		{
-			method: http.MethodPatch,
-			path:   "/v1/subscribers/" + url.PathEscape(trimmedSubscriber) + "/credentials/fcm",
-			body:   map[string]any{"deviceTokens": []string{token}},
 		},
 	}
 
