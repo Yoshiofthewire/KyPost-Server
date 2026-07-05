@@ -34,9 +34,9 @@ func TestRelaySenderSendSuccess(t *testing.T) {
 	t.Setenv("PUSH_RELAY_URL", ts.URL)
 	t.Setenv("PUSH_RELAY_KEY", "test-api-key")
 
-	sender := newRelaySenderFromEnv(nil)
+	sender := NewRelaySenderFromEnv(nil)
 	if sender == nil {
-		t.Fatal("newRelaySenderFromEnv(nil) returned nil")
+		t.Fatal("NewRelaySenderFromEnv(nil) returned nil")
 	}
 	sender.client = ts.Client()
 
@@ -73,9 +73,9 @@ func TestRelaySenderSendReturnsStaleError(t *testing.T) {
 	t.Setenv("PUSH_RELAY_URL", ts.URL)
 	t.Setenv("PUSH_RELAY_KEY", "test-api-key")
 
-	sender := newRelaySenderFromEnv(nil)
+	sender := NewRelaySenderFromEnv(nil)
 	if sender == nil {
-		t.Fatal("newRelaySenderFromEnv(nil) returned nil")
+		t.Fatal("NewRelaySenderFromEnv(nil) returned nil")
 	}
 	sender.client = ts.Client()
 
@@ -88,8 +88,8 @@ func TestRelaySenderSendReturnsStaleError(t *testing.T) {
 func TestNewRelaySenderFromEnvRequiresURL(t *testing.T) {
 	t.Setenv("PUSH_RELAY_URL", "")
 	t.Setenv("PUSH_RELAY_KEY", "test-api-key")
-	if sender := newRelaySenderFromEnv(nil); sender != nil {
-		t.Fatal("newRelaySenderFromEnv should return nil when PUSH_RELAY_URL is empty")
+	if sender := NewRelaySenderFromEnv(nil); sender != nil {
+		t.Fatal("NewRelaySenderFromEnv should return nil when PUSH_RELAY_URL is empty")
 	}
 }
 
@@ -110,8 +110,8 @@ func TestNewRelaySenderFromEnvRegistrationFails(t *testing.T) {
 	t.Setenv("PUSH_RELAY_KEY", "")
 	t.Setenv("PUSH_RELAY_KEY_FILE", filepath.Join(t.TempDir(), "push_relay_key"))
 
-	if sender := newRelaySenderFromEnv(nil); sender != nil {
-		t.Fatal("newRelaySenderFromEnv should return nil when registration fails")
+	if sender := NewRelaySenderFromEnv(nil); sender != nil {
+		t.Fatal("NewRelaySenderFromEnv should return nil when registration fails")
 	}
 }
 
@@ -136,7 +136,7 @@ func TestNewRelaySenderFromEnvAutoRegisterPersistsAndReuses(t *testing.T) {
 	t.Setenv("PUSH_RELAY_KEY", "")
 	t.Setenv("PUSH_RELAY_KEY_FILE", keyFile)
 
-	sender := newRelaySenderFromEnv(nil)
+	sender := NewRelaySenderFromEnv(nil)
 	if sender == nil {
 		t.Fatal("expected sender from auto-registration")
 	}
@@ -151,7 +151,7 @@ func TestNewRelaySenderFromEnvAutoRegisterPersistsAndReuses(t *testing.T) {
 	}
 
 	// Second boot: key is read from the file, no re-registration.
-	sender2 := newRelaySenderFromEnv(nil)
+	sender2 := NewRelaySenderFromEnv(nil)
 	if sender2 == nil || sender2.apiKey != "minted-key" {
 		t.Fatalf("second sender did not reuse persisted key: %+v", sender2)
 	}
@@ -174,7 +174,7 @@ func TestNewRelaySenderFromEnvExplicitKeyWins(t *testing.T) {
 	t.Setenv("PUSH_RELAY_KEY", "explicit-key")
 	t.Setenv("PUSH_RELAY_KEY_FILE", keyFile)
 
-	sender := newRelaySenderFromEnv(nil)
+	sender := NewRelaySenderFromEnv(nil)
 	if sender == nil || sender.apiKey != "explicit-key" {
 		t.Fatalf("expected explicit key to win, got %+v", sender)
 	}

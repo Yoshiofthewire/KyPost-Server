@@ -230,6 +230,27 @@ func ensureNotificationKeyMaterial(configDir string, cfg *Config) (bool, error) 
 	return changed, nil
 }
 
+// LoadVAPIDPrivateKey reads the notification VAPID private key PEM at path and
+// returns it in the base64url raw-scalar form the webpush library expects.
+func LoadVAPIDPrivateKey(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return "", fmt.Errorf("vapid pem block missing")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	scalar := key.D.Bytes()
+	out := make([]byte, 32)
+	copy(out[32-len(scalar):], scalar)
+	return base64.RawURLEncoding.EncodeToString(out), nil
+}
+
 func loadOrCreateNotificationPrivateKey(path string) (*ecdsa.PrivateKey, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		block, _ := pem.Decode(b)

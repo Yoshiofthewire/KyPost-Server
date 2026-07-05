@@ -2,11 +2,7 @@ package processor
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,7 +48,7 @@ type Poller struct {
 	health        *health.Service
 	llama         llama.Client
 	redaction     *redaction.Engine
-	nativeSenders []NativeSender
+	nativeSender  *RelaySender
 	cancel        context.CancelFunc
 	tickSem       chan struct{}
 
@@ -94,7 +90,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		health:        healthSvc,
 		llama:         llamaClient,
 		redaction:     re,
-		nativeSenders: NewNativeSendersFromEnv(log),
+		nativeSender:  NewRelaySenderFromEnv(log),
 		stateDir:      stateDir,
 		configDir:     configDir,
 		imapKeyPath:   envOrDefaultProc("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key"),
@@ -582,7 +578,7 @@ func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, 
 		return
 	}
 
-	privateKey, err := loadVAPIDPrivateKey(privateKeyPath)
+	privateKey, err := config.LoadVAPIDPrivateKey(privateKeyPath)
 	if err != nil {
 		p.log.Error("failed to load notification private key", "error", err.Error())
 		return
@@ -662,7 +658,7 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	if len(devices) == 0 {
 		return
 	}
-	if len(p.nativeSenders) == 0 {
+	if p.nativeSender == nil {
 		p.log.Info(
 			"new-email native notification skipped",
 			"user_id", uc.id,
@@ -693,22 +689,8 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	failed := 0
 	removed := 0
 	for _, device := range devices {
-		sender := SelectNativeSender(p.nativeSenders, device.Platform)
-		if sender == nil {
-			failed++
-			p.log.Error(
-				"native notification failed",
-				"user_id", uc.id,
-				"message_id", msg.ID,
-				"device_id", strings.TrimSpace(device.DeviceID),
-				"platform", strings.TrimSpace(device.Platform),
-				"error", "no sender for platform",
-			)
-			continue
-		}
-
 		sendCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-		err := sender.Send(sendCtx, device, notification)
+		err := p.nativeSender.Send(sendCtx, device, notification)
 		cancel()
 		if err != nil {
 			failed++
@@ -730,7 +712,7 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 				"message_id", msg.ID,
 				"device_id", strings.TrimSpace(device.DeviceID),
 				"platform", strings.TrimSpace(device.Platform),
-				"sender", sender.Name(),
+				"sender", "relay",
 				"error", err.Error(),
 			)
 			continue
@@ -819,28 +801,6 @@ func buildNativeNotificationText(msg imapadapter.Message) (title, body string) {
 	return title, body
 }
 
-func loadVAPIDPrivateKey(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	block, _ := pem.Decode(b)
-	if block == nil {
-		return "", errors.New("vapid pem block missing")
-	}
-	key, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		return "", err
-	}
-	return encodeVAPIDPrivateKey(key), nil
-}
-
-func encodeVAPIDPrivateKey(key *ecdsa.PrivateKey) string {
-	scalar := key.D.Bytes()
-	out := make([]byte, 32)
-	copy(out[32-len(scalar):], scalar)
-	return base64.RawURLEncoding.EncodeToString(out)
-}
 
 func classifyWithRetry(ctx context.Context, c llama.Client, labels []string, sender, subject, body, tuning string) (string, error) {
 	var out string
