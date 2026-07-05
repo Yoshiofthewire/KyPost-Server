@@ -799,10 +799,16 @@ export function App() {
       >
         <div className="license-window">
           <div className="license-window-header">
-            <p className="license-window-title">
-              llama Mail Developed by Busnes Games Copyright {new Date().getFullYear()}, version{" "}
-              {APP_VERSION} licensed under GPL 2
-            </p>
+            <div className="license-window-title">
+              <div className="license-title-main">
+                <span className="license-app-name">llama Mail</span>
+                <span className="license-version-badge">v{APP_VERSION}</span>
+              </div>
+              <p className="license-title-sub">Developed by Busnes Games</p>
+              <p className="license-title-sub">
+                &copy; {new Date().getFullYear()} &middot; Licensed under AGPL&nbsp;v3
+              </p>
+            </div>
             <button type="button" className="nav-link-button" onClick={() => setLicenseOpen(false)}>
               Close
             </button>

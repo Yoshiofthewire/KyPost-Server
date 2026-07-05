@@ -1754,8 +1754,39 @@ pre {
 
 .license-window-title {
   margin: 0;
-  font-size: 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.license-title-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.license-app-name {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.license-version-badge {
+  font-size: 0.72rem;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.license-title-sub {
+  margin: 0;
+  font-size: 0.82rem;
+  opacity: 0.7;
 }
 
 .license-text {
