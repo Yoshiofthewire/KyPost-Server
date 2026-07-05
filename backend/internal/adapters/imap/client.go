@@ -93,31 +93,6 @@ type encryptedPayload struct {
 	Ciphertext string `json:"ciphertext"`
 }
 
-func NewAPIClientFromEnv() *APIClient {
-	host := strings.TrimSpace(os.Getenv("IMAP_HOST"))
-	username := strings.TrimSpace(os.Getenv("IMAP_USERNAME"))
-	password := strings.TrimSpace(os.Getenv("IMAP_PASSWORD"))
-	mailbox := strings.TrimSpace(os.Getenv("IMAP_MAILBOX"))
-	if mailbox == "" {
-		mailbox = "INBOX"
-	}
-
-	port := 993
-	if raw := strings.TrimSpace(os.Getenv("IMAP_PORT")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			port = parsed
-		}
-	}
-
-	return &APIClient{
-		host:     host,
-		port:     port,
-		username: username,
-		password: password,
-		mailbox:  mailbox,
-	}
-}
-
 // NewAPIClientFromStoredConfig builds a client that loads its credentials
 // from a specific encrypted config file (per-user), never from env vars.
 func NewAPIClientFromStoredConfig(configPath, configKeyPath string) *APIClient {

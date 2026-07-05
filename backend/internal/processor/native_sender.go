@@ -26,17 +26,12 @@ type NativePushMessage struct {
 	Data  map[string]string
 }
 
-type NativeSender interface {
-	Name() string
-	Supports(platform string) bool
-	Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error
-}
-
-// relaySender forwards native push requests to the central Cloudflare Worker
+// RelaySender forwards native push requests to the central Cloudflare Worker
 // relay, which holds the single Firebase service account the published mobile
 // app is built against. Self-hosted servers never talk to FCM directly; they
-// authenticate to the relay with a per-server API key.
-type relaySender struct {
+// authenticate to the relay with a per-server API key. The relay delivers to
+// every platform (iOS and Android), so it is the only native sender.
+type RelaySender struct {
 	relayURL string
 	apiKey   string
 	client   *http.Client
@@ -51,14 +46,6 @@ type relaySendRequest struct {
 	Platform string            `json:"platform,omitempty"`
 }
 
-func NewNativeSendersFromEnv(log *logging.Logger) []NativeSender {
-	out := make([]NativeSender, 0, 1)
-	if sender := newRelaySenderFromEnv(log); sender != nil {
-		out = append(out, sender)
-	}
-	return out
-}
-
 func logNativeSenderError(log *logging.Logger, reason, detail string) {
 	if log == nil {
 		return
@@ -66,7 +53,10 @@ func logNativeSenderError(log *logging.Logger, reason, detail string) {
 	log.Error("native push relay not configured", "reason", reason, "detail", detail)
 }
 
-func newRelaySenderFromEnv(log *logging.Logger) *relaySender {
+// NewRelaySenderFromEnv builds the relay sender from the PUSH_RELAY_* env, or
+// returns nil when the relay is not configured (no PUSH_RELAY_URL) or no key can
+// be resolved.
+func NewRelaySenderFromEnv(log *logging.Logger) *RelaySender {
 	relayURL := strings.TrimRight(strings.TrimSpace(os.Getenv("PUSH_RELAY_URL")), "/")
 	if relayURL == "" {
 		return nil
@@ -83,7 +73,7 @@ func newRelaySenderFromEnv(log *logging.Logger) *relaySender {
 		return nil
 	}
 
-	return &relaySender{
+	return &RelaySender{
 		relayURL: relayURL,
 		apiKey:   apiKey,
 		client:   client,
@@ -183,20 +173,7 @@ func registerWithRelay(relayURL string, client *http.Client) (string, error) {
 	return key, nil
 }
 
-func (s *relaySender) Name() string {
-	return "relay"
-}
-
-func (s *relaySender) Supports(platform string) bool {
-	switch strings.ToLower(strings.TrimSpace(platform)) {
-	case "", "android", "ios":
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *relaySender) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
+func (s *RelaySender) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
 	registrationToken := strings.TrimSpace(device.PushToken)
 	if registrationToken == "" {
 		return errors.New("missing push token")
@@ -236,15 +213,6 @@ func (s *relaySender) Send(ctx context.Context, device state.NativeDevice, messa
 		return fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)
 	}
 	return fmt.Errorf("push relay send failed: status=%d response=%s", resp.StatusCode, trimmed)
-}
-
-func SelectNativeSender(senders []NativeSender, platform string) NativeSender {
-	for _, sender := range senders {
-		if sender.Supports(platform) {
-			return sender
-		}
-	}
-	return nil
 }
 
 // isRelayStaleResponse reports whether the relay signalled that the device

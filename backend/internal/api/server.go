@@ -6,17 +6,14 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -79,7 +76,7 @@ type Server struct {
 	sessions          map[string]Session
 	pairingSecret     string
 	serverBaseURL     string
-	nativeSenders     []processor.NativeSender
+	nativeSender      *processor.RelaySender
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
@@ -110,7 +107,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		sessions:          map[string]Session{},
 		pairingSecret:     pairingSecret,
 		serverBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
-		nativeSenders:     processor.NewNativeSendersFromEnv(logger),
+		nativeSender:      processor.NewRelaySenderFromEnv(logger),
 		userStores:        map[string]*state.Store{},
 		userMail:          map[string]*serverMailEntry{},
 		subIndex:          map[string]string{},
@@ -990,7 +987,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	failed := 0
 	removed := 0
 	if len(subs) > 0 {
-		privateKey, err := loadVAPIDPrivateKey(s.cfg.Notifications.PrivateKeyPath)
+		privateKey, err := config.LoadVAPIDPrivateKey(s.cfg.Notifications.PrivateKeyPath)
 		if err != nil {
 			http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
 			return
@@ -1040,7 +1037,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	nativeFailed := 0
 	nativeRemoved := 0
 	nativeError := ""
-	if len(nativeDevices) > 0 && len(s.nativeSenders) == 0 {
+	if len(nativeDevices) > 0 && s.nativeSender == nil {
 		nativeError = "no native push sender configured on the server (set PUSH_RELAY_URL and PUSH_RELAY_KEY)"
 		s.logger.Error("test native notification skipped", "reason", nativeError, "devices", strconv.Itoa(len(nativeDevices)))
 	} else if len(nativeDevices) > 0 {
@@ -1050,14 +1047,8 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 			Data:  map[string]string{"url": "/notifications"},
 		}
 		for _, device := range nativeDevices {
-			sender := processor.SelectNativeSender(s.nativeSenders, device.Platform)
-			if sender == nil {
-				nativeFailed++
-				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "error", "no sender for platform")
-				continue
-			}
 			sendCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-			err := sender.Send(sendCtx, device, nativeMessage)
+			err := s.nativeSender.Send(sendCtx, device, nativeMessage)
 			cancel()
 			if err != nil {
 				nativeFailed++
@@ -1066,7 +1057,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 						nativeRemoved++
 					}
 				}
-				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "sender", sender.Name(), "error", err.Error())
+				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "sender", "relay", "error", err.Error())
 				continue
 			}
 			nativeSent++
@@ -1398,28 +1389,6 @@ func externalBaseURL(r *http.Request) string {
 	return proto + "://" + host
 }
 
-func loadVAPIDPrivateKey(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	block, _ := pem.Decode(b)
-	if block == nil {
-		return "", errors.New("vapid pem block missing")
-	}
-	key, err := x509.ParseECPrivateKey(block.Bytes)
-	if err != nil {
-		return "", err
-	}
-	return encodeVAPIDPrivateKey(key), nil
-}
-
-func encodeVAPIDPrivateKey(key *ecdsa.PrivateKey) string {
-	scalar := key.D.Bytes()
-	out := make([]byte, 32)
-	copy(out[32-len(scalar):], scalar)
-	return base64.RawURLEncoding.EncodeToString(out)
-}
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	store, err := s.storeFor(r)
