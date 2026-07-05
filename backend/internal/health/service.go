@@ -12,6 +12,16 @@ type Status struct {
 	FailureReason        []string `json:"failureReason"`
 	AICreditsExhausted   bool     `json:"aiCreditsExhausted"`
 	AICreditsExhaustedAt string   `json:"aiCreditsExhaustedAt,omitempty"`
+
+	// Native (mobile/FCM) push relay health. Independent of the overall Healthy
+	// flag on purpose: a relay/key outage must not flip Healthy (which drives
+	// container restarts) — it just surfaces here so it can't fail silently.
+	// NativePushFailing defaults to false, so "off" and "working" both report
+	// false; it goes true only when a configured relay actually fails.
+	NativePushFailing     bool   `json:"nativePushFailing"`
+	NativePushLastError   string `json:"nativePushLastError,omitempty"`
+	NativePushFailingAt   string `json:"nativePushFailingAt,omitempty"`
+	NativePushLastSuccess string `json:"nativePushLastSuccessUtc,omitempty"`
 }
 
 type Service struct {
@@ -23,6 +33,13 @@ type Service struct {
 	// calls and only changes via SetAICreditsExhausted / ClearAICreditsExhausted.
 	aiCreditsExhausted   bool
 	aiCreditsExhaustedAt string
+
+	// Native-push relay state is sticky and independent of Healthy, updated only
+	// via RecordNativePush{Success,Failure}.
+	nativePushFailing     bool
+	nativePushLastError   string
+	nativePushFailingAt   string
+	nativePushLastSuccess string
 }
 
 func NewService() *Service {
@@ -65,6 +82,10 @@ func (s *Service) GetStatus() Status {
 	st.LastCheckUTC = time.Now().UTC().Format(time.RFC3339)
 	st.AICreditsExhausted = s.aiCreditsExhausted
 	st.AICreditsExhaustedAt = s.aiCreditsExhaustedAt
+	st.NativePushFailing = s.nativePushFailing
+	st.NativePushLastError = s.nativePushLastError
+	st.NativePushFailingAt = s.nativePushFailingAt
+	st.NativePushLastSuccess = s.nativePushLastSuccess
 	return st
 }
 
@@ -83,4 +104,29 @@ func (s *Service) ClearAICreditsExhausted() {
 	defer s.mu.Unlock()
 	s.aiCreditsExhausted = false
 	s.aiCreditsExhaustedAt = ""
+}
+
+// RecordNativePushSuccess clears the native-push failing flag after the relay
+// accepts a send (or reports a token stale — either way the relay responded).
+func (s *Service) RecordNativePushSuccess() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nativePushFailing = false
+	s.nativePushLastError = ""
+	s.nativePushFailingAt = ""
+	s.nativePushLastSuccess = time.Now().UTC().Format(time.RFC3339)
+}
+
+// RecordNativePushFailure raises the native-push failing flag when a configured
+// relay fails to deliver (unreachable, 401 orphaned key, 5xx, 429, timeout).
+// The first failure stamps NativePushFailingAt; later ones only refresh the
+// reason, so the flag reports how long the relay has been down.
+func (s *Service) RecordNativePushFailure(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.nativePushFailing {
+		s.nativePushFailing = true
+		s.nativePushFailingAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	s.nativePushLastError = reason
 }

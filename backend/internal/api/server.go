@@ -1040,27 +1040,45 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	if len(nativeDevices) > 0 && s.nativeSender == nil {
 		nativeError = "no native push sender configured on the server (set PUSH_RELAY_URL and PUSH_RELAY_KEY)"
 		s.logger.Error("test native notification skipped", "reason", nativeError, "devices", strconv.Itoa(len(nativeDevices)))
+		if strings.TrimSpace(os.Getenv("PUSH_RELAY_URL")) != "" {
+			s.health.RecordNativePushFailure("relay configured (PUSH_RELAY_URL) but no usable key — auto-registration or key file failed at startup")
+		}
 	} else if len(nativeDevices) > 0 {
 		nativeMessage := processor.NativePushMessage{
 			Title: title,
 			Body:  body,
 			Data:  map[string]string{"url": "/notifications"},
 		}
+		// Relay health for this probe: a success or a stale-token response means
+		// the relay answered; only a non-stale error means the relay is failing.
+		relayResponded := false
+		relayFailure := ""
 		for _, device := range nativeDevices {
 			sendCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 			err := s.nativeSender.Send(sendCtx, device, nativeMessage)
 			cancel()
 			if err != nil {
 				nativeFailed++
-				if errors.Is(err, processor.ErrNativeDeviceStale) && strings.TrimSpace(device.DeviceID) != "" {
-					if ok, rmErr := store.RemoveNativeDevice(device.DeviceID); rmErr == nil && ok {
-						nativeRemoved++
+				if errors.Is(err, processor.ErrNativeDeviceStale) {
+					relayResponded = true
+					if strings.TrimSpace(device.DeviceID) != "" {
+						if ok, rmErr := store.RemoveNativeDevice(device.DeviceID); rmErr == nil && ok {
+							nativeRemoved++
+						}
 					}
+				} else {
+					relayFailure = err.Error()
 				}
 				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "sender", "relay", "error", err.Error())
 				continue
 			}
+			relayResponded = true
 			nativeSent++
+		}
+		if relayFailure != "" {
+			s.health.RecordNativePushFailure(relayFailure)
+		} else if relayResponded {
+			s.health.RecordNativePushSuccess()
 		}
 	}
 
@@ -1388,7 +1406,6 @@ func externalBaseURL(r *http.Request) string {
 	}
 	return proto + "://" + host
 }
-
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	store, err := s.storeFor(r)
