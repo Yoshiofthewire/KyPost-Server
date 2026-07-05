@@ -26,10 +26,14 @@ type NotificationTestResponse = {
   nativeError?: string;
 };
 
+type NativeDeliveryMode = "push" | "pull";
+
 type PairingStatusResponse = {
   subscriberId: string;
   serverBaseUrl?: string;
   registerEndpoint?: string;
+  pullEndpoint?: string;
+  deliveryMode?: NativeDeliveryMode;
   subscriberHash?: string;
   pairingToken?: string;
   pairingExpiresAt?: string;
@@ -121,13 +125,9 @@ function formatDeviceTime(value?: string): string {
 }
 
 function summarizeDevice(device: NativeDevice): string {
-  const platform = (device.platform || "android").toLowerCase();
-  const label = platform === "ios" ? "iOS" : "Android";
-  const version = (device.appVersion || "").trim();
-  if (!version) {
-    return label;
-  }
-  return `${label} v${version}`;
+  // Show exactly what the client reports as its app version, with no derived
+  // platform/"v" prefix.
+  return (device.appVersion || "").trim();
 }
 
 function pairingBarColor(remainingMs: number, ttlMs: number): string {
@@ -160,6 +160,8 @@ export function NotificationsPage() {
   const [pairingTtlMs, setPairingTtlMs] = useState(DEFAULT_PAIRING_TTL_SECONDS * 1000);
   const [pairingClockMs, setPairingClockMs] = useState<number>(() => Date.now());
   const [pairingRefreshBusy, setPairingRefreshBusy] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<NativeDeliveryMode>("push");
+  const [deliveryModeBusy, setDeliveryModeBusy] = useState(false);
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
@@ -169,6 +171,7 @@ export function NotificationsPage() {
       setPairingExpiresAtMs(null);
       return;
     }
+    setDeliveryMode(next.deliveryMode === "pull" ? "pull" : "push");
 
     const ttlSeconds = typeof next.pairingTtlSeconds === "number" && next.pairingTtlSeconds > 0
       ? next.pairingTtlSeconds
@@ -412,6 +415,29 @@ export function NotificationsPage() {
       setNativeDevices(Array.isArray(next.devices) ? next.devices : []);
     } catch {
       setNativeDevices([]);
+    }
+  }
+
+  async function changeDeliveryMode(mode: NativeDeliveryMode) {
+    if (mode === deliveryMode || deliveryModeBusy) {
+      return;
+    }
+    const previous = deliveryMode;
+    setDeliveryMode(mode); // optimistic
+    setDeliveryModeBusy(true);
+    try {
+      const res = await putJSON<{ ok: boolean; deliveryMode: NativeDeliveryMode }>("/api/notifications/native/mode", { mode });
+      const applied = res.deliveryMode === "pull" ? "pull" : "push";
+      setDeliveryMode(applied);
+      setPairingStatus((prev) => (prev ? { ...prev, deliveryMode: applied } : prev));
+      setStatus(applied === "pull"
+        ? "Switched to App Pull notifications (bypasses Cloudflare and Firebase)."
+        : "Switched to relay push notifications.");
+    } catch (error: unknown) {
+      setDeliveryMode(previous); // roll back
+      setStatus(`Failed to change notification delivery: ${toErrorMessage(error, "unknown error")}`);
+    } finally {
+      setDeliveryModeBusy(false);
     }
   }
 
@@ -669,7 +695,7 @@ export function NotificationsPage() {
                         <div className="notifications-native-main">
                           <strong>{device.deviceName?.trim() || device.platform || "device"}</strong>
                           <span>{maskToken(device.pushToken || "")}</span>
-                          <span className="notifications-native-detail">{summarizeDevice(device)}</span>
+                          {summarizeDevice(device) ? <span className="notifications-native-detail">{summarizeDevice(device)}</span> : null}
                           <span className="notifications-native-detail">Updated: {formatDeviceTime(device.updatedAt || device.registeredAt)}</span>
                           {device.userAgent?.trim() ? <span className="notifications-native-detail">UA: {device.userAgent.trim()}</span> : null}
                         </div>
@@ -688,6 +714,31 @@ export function NotificationsPage() {
               </div>
 
               <div className="notifications-store-links">
+                <div
+                  className="notifications-delivery-toggle"
+                  role="group"
+                  aria-label="Notification delivery method"
+                  title="App Pull fetches notifications directly from this server over HTTP, bypassing Cloudflare and Firebase."
+                >
+                  <button
+                    type="button"
+                    className={`notifications-delivery-option${deliveryMode === "push" ? " active" : ""}`}
+                    aria-pressed={deliveryMode === "push"}
+                    onClick={() => void changeDeliveryMode("push")}
+                    disabled={deliveryModeBusy}
+                  >
+                    Relay Push
+                  </button>
+                  <button
+                    type="button"
+                    className={`notifications-delivery-option${deliveryMode === "pull" ? " active" : ""}`}
+                    aria-pressed={deliveryMode === "pull"}
+                    onClick={() => void changeDeliveryMode("pull")}
+                    disabled={deliveryModeBusy}
+                  >
+                    App Pull
+                  </button>
+                </div>
                 <span className="notifications-store-disabled" title="Store link coming soon">Google Play (coming soon)</span>
                 <span className="notifications-store-disabled" title="Store link coming soon">App Store (coming soon)</span>
               </div>

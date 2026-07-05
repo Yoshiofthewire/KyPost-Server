@@ -25,10 +25,26 @@ type Store struct {
 	nativeDevices      []NativeDevice
 	nativeDevicesDirty bool
 	subscriberID       string
+	nativeDeliveryMode string
+	pullNotifications  []PullNotification
+	pullSeq            int64
+	pullDirty          bool
 
 	aiCreditsExhausted   bool
 	aiCreditsExhaustedAt string
 }
+
+// Native notification delivery modes. "push" (the default) sends via the
+// Cloudflare/Firebase relay; "pull" bypasses the relay entirely and instead
+// queues notifications server-side for the mobile app to fetch over plain HTTP.
+const (
+	DeliveryModePush = "push"
+	DeliveryModePull = "pull"
+)
+
+// maxPullNotifications bounds the per-user pull queue so an offline device can
+// never grow the state file without limit; the oldest entries are dropped.
+const maxPullNotifications = 100
 
 type Decision struct {
 	MessageID string `json:"messageId"`
@@ -60,12 +76,26 @@ type NativeDevice struct {
 	UpdatedAt    string `json:"updatedAt"`
 }
 
+// PullNotification is one queued notification awaiting an App Pull fetch. Seq
+// is a per-user monotonic cursor the client advances so it never re-fetches a
+// notification it has already seen.
+type PullNotification struct {
+	Seq       int64             `json:"seq"`
+	Title     string            `json:"title"`
+	Body      string            `json:"body"`
+	Data      map[string]string `json:"data,omitempty"`
+	CreatedAt string            `json:"createdAt"`
+}
+
 type stateFile struct {
 	LastCheckpoint       string                     `json:"lastCheckpoint"`
 	Processed            map[string]string          `json:"processed"`
 	Notifications        []NotificationSubscription `json:"notifications,omitempty"`
 	NativeDevices        []NativeDevice             `json:"nativeDevices,omitempty"`
 	SubscriberID         string                     `json:"subscriberId,omitempty"`
+	NativeDeliveryMode   string                     `json:"nativeDeliveryMode,omitempty"`
+	PullNotifications    []PullNotification         `json:"pullNotifications,omitempty"`
+	PullSeq              int64                      `json:"pullSeq,omitempty"`
 	AICreditsExhausted   bool                       `json:"aiCreditsExhausted,omitempty"`
 	AICreditsExhaustedAt string                     `json:"aiCreditsExhaustedAt,omitempty"`
 }
@@ -117,6 +147,10 @@ func (s *Store) applyStateFile(sf stateFile) {
 	s.notificationsDirty = false
 	s.nativeDevices = append([]NativeDevice{}, sf.NativeDevices...)
 	s.nativeDevicesDirty = false
+	s.nativeDeliveryMode = normalizeDeliveryMode(sf.NativeDeliveryMode)
+	s.pullNotifications = append([]PullNotification{}, sf.PullNotifications...)
+	s.pullSeq = sf.PullSeq
+	s.pullDirty = false
 
 	processed := make(map[string]time.Time, len(sf.Processed))
 	for id, ts := range sf.Processed {
@@ -184,6 +218,40 @@ func (s *Store) refreshNativeDevicesFromDiskLocked() error {
 	s.nativeDevices = append([]NativeDevice{}, sf.NativeDevices...)
 	s.nativeDevicesDirty = false
 	return nil
+}
+
+func (s *Store) refreshPullFromDiskLocked() error {
+	b, err := os.ReadFile(s.path())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var sf struct {
+		NativeDeliveryMode string             `json:"nativeDeliveryMode,omitempty"`
+		PullNotifications  []PullNotification `json:"pullNotifications,omitempty"`
+		PullSeq            int64              `json:"pullSeq,omitempty"`
+	}
+	if err := json.Unmarshal(b, &sf); err != nil {
+		return err
+	}
+	s.nativeDeliveryMode = normalizeDeliveryMode(sf.NativeDeliveryMode)
+	s.pullNotifications = append([]PullNotification{}, sf.PullNotifications...)
+	s.pullSeq = sf.PullSeq
+	s.pullDirty = false
+	return nil
+}
+
+// normalizeDeliveryMode coerces any stored/requested value to a known mode,
+// defaulting to push so an absent or unrecognized value never disables
+// notifications.
+func normalizeDeliveryMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), DeliveryModePull) {
+		return DeliveryModePull
+	}
+	return DeliveryModePush
 }
 
 func (s *Store) Cleanup(keepDays int) error {
@@ -258,6 +326,66 @@ func (s *Store) GetOrCreateSubscriberID() (string, error) {
 	return s.subscriberID, nil
 }
 
+// NativeDeliveryMode returns the active native delivery mode ("push" or
+// "pull"), reading through to disk so a mode change made by the API server is
+// picked up by the poller running in the same process.
+func (s *Store) NativeDeliveryMode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshPullFromDiskLocked()
+	return normalizeDeliveryMode(s.nativeDeliveryMode)
+}
+
+// SetNativeDeliveryMode persists the native delivery mode. Unknown values are
+// coerced to push.
+func (s *Store) SetNativeDeliveryMode(mode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return err
+	}
+	s.nativeDeliveryMode = normalizeDeliveryMode(mode)
+	s.pullDirty = true
+	return s.persistLocked()
+}
+
+// EnqueuePullNotification appends a notification to the App Pull queue, stamping
+// it with the next sequence number and trimming the queue to its bound.
+func (s *Store) EnqueuePullNotification(n PullNotification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return err
+	}
+	s.pullSeq++
+	n.Seq = s.pullSeq
+	if strings.TrimSpace(n.CreatedAt) == "" {
+		n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	s.pullNotifications = append(s.pullNotifications, n)
+	if len(s.pullNotifications) > maxPullNotifications {
+		s.pullNotifications = s.pullNotifications[len(s.pullNotifications)-maxPullNotifications:]
+	}
+	s.pullDirty = true
+	return s.persistLocked()
+}
+
+// PullNotificationsAfter returns queued notifications with Seq greater than
+// after, together with the current cursor (the highest assigned sequence). The
+// client advances after to the returned cursor between polls.
+func (s *Store) PullNotificationsAfter(after int64) ([]PullNotification, int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshPullFromDiskLocked()
+	out := make([]PullNotification, 0, len(s.pullNotifications))
+	for _, n := range s.pullNotifications {
+		if n.Seq > after {
+			out = append(out, n)
+		}
+	}
+	return out, s.pullSeq
+}
+
 func (s *Store) AddDecision(d Decision) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -308,6 +436,11 @@ func (s *Store) persistLocked() error {
 			return err
 		}
 	}
+	if !s.pullDirty {
+		if err := s.refreshPullFromDiskLocked(); err != nil {
+			return err
+		}
+	}
 
 	processed := make(map[string]string, len(s.processedSet))
 	for id, ts := range s.processedSet {
@@ -319,6 +452,9 @@ func (s *Store) persistLocked() error {
 		Notifications:        s.notifications,
 		NativeDevices:        s.nativeDevices,
 		SubscriberID:         s.subscriberID,
+		NativeDeliveryMode:   s.nativeDeliveryMode,
+		PullNotifications:    s.pullNotifications,
+		PullSeq:              s.pullSeq,
 		AICreditsExhausted:   s.aiCreditsExhausted,
 		AICreditsExhaustedAt: s.aiCreditsExhaustedAt,
 	}, "", "  ")
@@ -330,6 +466,7 @@ func (s *Store) persistLocked() error {
 	}
 	s.notificationsDirty = false
 	s.nativeDevicesDirty = false
+	s.pullDirty = false
 	return nil
 }
 

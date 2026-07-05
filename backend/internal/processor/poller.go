@@ -663,6 +663,28 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	if len(devices) == 0 {
 		return
 	}
+
+	title, body := buildNativeNotificationText(msg)
+	data := map[string]string{
+		"messageId": strings.TrimSpace(msg.ID),
+		"sender":    strings.TrimSpace(msg.Sender),
+		"subject":   strings.TrimSpace(msg.Subject),
+		"title":     title,
+		"body":      body,
+		"url":       "/read",
+	}
+
+	// App Pull mode bypasses the relay and Firebase: queue the notification
+	// server-side for the paired device to fetch over plain HTTP.
+	if uc.store.NativeDeliveryMode() == state.DeliveryModePull {
+		if err := uc.store.EnqueuePullNotification(state.PullNotification{Title: title, Body: body, Data: data}); err != nil {
+			p.log.Error("failed to queue native pull notification", "user_id", uc.id, "message_id", msg.ID, "error", err.Error())
+			return
+		}
+		p.log.Info("new-email native notification queued for pull", "user_id", uc.id, "message_id", msg.ID)
+		return
+	}
+
 	if p.nativeSender == nil {
 		// A relay that is configured (PUSH_RELAY_URL set) but has no usable sender
 		// means key resolution failed at startup — the exact silent outage this
@@ -680,22 +702,10 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 		return
 	}
 
-	title, body := buildNativeNotificationText(msg)
-	notification := NativePushMessage{
-		Title: title,
-		Body:  body,
-		// title/body are duplicated into data so a mobile client that
-		// renders its own notification from the data payload shows the
-		// sender and subject instead of a generic fallback.
-		Data: map[string]string{
-			"messageId": strings.TrimSpace(msg.ID),
-			"sender":    strings.TrimSpace(msg.Sender),
-			"subject":   strings.TrimSpace(msg.Subject),
-			"title":     title,
-			"body":      body,
-			"url":       "/read",
-		},
-	}
+	// title/body are duplicated into data so a mobile client that renders its
+	// own notification from the data payload shows the sender and subject
+	// instead of a generic fallback.
+	notification := NativePushMessage{Title: title, Body: body, Data: data}
 
 	sent := 0
 	failed := 0

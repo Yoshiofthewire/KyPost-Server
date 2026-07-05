@@ -232,3 +232,80 @@ func TestNativeDevicesListAndDelete(t *testing.T) {
 		t.Fatalf("len(devices) = %d, want 0", len(devices))
 	}
 }
+
+func TestNativeDeliveryModeAndPull(t *testing.T) {
+	srv := newTestServer(t)
+	store := testUserStore(t, srv)
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	// Warm the subscriber -> user index the pull endpoint resolves through.
+	srv.subIndex[subscriberID] = func() string {
+		all, _ := srv.users.List()
+		return all[0].ID
+	}()
+
+	// Switch this user to App Pull mode via the authenticated endpoint.
+	modeRec := httptest.NewRecorder()
+	modeReq := httptest.NewRequest(http.MethodPut, "/api/notifications/native/mode", bytes.NewReader([]byte(`{"mode":"pull"}`)))
+	authRequest(srv, modeReq)
+	srv.withAuth(srv.handleNotificationNativeMode).ServeHTTP(modeRec, modeReq)
+	if modeRec.Code != http.StatusOK {
+		t.Fatalf("mode PUT status = %d, want %d; body=%s", modeRec.Code, http.StatusOK, modeRec.Body.String())
+	}
+	if got := store.NativeDeliveryMode(); got != state.DeliveryModePull {
+		t.Fatalf("delivery mode = %q, want %q", got, state.DeliveryModePull)
+	}
+
+	// Queue a notification as the poller/test path would.
+	if err := store.EnqueuePullNotification(state.PullNotification{Title: "hi", Body: "new mail"}); err != nil {
+		t.Fatalf("EnqueuePullNotification: %v", err)
+	}
+
+	hash := srv.pairingSubscriberHash(subscriberID)
+
+	// A device with the correct subscriber hash fetches the queue from cursor 0.
+	pullRec := httptest.NewRecorder()
+	pullReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?sub="+subscriberID+"&hash="+hash+"&after=0", nil)
+	srv.handleNotificationNativePull(pullRec, pullReq)
+	if pullRec.Code != http.StatusOK {
+		t.Fatalf("pull status = %d, want %d; body=%s", pullRec.Code, http.StatusOK, pullRec.Body.String())
+	}
+	var pull struct {
+		DeliveryMode  string                   `json:"deliveryMode"`
+		Cursor        int64                    `json:"cursor"`
+		Notifications []state.PullNotification `json:"notifications"`
+	}
+	if err := json.Unmarshal(pullRec.Body.Bytes(), &pull); err != nil {
+		t.Fatalf("unmarshal pull response: %v", err)
+	}
+	if len(pull.Notifications) != 1 || pull.Notifications[0].Title != "hi" {
+		t.Fatalf("pull notifications = %+v, want one titled 'hi'", pull.Notifications)
+	}
+	if pull.Cursor != 1 {
+		t.Fatalf("cursor = %d, want 1", pull.Cursor)
+	}
+
+	// Polling again from the returned cursor yields nothing new.
+	pull2Rec := httptest.NewRecorder()
+	pull2Req := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?sub="+subscriberID+"&hash="+hash+"&after=1", nil)
+	srv.handleNotificationNativePull(pull2Rec, pull2Req)
+	var pull2 struct {
+		Notifications []state.PullNotification `json:"notifications"`
+	}
+	if err := json.Unmarshal(pull2Rec.Body.Bytes(), &pull2); err != nil {
+		t.Fatalf("unmarshal pull2 response: %v", err)
+	}
+	if len(pull2.Notifications) != 0 {
+		t.Fatalf("pull2 notifications = %d, want 0", len(pull2.Notifications))
+	}
+
+	// A wrong subscriber hash is rejected.
+	badRec := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?sub="+subscriberID+"&hash=deadbeef", nil)
+	srv.handleNotificationNativePull(badRec, badReq)
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-hash status = %d, want %d", badRec.Code, http.StatusUnauthorized)
+	}
+}

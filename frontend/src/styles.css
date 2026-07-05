@@ -1121,6 +1121,41 @@ pre {
   opacity: 0.75;
 }
 
+.notifications-delivery-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+
+.notifications-delivery-option {
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--ink) 70%, var(--ink-strong));
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.notifications-delivery-option:hover:not(:disabled):not(.active) {
+  color: var(--ink-strong);
+}
+
+.notifications-delivery-option.active {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.notifications-delivery-option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 /* Collapse the pairing panel to a single centered column when the card is
    too narrow for the QR + device-list split. */
 @media (max-width: 640px) {

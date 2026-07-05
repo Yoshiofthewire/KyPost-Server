@@ -161,6 +161,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
+	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
+	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
 	mux.HandleFunc("GET /api/setup", s.handleSetup)
 	mux.HandleFunc("/", s.handleFrontend)
 
@@ -1037,7 +1039,20 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	nativeFailed := 0
 	nativeRemoved := 0
 	nativeError := ""
-	if len(nativeDevices) > 0 && s.nativeSender == nil {
+	if len(nativeDevices) > 0 && store.NativeDeliveryMode() == state.DeliveryModePull {
+		// App Pull mode: queue the test for the device to fetch over HTTP
+		// instead of dispatching through the relay/Firebase.
+		if err := store.EnqueuePullNotification(state.PullNotification{
+			Title: title,
+			Body:  body,
+			Data:  map[string]string{"url": "/notifications"},
+		}); err != nil {
+			nativeError = "failed to queue pull notification: " + err.Error()
+			s.logger.Error("test native pull notification failed", "error", err.Error())
+		} else {
+			nativeSent = 1
+		}
+	} else if len(nativeDevices) > 0 && s.nativeSender == nil {
 		nativeError = "no native push sender configured on the server (set PUSH_RELAY_URL and PUSH_RELAY_KEY)"
 		s.logger.Error("test native notification skipped", "reason", nativeError, "devices", strconv.Itoa(len(nativeDevices)))
 		if strings.TrimSpace(os.Getenv("PUSH_RELAY_URL")) != "" {
@@ -1131,14 +1146,18 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		serverBaseURL = externalBaseURL(r)
 	}
 	registerEndpoint := ""
+	pullEndpoint := ""
 	if serverBaseURL != "" {
 		registerEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/register"
+		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
 	}
 	pairingTTLSeconds := int64(90)
 	resp := map[string]any{
 		"subscriberId":      subscriberID,
 		"serverBaseUrl":     serverBaseURL,
 		"registerEndpoint":  registerEndpoint,
+		"pullEndpoint":      pullEndpoint,
+		"deliveryMode":      store.NativeDeliveryMode(),
 		"pairingTtlSeconds": pairingTTLSeconds,
 		"configured":        configured,
 	}
@@ -1239,11 +1258,22 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
+	serverBaseURL := s.serverBaseURL
+	if serverBaseURL == "" {
+		serverBaseURL = externalBaseURL(r)
+	}
+	pullEndpoint := ""
+	if serverBaseURL != "" {
+		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"synced":   true,
-		"deviceId": registeredDeviceID,
-		"devices":  len(devices),
+		"ok":           true,
+		"synced":       true,
+		"deviceId":     registeredDeviceID,
+		"devices":      len(devices),
+		"deliveryMode": store.NativeDeliveryMode(),
+		"pullEndpoint": pullEndpoint,
 	})
 }
 
@@ -1310,6 +1340,83 @@ func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.R
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
+}
+
+// handleNotificationNativeMode switches native delivery between the relay-backed
+// push mode and App Pull mode for the signed-in user.
+func (s *Server) handleNotificationNativeMode(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode != state.DeliveryModePush && mode != state.DeliveryModePull {
+		http.Error(w, "mode must be \"push\" or \"pull\"", http.StatusBadRequest)
+		return
+	}
+	if err := store.SetNativeDeliveryMode(mode); err != nil {
+		http.Error(w, "failed to persist delivery mode", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deliveryMode": store.NativeDeliveryMode()})
+}
+
+// handleNotificationNativePull serves queued notifications to a paired mobile
+// app polling over plain HTTP — the App Pull path that bypasses the Cloudflare
+// relay and Firebase entirely. It is unauthenticated by web session; the device
+// proves ownership with the subscriber id + subscriber hash it received during
+// pairing (the same stable HMAC the register endpoint validates). The client
+// passes ?after=<cursor> to fetch only notifications newer than its last poll.
+func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Request) {
+	if s.pairingSecret == "" {
+		http.Error(w, "pairing is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	subscriberID := strings.TrimSpace(r.URL.Query().Get("sub"))
+	subscriberHash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("hash")))
+	if subscriberID == "" || subscriberHash == "" {
+		http.Error(w, "sub and hash are required", http.StatusBadRequest)
+		return
+	}
+	expectedHash := s.pairingSubscriberHash(subscriberID)
+	if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
+		http.Error(w, "invalid subscriber hash", http.StatusUnauthorized)
+		return
+	}
+	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
+	if !okOwner {
+		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
+		return
+	}
+	store, err := s.userStore(ownerID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
+	var after int64
+	if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			after = parsed
+		}
+	}
+	notifications, cursor := store.PullNotificationsAfter(after)
+	if notifications == nil {
+		notifications = []state.PullNotification{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deliveryMode":  store.NativeDeliveryMode(),
+		"cursor":        cursor,
+		"notifications": notifications,
+	})
 }
 
 func (s *Server) pairingSubscriberHash(subscriberID string) string {
