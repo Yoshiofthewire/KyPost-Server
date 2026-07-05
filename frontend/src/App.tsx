@@ -12,6 +12,10 @@ import { NotificationsPage } from "./pages/NotificationsPage";
 import { ReadPage } from "./pages/ReadPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
+import agplLicenseText from "./agpl-3.0.txt?raw";
+
+// Bump this when releasing a new build. Shown in the license overlay.
+const APP_VERSION = 23;
 
 const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: boolean }> = [
   { to: "/login", label: "Login" },
@@ -113,6 +117,8 @@ export function App() {
   const quillEditorRef = useRef<HTMLDivElement | null>(null);
   const quillInstanceRef = useRef<Quill | null>(null);
   const composeDialogRef = useRef<HTMLDialogElement | null>(null);
+  const [licenseOpen, setLicenseOpen] = useState(false);
+  const licenseDialogRef = useRef<HTMLDialogElement | null>(null);
   const currentMailbox = new URLSearchParams(location.search).get("mailbox")?.trim() ?? "";
   const onReadPage = location.pathname === "/read";
 
@@ -392,6 +398,16 @@ export function App() {
       dialog.close();
     }
   }, [composeOpen]);
+
+  useEffect(() => {
+    const dialog = licenseDialogRef.current;
+    if (!dialog) return;
+    if (licenseOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!licenseOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [licenseOpen]);
 
   function resetComposeForm() {
     setComposeTo("");
@@ -750,7 +766,11 @@ export function App() {
           ) : null}
         </nav>
         <div className="sidebar-footer">
-          <p>&copy; 2026 &ndash; Licensed Under AGPL&nbsp;V3</p>
+          <p>
+            <button type="button" className="license-link" onClick={() => setLicenseOpen(true)}>
+              &copy; {new Date().getFullYear()} &ndash; Licensed Under AGPL&nbsp;V3
+            </button>
+          </p>
         </div>
       </aside>
       <main className="content">
@@ -767,6 +787,29 @@ export function App() {
           <Route path="/logs" element={protect(<LogsPage />, true)} />
         </Routes>
       </main>
+      <dialog
+        ref={licenseDialogRef}
+        className="compose-backdrop"
+        onCancel={() => setLicenseOpen(false)}
+        onClick={(event) => {
+          if (event.target === licenseDialogRef.current) {
+            setLicenseOpen(false);
+          }
+        }}
+      >
+        <div className="license-window">
+          <div className="license-window-header">
+            <p className="license-window-title">
+              llama Mail Developed by Busnes Games Copyright {new Date().getFullYear()}, version{" "}
+              {APP_VERSION} licensed under GPL 2
+            </p>
+            <button type="button" className="nav-link-button" onClick={() => setLicenseOpen(false)}>
+              Close
+            </button>
+          </div>
+          <textarea className="license-text" readOnly value={agplLicenseText} />
+        </div>
+      </dialog>
       <dialog
         ref={composeDialogRef}
         className="compose-backdrop"

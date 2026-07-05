@@ -81,6 +81,17 @@ body {
   margin: 0;
 }
 
+.license-link {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .sidebar h1 {
   margin: 0 0 16px;
   font-size: 1.6rem;
@@ -1719,6 +1730,48 @@ pre {
 
 .compose-backdrop:not([open]) {
   display: none;
+}
+
+.license-window {
+  width: min(720px, 96vw);
+  max-height: 90vh;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--ink-strong);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.license-window-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.license-window-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.license-text {
+  width: 100%;
+  flex: 1;
+  min-height: 320px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: pre;
+  background: var(--panel);
+  color: var(--ink-strong);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
 }
 
 .compose-window {
