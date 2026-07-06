@@ -118,8 +118,10 @@ Common variables:
 - `IMAP_CONFIG_KEY_FILE` (default `/llama_lab/private/imap-config.key`)
 - `SERVER_BASE_URL` (optional but recommended for mobile pairing; public URL embedded as `srv` in QR and used to build `reg`)
 - `PAIRING_SECRET` (required for mobile pairing token signing/validation)
-- `PUSH_RELAY_URL` (optional; base URL of the central push relay Worker that delivers native push to FCM)
-- `PUSH_RELAY_KEY` (per-server API key issued by the relay operator; required together with `PUSH_RELAY_URL` to enable native push)
+- `PUSH_RELAY_URL` (optional; base URL of the central push relay Worker that delivers Android native push to FCM)
+- `PUSH_RELAY_KEY` (per-server API key issued by the relay operator; required together with `PUSH_RELAY_URL` to enable Android native push)
+- `APNS_RELAY_URL` (optional; base URL of the central APNs relay Worker that delivers iOS native push)
+- `APNS_RELAY_KEY` (per-server API key issued by the relay operator; required together with `APNS_RELAY_URL` to enable iOS native push)
 
 Notes:
 
@@ -162,12 +164,19 @@ Firebase credential guidance:
 - Native push is delivered through a central **push relay** (Cloudflare Worker) that holds the single Firebase service account the published mobile app is built against. This is what lets anyone run their own server with the same app without a Firebase account or a recompile.
 - `google-services.json` belongs in the mobile project (Android app module, typically `app/google-services.json`) and should never be committed.
 
-## Push Relay (Cloudflare Worker)
+## Push Relays (Cloudflare Workers)
 
-Native push delivery lives in a Cloudflare Worker under [`worker/`](worker/), run by the project maintainer.
+Native push delivery lives in Cloudflare Workers, run by the project maintainer:
+- **Android/FCM**: [`worker/`](worker/) — Firebase Cloud Messaging relay
+- **iOS/APNs**: [`worker-apns/`](worker-apns/) — Apple Push Notification service relay
 
-- Self-hosters: ask the relay operator for a per-server API key, then set `PUSH_RELAY_URL` and `PUSH_RELAY_KEY`. That is all — no Firebase project needed.
-- Maintainer/relay operator: deploy the Worker and mint per-server keys. See [`worker/README.md`](worker/README.md) for setup, secrets, and key management.
+Self-hosters ask the relay operator for per-server API keys:
+- Android: set `PUSH_RELAY_URL` and `PUSH_RELAY_KEY` (Firebase relay)
+- iOS: set `APNS_RELAY_URL` and `APNS_RELAY_KEY` (APNs relay)
+
+Self-hosters need no Firebase or Apple Developer account, and the app is never recompiled.
+
+Maintainers/relay operators: deploy both Workers and mint per-server keys. See [`worker/README.md`](worker/README.md) and [`worker-apns/README.md`](worker-apns/README.md) for setup, secrets, and key management.
 
 ## Persistence
 

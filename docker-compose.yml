@@ -18,6 +18,9 @@ services:
       PUSH_RELAY_URL: ${PUSH_RELAY_URL:-}
       PUSH_RELAY_KEY: ${PUSH_RELAY_KEY:-}
       PUSH_RELAY_KEY_FILE: ${PUSH_RELAY_KEY_FILE:-}
+      APNS_RELAY_URL: ${APNS_RELAY_URL:-}
+      APNS_RELAY_KEY: ${APNS_RELAY_KEY:-}
+      APNS_RELAY_KEY_FILE: ${APNS_RELAY_KEY_FILE:-}
     dns:
       - 8.8.8.8
       - 8.8.4.4

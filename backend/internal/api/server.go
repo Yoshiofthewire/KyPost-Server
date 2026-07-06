@@ -72,11 +72,11 @@ type Server struct {
 	stateDir          string
 	configPath        string
 	logPath           string
-	imapConfigKeyPath string
-	sessions          map[string]Session
-	pairingSecret     string
-	serverBaseURL     string
-	nativeSender      *processor.RelaySender
+	imapConfigKeyPath        string
+	sessions                 map[string]Session
+	pairingSecret            string
+	serverBaseURL            string
+	nativePushDispatcher     *processor.NativePushDispatcher
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
@@ -103,12 +103,12 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		stateDir:          stateDir,
 		configPath:        filepath.Join(configDir, "config.yaml"),
 		logPath:           logPath,
-		imapConfigKeyPath: imapConfigKeyPath,
-		sessions:          map[string]Session{},
-		pairingSecret:     pairingSecret,
-		serverBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
-		nativeSender:      processor.NewRelaySenderFromEnv(logger),
-		userStores:        map[string]*state.Store{},
+		imapConfigKeyPath:    imapConfigKeyPath,
+		sessions:             map[string]Session{},
+		pairingSecret:        pairingSecret,
+		serverBaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
+		nativePushDispatcher: processor.NewNativePushDispatcher(logger),
+		userStores:           map[string]*state.Store{},
 		userMail:          map[string]*serverMailEntry{},
 		subIndex:          map[string]string{},
 	}
@@ -1052,48 +1052,53 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		} else {
 			nativeSent = 1
 		}
-	} else if len(nativeDevices) > 0 && s.nativeSender == nil {
-		nativeError = "no native push sender configured on the server (set PUSH_RELAY_URL and PUSH_RELAY_KEY)"
-		s.logger.Error("test native notification skipped", "reason", nativeError, "devices", strconv.Itoa(len(nativeDevices)))
-		if strings.TrimSpace(os.Getenv("PUSH_RELAY_URL")) != "" {
-			s.health.RecordNativePushFailure("relay configured (PUSH_RELAY_URL) but no usable key — auto-registration or key file failed at startup")
-		}
 	} else if len(nativeDevices) > 0 {
 		nativeMessage := processor.NativePushMessage{
 			Title: title,
 			Body:  body,
 			Data:  map[string]string{"url": "/notifications"},
 		}
-		// Relay health for this probe: a success or a stale-token response means
-		// the relay answered; only a non-stale error means the relay is failing.
-		relayResponded := false
-		relayFailure := ""
+		// Relay health for this probe: track per platform. A success or a stale-token
+		// response means the relay answered; only a non-stale error means the relay is failing.
+		relayResponded := make(map[string]bool)     // platform -> responded
+		relayFailure := make(map[string]string)     // platform -> failure reason
 		for _, device := range nativeDevices {
+			platform := strings.ToLower(strings.TrimSpace(device.Platform))
+			if platform == "" {
+				platform = "android" // default for unknown/empty
+			}
+
 			sendCtx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-			err := s.nativeSender.Send(sendCtx, device, nativeMessage)
+			err := s.nativePushDispatcher.Send(sendCtx, device, nativeMessage)
 			cancel()
 			if err != nil {
 				nativeFailed++
 				if errors.Is(err, processor.ErrNativeDeviceStale) {
-					relayResponded = true
+					relayResponded[platform] = true
 					if strings.TrimSpace(device.DeviceID) != "" {
 						if ok, rmErr := store.RemoveNativeDevice(device.DeviceID); rmErr == nil && ok {
 							nativeRemoved++
 						}
 					}
 				} else {
-					relayFailure = err.Error()
+					// Prefix the failure reason with the platform for diagnostics
+					relayFailure[platform] = fmt.Sprintf("[%s] %s", platform, err.Error())
 				}
-				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", strings.TrimSpace(device.Platform), "sender", "relay", "error", err.Error())
+				s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", platform, "sender", "relay", "error", err.Error())
 				continue
 			}
-			relayResponded = true
+			relayResponded[platform] = true
 			nativeSent++
 		}
-		if relayFailure != "" {
-			s.health.RecordNativePushFailure(relayFailure)
-		} else if relayResponded {
-			s.health.RecordNativePushSuccess()
+		// Update health per platform: record failures once per platform that failed,
+		// and successes for platforms that responded without failure.
+		for _, failure := range relayFailure {
+			s.health.RecordNativePushFailure(failure)
+		}
+		for platform := range relayResponded {
+			if _, hasFailed := relayFailure[platform]; !hasFailed {
+				s.health.RecordNativePushSuccess()
+			}
 		}
 	}
 

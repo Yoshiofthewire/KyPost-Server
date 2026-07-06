@@ -46,14 +46,10 @@ type Poller struct {
 	// the one shared LLM backend. Per-user mailbox state lives in stores.
 	globalStore  *state.Store
 	health       *health.Service
-	llama        llama.Client
-	redaction    *redaction.Engine
-	nativeSender *RelaySender
-	// relayConfigured records that PUSH_RELAY_URL was set at startup even when
-	// nativeSender is nil (key resolution failed) — so a configured-but-broken
-	// relay can be reported as failing rather than silently skipped.
-	relayConfigured bool
-	cancel          context.CancelFunc
+	llama               llama.Client
+	redaction           *redaction.Engine
+	nativePushDispatcher *NativePushDispatcher
+	cancel              context.CancelFunc
 	tickSem         chan struct{}
 
 	stateDir    string
@@ -87,21 +83,20 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		return nil, err
 	}
 	p := &Poller{
-		cfg:             cfg,
-		log:             log,
-		users:           usersStore,
-		globalStore:     globalStore,
-		health:          healthSvc,
-		llama:           llamaClient,
-		redaction:       re,
-		nativeSender:    NewRelaySenderFromEnv(log),
-		relayConfigured: strings.TrimSpace(os.Getenv("PUSH_RELAY_URL")) != "",
-		stateDir:        stateDir,
-		configDir:       configDir,
-		imapKeyPath:     envOrDefaultProc("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key"),
-		stores:          map[string]*state.Store{},
-		mailClients:     map[string]*mailClientEntry{},
-		rate:            map[string][]time.Time{},
+		cfg:                   cfg,
+		log:                   log,
+		users:                 usersStore,
+		globalStore:           globalStore,
+		health:                healthSvc,
+		llama:                 llamaClient,
+		redaction:             re,
+		nativePushDispatcher:  NewNativePushDispatcher(log),
+		stateDir:              stateDir,
+		configDir:             configDir,
+		imapKeyPath:           envOrDefaultProc("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key"),
+		stores:                map[string]*state.Store{},
+		mailClients:           map[string]*mailClientEntry{},
+		rate:                  map[string][]time.Time{},
 	}
 	p.tickSem = make(chan struct{}, 1)
 	p.tickSem <- struct{}{}
@@ -678,23 +673,6 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 		return
 	}
 
-	if p.nativeSender == nil {
-		// A relay that is configured (PUSH_RELAY_URL set) but has no usable sender
-		// means key resolution failed at startup — the exact silent outage this
-		// signal exists to catch. When PUSH_RELAY_URL is unset, native push is
-		// simply off and stays absent from the failing signal.
-		if p.relayConfigured {
-			p.health.RecordNativePushFailure("relay configured (PUSH_RELAY_URL) but no usable key — auto-registration or key file failed at startup")
-		}
-		p.log.Info(
-			"new-email native notification skipped",
-			"user_id", uc.id,
-			"message_id", msg.ID,
-			"reason", "no native sender configured",
-		)
-		return
-	}
-
 	// title/body are duplicated into data so a mobile client that renders its
 	// own notification from the data payload shows the sender and subject
 	// instead of a generic fallback.
@@ -703,14 +681,18 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	sent := 0
 	failed := 0
 	removed := 0
-	// Relay health for this batch. A success or a stale-token response both mean
-	// the relay answered (it is up); only a non-stale error (unreachable, 401,
-	// 5xx, 429, timeout) means the relay itself is failing.
-	relayResponded := false
-	relayFailure := ""
+	// Track relay health per platform. A response from the relay (success or stale
+	// token) means the relay answered; only non-stale errors mean the relay is failing.
+	relayResponded := make(map[string]bool)     // platform -> responded
+	relayFailure := make(map[string]string)     // platform -> failure reason
 	for _, device := range devices {
+		platform := strings.ToLower(strings.TrimSpace(device.Platform))
+		if platform == "" {
+			platform = "android" // default for unknown/empty
+		}
+
 		sendCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-		err := p.nativeSender.Send(sendCtx, device, notification)
+		err := p.nativePushDispatcher.Send(sendCtx, device, notification)
 		cancel()
 		if err != nil {
 			failed++
@@ -723,7 +705,7 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 			if errors.Is(err, ErrNativeDeviceStale) {
 				// The relay responded (410 stale) — that is a healthy relay
 				// pruning a dead token, not a relay failure.
-				relayResponded = true
+				relayResponded[platform] = true
 				if strings.TrimSpace(device.DeviceID) != "" {
 					ok, rmErr := uc.store.RemoveNativeDevice(device.DeviceID)
 					if rmErr == nil && ok {
@@ -731,31 +713,34 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 					}
 				}
 			} else {
-				relayFailure = err.Error()
+				// Prefix the failure reason with the platform for diagnostics
+				relayFailure[platform] = fmt.Sprintf("[%s] %s", platform, err.Error())
 			}
 			p.log.Error(
 				"native notification failed",
 				"user_id", uc.id,
 				"message_id", msg.ID,
 				"device_id", strings.TrimSpace(device.DeviceID),
-				"platform", strings.TrimSpace(device.Platform),
+				"platform", platform,
 				"sender", "relay",
 				"error", err.Error(),
 			)
 			continue
 		}
 
-		relayResponded = true
+		relayResponded[platform] = true
 		sent++
 	}
 
-	// Update the relay health signal once per batch. A non-stale failure wins
-	// (conservative): if the relay rejected/errored for any device, flag it;
-	// otherwise a response from the relay clears the flag.
-	if relayFailure != "" {
-		p.health.RecordNativePushFailure(relayFailure)
-	} else if relayResponded {
-		p.health.RecordNativePushSuccess()
+	// Update health per platform: record failures once per platform that failed,
+	// and successes for platforms that responded without failure.
+	for _, failure := range relayFailure {
+		p.health.RecordNativePushFailure(failure)
+	}
+	for platform := range relayResponded {
+		if _, hasFailed := relayFailure[platform]; !hasFailed {
+			p.health.RecordNativePushSuccess()
+		}
 	}
 
 	p.log.Info(
