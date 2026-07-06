@@ -49,6 +49,67 @@ func TestBuildNativeNotificationText(t *testing.T) {
 	}
 }
 
+func TestBuildNativePushData(t *testing.T) {
+	tests := []struct {
+		name     string
+		msg      imapadapter.Message
+		keywords []string
+		title    string
+		body     string
+		want     map[string]string
+	}{
+		{
+			name:     "populated message and keywords",
+			msg:      imapadapter.Message{ID: " 123 ", Sender: " alice@example.com ", Subject: " Invoice #42 "},
+			keywords: []string{"work", "billing"},
+			title:    "alice@example.com",
+			body:     "Invoice #42",
+			want: map[string]string{
+				"messageId":    "123",
+				"sender":       "alice@example.com",
+				"subject":      "Invoice #42",
+				"senderName":   "alice@example.com",
+				"emailSubject": "Invoice #42",
+				"Keywords":     "work,billing",
+				"title":        "alice@example.com",
+				"body":         "Invoice #42",
+				"url":          "/read",
+			},
+		},
+		{
+			name:     "nil keywords produce empty string, not panic",
+			msg:      imapadapter.Message{ID: "1", Sender: "bob@example.com", Subject: "Hi"},
+			keywords: nil,
+			title:    "bob@example.com",
+			body:     "Hi",
+			want: map[string]string{
+				"messageId":    "1",
+				"sender":       "bob@example.com",
+				"subject":      "Hi",
+				"senderName":   "bob@example.com",
+				"emailSubject": "Hi",
+				"Keywords":     "",
+				"title":        "bob@example.com",
+				"body":         "Hi",
+				"url":          "/read",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildNativePushData(tc.msg, tc.keywords, tc.title, tc.body)
+			for key, want := range tc.want {
+				if got[key] != want {
+					t.Errorf("buildNativePushData()[%q] = %q, want %q", key, got[key], want)
+				}
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("buildNativePushData() has %d keys, want %d: %v", len(got), len(tc.want), got)
+			}
+		})
+	}
+}
+
 func TestShouldSendNotification(t *testing.T) {
 	tests := []struct {
 		name          string

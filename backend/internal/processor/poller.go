@@ -665,14 +665,7 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	}
 
 	title, body := buildNativeNotificationText(msg)
-	data := map[string]string{
-		"messageId": strings.TrimSpace(msg.ID),
-		"sender":    strings.TrimSpace(msg.Sender),
-		"subject":   strings.TrimSpace(msg.Subject),
-		"title":     title,
-		"body":      body,
-		"url":       "/read",
-	}
+	data := buildNativePushData(msg, messageKeywords, title, body)
 
 	// App Pull mode bypasses the relay and Firebase: queue the notification
 	// server-side for the paired device to fetch over plain HTTP.
@@ -843,6 +836,20 @@ func buildNativeNotificationText(msg imapadapter.Message) (title, body string) {
 		body = "You have a new email."
 	}
 	return title, body
+}
+
+func buildNativePushData(msg imapadapter.Message, messageKeywords []string, title, body string) map[string]string {
+	return map[string]string{
+		"messageId":    strings.TrimSpace(msg.ID),
+		"sender":       strings.TrimSpace(msg.Sender),
+		"subject":      strings.TrimSpace(msg.Subject),
+		"senderName":   strings.TrimSpace(msg.Sender),
+		"emailSubject": strings.TrimSpace(msg.Subject),
+		"Keywords":     strings.Join(messageKeywords, ","),
+		"title":        title,
+		"body":         body,
+		"url":          "/read",
+	}
 }
 
 func classifyWithRetry(ctx context.Context, c llama.Client, labels []string, sender, subject, body, tuning string) (string, error) {
