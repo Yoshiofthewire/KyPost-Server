@@ -107,9 +107,10 @@ export function ContactsPage() {
 
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [formOpen, setFormOpen] = useState(false);
 
   const contactDialogRef = useRef<HTMLDialogElement | null>(null);
-  const formCardRef = useRef<HTMLFormElement | null>(null);
+  const contactFormDialogRef = useRef<HTMLDialogElement | null>(null);
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
   const editingContact = editingUid ? contacts.find((c) => c.uid === editingUid) ?? null : null;
@@ -158,10 +159,14 @@ export function ContactsPage() {
   }, [selectedContact]);
 
   useEffect(() => {
-    if (editingUid) {
-      formCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const dialog = contactFormDialogRef.current;
+    if (!dialog) return;
+    if (formOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!formOpen && dialog.open) {
+      dialog.close();
     }
-  }, [editingUid]);
+  }, [formOpen]);
 
   function startCreate() {
     setEditingUid("");
@@ -171,6 +176,21 @@ export function ContactsPage() {
   function startEdit(contact: Contact) {
     setEditingUid(contact.uid);
     setForm(contactToFormState(contact));
+  }
+
+  function openCreateForm() {
+    startCreate();
+    setFormOpen(true);
+  }
+
+  function openEditForm(contact: Contact) {
+    startEdit(contact);
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    startCreate();
+    setFormOpen(false);
   }
 
   async function submitForm(e: FormEvent) {
@@ -186,12 +206,12 @@ export function ContactsPage() {
       if (editingUid) {
         await updateContact(editingUid, input);
         setStatus(`${input.fn} updated.`);
-        startCreate();
+        closeForm();
         await refresh();
       } else {
         const created = await createContact(input);
         setStatus(`${input.fn} added.`);
-        startCreate();
+        closeForm();
         const next = await loadContacts();
         const idx = next.findIndex((c) => c.uid === created.uid);
         if (idx >= 0) {
@@ -215,7 +235,7 @@ export function ContactsPage() {
       await deleteContact(contact.uid);
       setStatus(`${contact.fn} deleted.`);
       if (editingUid === contact.uid) {
-        startCreate();
+        closeForm();
       }
       if (selectedContact?.uid === contact.uid) {
         setSelectedContact(null);
@@ -233,160 +253,51 @@ export function ContactsPage() {
       <header className="contacts-header">
         <div>
           <h2>Contacts</h2>
-          <p>
-            Your local address book. It reaches the Llama Labels mobile app automatically once paired, and can also
-            pull contacts in from an external CardDAV server or expose itself to other CardDAV apps — configure both
-            under Configuration &rarr; CardDAV.
-          </p>
         </div>
-        {!loading && contacts.length > 0 ? (
-          <div className="contacts-stats">
-            <span className="contacts-stat">
-              <strong>{contacts.length}</strong> contact{contacts.length === 1 ? "" : "s"}
-            </span>
-          </div>
-        ) : null}
-      </header>
-
-      <div className="contacts-layout">
-        <form
-          ref={formCardRef}
-          onSubmit={submitForm}
-          className={`contacts-card contacts-form-card${editingUid ? " contacts-form-card-editing" : ""}`}
-        >
-          <h3>{editingUid ? "Edit Contact" : "Add Contact"}</h3>
-          <label>
-            <div>Full Name</div>
-            <input value={form.fn} onChange={(e) => setForm({ ...form, fn: e.target.value })} autoComplete="off" />
-          </label>
-          <label>
-            <div>Given Name</div>
-            <input
-              value={form.givenName}
-              onChange={(e) => setForm({ ...form, givenName: e.target.value })}
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            <div>Family Name</div>
-            <input
-              value={form.familyName}
-              onChange={(e) => setForm({ ...form, familyName: e.target.value })}
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            <div>Organization</div>
-            <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} autoComplete="off" />
-          </label>
-          <label>
-            <div>Email</div>
-            <input
-              type="email"
-              value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })}
-              autoComplete="off"
-            />
-          </label>
-          <label>
-            <div>Phone</div>
-            <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} autoComplete="off" />
-          </label>
-          <label>
-            <div>Notes</div>
-            <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} />
-          </label>
-
-          {editingContact && hasExtraDetails(editingContact) ? (
-            <div className="contacts-extra-details">
-              <h4>Other details on file</h4>
-              <p className="contacts-muted">Not editable here — preserved automatically when you save.</p>
-              {editingContact.title ? (
-                <div className="contact-details-field">
-                  <span>Title</span>
-                  <span>{editingContact.title}</span>
-                </div>
-              ) : null}
-              {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname].some(
-                Boolean
-              ) ? (
-                <div className="contact-details-field">
-                  <span>Name</span>
-                  <span>
-                    {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
-                </div>
-              ) : null}
-              {editingContact.emails && editingContact.emails.length > 1 ? (
-                <div className="contact-details-field">
-                  <span>Extra emails</span>
-                  <span>{editingContact.emails.slice(1).map((e) => e.value).join(", ")}</span>
-                </div>
-              ) : null}
-              {editingContact.phones && editingContact.phones.length > 1 ? (
-                <div className="contact-details-field">
-                  <span>Extra phones</span>
-                  <span>{editingContact.phones.slice(1).map((p) => p.value).join(", ")}</span>
-                </div>
-              ) : null}
-              {editingContact.addresses?.length ? (
-                <div className="contact-details-field">
-                  <span>Address{editingContact.addresses.length > 1 ? "es" : ""}</span>
-                  <span>{editingContact.addresses.length} on file</span>
-                </div>
-              ) : null}
-              {editingContact.birthday ? (
-                <div className="contact-details-field">
-                  <span>Birthday</span>
-                  <span>{editingContact.birthday}</span>
-                </div>
-              ) : null}
+        <div className="contacts-header-actions">
+          {!loading && contacts.length > 0 ? (
+            <div className="contacts-stats">
+              <span className="contacts-stat">
+                <strong>{contacts.length}</strong> contact{contacts.length === 1 ? "" : "s"}
+              </span>
             </div>
           ) : null}
+          <button type="button" onClick={openCreateForm}>
+            New Contact
+          </button>
+        </div>
+      </header>
 
-          <div className="contacts-form-actions">
-            <button type="submit" className="contacts-create-submit" disabled={saving}>
-              {saving ? "Saving..." : editingUid ? "Save Changes" : "Add Contact"}
-            </button>
-            {editingUid ? (
-              <button type="button" className="contacts-action" onClick={startCreate} disabled={saving}>
-                Cancel
-              </button>
+      <div className="contacts-card contacts-list-card">
+        <div className="contacts-list-head">
+          <h3>Address Book</h3>
+          {!loading && contacts.length > 0 ? <span className="contacts-count">{contacts.length}</span> : null}
+        </div>
+
+        {loading ? <p className="contacts-muted">Loading contacts...</p> : null}
+        {!loading && contacts.length === 0 ? <div className="contacts-empty">No contacts yet.</div> : null}
+
+        {!loading && contacts.length > 0 ? (
+          <>
+            {totalPages > 1 ? (
+              <div className="contacts-page-tabs" role="tablist" aria-label="Contact pages">
+                {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((page) => (
+                  <button
+                    key={page}
+                    type="button"
+                    role="tab"
+                    aria-selected={currentPage === page}
+                    onClick={() => setCurrentPage(page)}
+                    className={`contacts-page-tab ${currentPage === page ? "active" : ""}`}
+                  >
+                    {page}
+                  </button>
+                ))}
+              </div>
             ) : null}
-          </div>
-        </form>
 
-        <div className="contacts-card contacts-list-card">
-          <div className="contacts-list-head">
-            <h3>Address Book</h3>
-            {!loading && contacts.length > 0 ? <span className="contacts-count">{contacts.length}</span> : null}
-          </div>
-
-          {loading ? <p className="contacts-muted">Loading contacts...</p> : null}
-          {!loading && contacts.length === 0 ? <div className="contacts-empty">No contacts yet.</div> : null}
-
-          {!loading && contacts.length > 0 ? (
-            <>
-              {totalPages > 1 ? (
-                <div className="contacts-page-tabs" role="tablist" aria-label="Contact pages">
-                  {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((page) => (
-                    <button
-                      key={page}
-                      type="button"
-                      role="tab"
-                      aria-selected={currentPage === page}
-                      onClick={() => setCurrentPage(page)}
-                      className={`contacts-page-tab ${currentPage === page ? "active" : ""}`}
-                    >
-                      {page}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="contacts-table-wrap">
+            <div className="contacts-table-wrap">
+              <div className="contacts-table-scroll">
                 <table className="contacts-table">
                   <thead>
                     <tr>
@@ -428,7 +339,7 @@ export function ContactsPage() {
                               <button
                                 type="button"
                                 className="contacts-action"
-                                onClick={() => startEdit(contact)}
+                                onClick={() => openEditForm(contact)}
                                 disabled={busy}
                               >
                                 Edit
@@ -449,12 +360,135 @@ export function ContactsPage() {
                   </tbody>
                 </table>
               </div>
-            </>
-          ) : null}
-        </div>
+            </div>
+          </>
+        ) : null}
       </div>
 
       {status ? <p className={statusTone}>{status}</p> : null}
+
+      <dialog
+        ref={contactFormDialogRef}
+        className="contact-details-backdrop"
+        onCancel={(event) => {
+          event.preventDefault();
+          closeForm();
+        }}
+        onClick={(event) => {
+          if (event.target === contactFormDialogRef.current) {
+            closeForm();
+          }
+        }}
+      >
+        <div className="contact-form-window" onClick={(e) => e.stopPropagation()}>
+          <form onSubmit={submitForm} className="contacts-form-card">
+            <h3>{editingUid ? "Edit Contact" : "Add Contact"}</h3>
+            <label>
+              <div>Full Name</div>
+              <input value={form.fn} onChange={(e) => setForm({ ...form, fn: e.target.value })} autoComplete="off" />
+            </label>
+            <label>
+              <div>Given Name</div>
+              <input
+                value={form.givenName}
+                onChange={(e) => setForm({ ...form, givenName: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Family Name</div>
+              <input
+                value={form.familyName}
+                onChange={(e) => setForm({ ...form, familyName: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Organization</div>
+              <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} autoComplete="off" />
+            </label>
+            <label>
+              <div>Email</div>
+              <input
+                type="email"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Phone</div>
+              <input
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Notes</div>
+              <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} />
+            </label>
+
+            {editingContact && hasExtraDetails(editingContact) ? (
+              <div className="contacts-extra-details">
+                <h4>Other details on file</h4>
+                <p className="contacts-muted">Not editable here — preserved automatically when you save.</p>
+                {editingContact.title ? (
+                  <div className="contact-details-field">
+                    <span>Title</span>
+                    <span>{editingContact.title}</span>
+                  </div>
+                ) : null}
+                {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname].some(
+                  Boolean
+                ) ? (
+                  <div className="contact-details-field">
+                    <span>Name</span>
+                    <span>
+                      {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </div>
+                ) : null}
+                {editingContact.emails && editingContact.emails.length > 1 ? (
+                  <div className="contact-details-field">
+                    <span>Extra emails</span>
+                    <span>{editingContact.emails.slice(1).map((e) => e.value).join(", ")}</span>
+                  </div>
+                ) : null}
+                {editingContact.phones && editingContact.phones.length > 1 ? (
+                  <div className="contact-details-field">
+                    <span>Extra phones</span>
+                    <span>{editingContact.phones.slice(1).map((p) => p.value).join(", ")}</span>
+                  </div>
+                ) : null}
+                {editingContact.addresses?.length ? (
+                  <div className="contact-details-field">
+                    <span>Address{editingContact.addresses.length > 1 ? "es" : ""}</span>
+                    <span>{editingContact.addresses.length} on file</span>
+                  </div>
+                ) : null}
+                {editingContact.birthday ? (
+                  <div className="contact-details-field">
+                    <span>Birthday</span>
+                    <span>{editingContact.birthday}</span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="contacts-form-actions">
+              <button type="submit" className="contacts-create-submit" disabled={saving}>
+                {saving ? "Saving..." : editingUid ? "Save Changes" : "Add Contact"}
+              </button>
+              <button type="button" className="contacts-action" onClick={closeForm} disabled={saving}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      </dialog>
 
       <dialog
         ref={contactDialogRef}
@@ -490,7 +524,7 @@ export function ContactsPage() {
                   type="button"
                   onClick={() => {
                     setSelectedContact(null);
-                    startEdit(selectedContact);
+                    openEditForm(selectedContact);
                   }}
                 >
                   Edit

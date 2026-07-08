@@ -1760,6 +1760,9 @@ pre {
 
 .contacts-page {
   position: relative;
+  height: calc(100vh - 74px);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   background:
     radial-gradient(circle at 94% 6%, rgba(194, 154, 114, 0.16), transparent 40%),
@@ -1778,10 +1781,11 @@ pre {
   margin: 0;
 }
 
-.contacts-header p {
-  margin: 6px 0 0;
-  max-width: 62ch;
-  color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
+.contacts-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .contacts-stats {
@@ -1802,14 +1806,6 @@ pre {
 
 .contacts-stat strong {
   color: var(--ink-strong);
-}
-
-.contacts-layout {
-  margin-top: 16px;
-  display: grid;
-  gap: 14px;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-  align-items: start;
 }
 
 .contacts-card {
@@ -1838,7 +1834,6 @@ pre {
 .contacts-form-card {
   display: grid;
   gap: 12px;
-  margin-top: 16px;
 }
 
 .contacts-form-card label {
@@ -1874,6 +1869,10 @@ pre {
 
 .contacts-list-card {
   margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
 }
 
 .contacts-list-head {
@@ -1926,8 +1925,15 @@ pre {
   margin-top: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  overflow-x: auto;
   background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.contacts-table-scroll {
+  overflow: auto;
+  max-height: 100%;
 }
 
 .contacts-table {
@@ -2004,10 +2010,6 @@ pre {
 .contacts-row:hover .contacts-row-chevron {
   opacity: 0.9;
   transform: translateX(2px);
-}
-
-.contacts-form-card-editing {
-  border-left: 3px solid var(--accent);
 }
 
 .contacts-avatar {
@@ -2206,6 +2208,17 @@ pre {
   overflow: auto;
 }
 
+.contact-form-window {
+  width: min(480px, 92vw);
+  max-height: 92vh;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 14px 40px var(--modal-shadow);
+  overflow: auto;
+}
+
 .contact-details-head {
   display: flex;
   justify-content: space-between;
@@ -2288,14 +2301,15 @@ pre {
 }
 
 @media (max-width: 900px) {
-  .contacts-layout {
-    grid-template-columns: 1fr;
+  .contacts-page {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
-  .contacts-page {
-    overflow: auto;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 16px;
+  .contacts-table-wrap {
+    flex: 1;
+    min-height: 0;
   }
 
   .contacts-actions {
@@ -2897,6 +2911,15 @@ pre {
   }
 
   .contact-details-window {
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+  }
+
+  .contact-form-window {
     width: 100vw;
     height: 100dvh;
     max-height: 100dvh;
