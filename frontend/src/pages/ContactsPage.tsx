@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toErrorMessage } from "../api/client";
 import {
   createContact,
@@ -29,6 +29,8 @@ const emptyFormState: FormState = {
   notes: ""
 };
 
+const CONTACTS_PER_PAGE = 20;
+
 function contactToFormState(contact: Contact): FormState {
   return {
     fn: contact.fn,
@@ -41,21 +43,52 @@ function contactToFormState(contact: Contact): FormState {
   };
 }
 
-function formStateToInput(form: FormState): ContactInput {
+function formStateToInput(form: FormState, original?: Contact | null): ContactInput {
   const input: ContactInput = {
     fn: form.fn.trim(),
     givenName: form.givenName.trim() || undefined,
     familyName: form.familyName.trim() || undefined,
     org: form.org.trim() || undefined,
-    notes: form.notes.trim() || undefined
+    notes: form.notes.trim() || undefined,
+    middleName: original?.middleName,
+    prefix: original?.prefix,
+    suffix: original?.suffix,
+    nickname: original?.nickname,
+    title: original?.title,
+    birthday: original?.birthday,
+    addresses: original?.addresses?.length ? original.addresses : undefined
   };
+
+  // Preserve any emails/phones beyond the first — the form only edits index 0.
+  const extraEmails = original?.emails?.slice(1) ?? [];
   if (form.email.trim()) {
-    input.emails = [{ value: form.email.trim() }];
+    input.emails = [{ value: form.email.trim(), label: original?.emails?.[0]?.label }, ...extraEmails];
+  } else if (extraEmails.length) {
+    input.emails = extraEmails;
   }
+
+  const extraPhones = original?.phones?.slice(1) ?? [];
   if (form.phone.trim()) {
-    input.phones = [{ value: form.phone.trim() }];
+    input.phones = [{ value: form.phone.trim(), label: original?.phones?.[0]?.label }, ...extraPhones];
+  } else if (extraPhones.length) {
+    input.phones = extraPhones;
   }
+
   return input;
+}
+
+function hasExtraDetails(contact: Contact): boolean {
+  return Boolean(
+    contact.middleName ||
+      contact.prefix ||
+      contact.suffix ||
+      contact.nickname ||
+      contact.title ||
+      contact.birthday ||
+      (contact.emails && contact.emails.length > 1) ||
+      (contact.phones && contact.phones.length > 1) ||
+      (contact.addresses && contact.addresses.length > 0)
+  );
 }
 
 function contactDisplayLine(contact: Contact): string {
@@ -72,13 +105,31 @@ export function ContactsPage() {
   const [editingUid, setEditingUid] = useState("");
   const [saving, setSaving] = useState(false);
 
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  const contactDialogRef = useRef<HTMLDialogElement | null>(null);
+  const formCardRef = useRef<HTMLFormElement | null>(null);
+
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
+  const editingContact = editingUid ? contacts.find((c) => c.uid === editingUid) ?? null : null;
+
+  const totalPages = Math.max(1, Math.ceil(contacts.length / CONTACTS_PER_PAGE));
+  const pageContacts = useMemo(() => {
+    const start = (currentPage - 1) * CONTACTS_PER_PAGE;
+    return contacts.slice(start, start + CONTACTS_PER_PAGE);
+  }, [currentPage, contacts]);
+
+  async function loadContacts(): Promise<Contact[]> {
+    const next = await listContacts();
+    next.sort((a, b) => a.fn.localeCompare(b.fn));
+    setContacts(next);
+    return next;
+  }
 
   async function refresh() {
     try {
-      const next = await listContacts();
-      next.sort((a, b) => a.fn.localeCompare(b.fn));
-      setContacts(next);
+      await loadContacts();
     } catch (error: unknown) {
       setStatus(`Failed to load contacts: ${toErrorMessage(error, "unknown error")}`);
     } finally {
@@ -89,6 +140,28 @@ export function ContactsPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    const dialog = contactDialogRef.current;
+    if (!dialog) return;
+    if (selectedContact && !dialog.open) {
+      dialog.showModal();
+    } else if (!selectedContact && dialog.open) {
+      dialog.close();
+    }
+  }, [selectedContact]);
+
+  useEffect(() => {
+    if (editingUid) {
+      formCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [editingUid]);
 
   function startCreate() {
     setEditingUid("");
@@ -109,16 +182,22 @@ export function ContactsPage() {
     setSaving(true);
     setStatus("");
     try {
-      const input = formStateToInput(form);
+      const input = formStateToInput(form, editingContact);
       if (editingUid) {
         await updateContact(editingUid, input);
         setStatus(`${input.fn} updated.`);
+        startCreate();
+        await refresh();
       } else {
-        await createContact(input);
+        const created = await createContact(input);
         setStatus(`${input.fn} added.`);
+        startCreate();
+        const next = await loadContacts();
+        const idx = next.findIndex((c) => c.uid === created.uid);
+        if (idx >= 0) {
+          setCurrentPage(Math.floor(idx / CONTACTS_PER_PAGE) + 1);
+        }
       }
-      startCreate();
-      await refresh();
     } catch (error: unknown) {
       setStatus(`Failed to save contact: ${toErrorMessage(error, "unknown error")}`);
     } finally {
@@ -137,6 +216,9 @@ export function ContactsPage() {
       setStatus(`${contact.fn} deleted.`);
       if (editingUid === contact.uid) {
         startCreate();
+      }
+      if (selectedContact?.uid === contact.uid) {
+        setSelectedContact(null);
       }
       await refresh();
     } catch (error: unknown) {
@@ -167,7 +249,11 @@ export function ContactsPage() {
       </header>
 
       <div className="contacts-layout">
-        <form onSubmit={submitForm} className="contacts-card contacts-form-card">
+        <form
+          ref={formCardRef}
+          onSubmit={submitForm}
+          className={`contacts-card contacts-form-card${editingUid ? " contacts-form-card-editing" : ""}`}
+        >
           <h3>{editingUid ? "Edit Contact" : "Add Contact"}</h3>
           <label>
             <div>Full Name</div>
@@ -210,6 +296,56 @@ export function ContactsPage() {
             <div>Notes</div>
             <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} />
           </label>
+
+          {editingContact && hasExtraDetails(editingContact) ? (
+            <div className="contacts-extra-details">
+              <h4>Other details on file</h4>
+              <p className="contacts-muted">Not editable here — preserved automatically when you save.</p>
+              {editingContact.title ? (
+                <div className="contact-details-field">
+                  <span>Title</span>
+                  <span>{editingContact.title}</span>
+                </div>
+              ) : null}
+              {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname].some(
+                Boolean
+              ) ? (
+                <div className="contact-details-field">
+                  <span>Name</span>
+                  <span>
+                    {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                </div>
+              ) : null}
+              {editingContact.emails && editingContact.emails.length > 1 ? (
+                <div className="contact-details-field">
+                  <span>Extra emails</span>
+                  <span>{editingContact.emails.slice(1).map((e) => e.value).join(", ")}</span>
+                </div>
+              ) : null}
+              {editingContact.phones && editingContact.phones.length > 1 ? (
+                <div className="contact-details-field">
+                  <span>Extra phones</span>
+                  <span>{editingContact.phones.slice(1).map((p) => p.value).join(", ")}</span>
+                </div>
+              ) : null}
+              {editingContact.addresses?.length ? (
+                <div className="contact-details-field">
+                  <span>Address{editingContact.addresses.length > 1 ? "es" : ""}</span>
+                  <span>{editingContact.addresses.length} on file</span>
+                </div>
+              ) : null}
+              {editingContact.birthday ? (
+                <div className="contact-details-field">
+                  <span>Birthday</span>
+                  <span>{editingContact.birthday}</span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="contacts-form-actions">
             <button type="submit" className="contacts-create-submit" disabled={saving}>
               {saving ? "Saving..." : editingUid ? "Save Changes" : "Add Contact"}
@@ -232,63 +368,273 @@ export function ContactsPage() {
           {!loading && contacts.length === 0 ? <div className="contacts-empty">No contacts yet.</div> : null}
 
           {!loading && contacts.length > 0 ? (
-            <div className="contacts-table-wrap">
-              <table className="contacts-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Contact Info</th>
-                    <th className="contacts-col-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {contacts.map((contact) => {
-                    const busy = busyId === contact.uid;
-                    return (
-                      <tr key={contact.uid} className={busy ? "contacts-row contacts-row-busy" : "contacts-row"}>
-                        <td>
-                          <div className="contacts-identity">
-                            <span className="contacts-avatar" aria-hidden="true">
-                              {contact.fn.slice(0, 1).toUpperCase() || "?"}
-                            </span>
-                            <div className="contacts-identity-text">
-                              <span className="contacts-name">{contact.fn}</span>
-                              {contact.org ? <span className="contacts-sub">{contact.org}</span> : null}
+            <>
+              {totalPages > 1 ? (
+                <div className="contacts-page-tabs" role="tablist" aria-label="Contact pages">
+                  {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((page) => (
+                    <button
+                      key={page}
+                      type="button"
+                      role="tab"
+                      aria-selected={currentPage === page}
+                      onClick={() => setCurrentPage(page)}
+                      className={`contacts-page-tab ${currentPage === page ? "active" : ""}`}
+                    >
+                      {page}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="contacts-table-wrap">
+                <table className="contacts-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Contact Info</th>
+                      <th className="contacts-col-actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pageContacts.map((contact) => {
+                      const busy = busyId === contact.uid;
+                      return (
+                        <tr
+                          key={contact.uid}
+                          className={busy ? "contacts-row contacts-row-busy" : "contacts-row"}
+                          onClick={() => setSelectedContact(contact)}
+                        >
+                          <td>
+                            <button
+                              type="button"
+                              className="contacts-identity contacts-row-open"
+                              onClick={() => setSelectedContact(contact)}
+                            >
+                              <span className="contacts-avatar" aria-hidden="true">
+                                {contact.fn.slice(0, 1).toUpperCase() || "?"}
+                              </span>
+                              <div className="contacts-identity-text">
+                                <span className="contacts-name">{contact.fn}</span>
+                                {contact.org ? <span className="contacts-sub">{contact.org}</span> : null}
+                              </div>
+                              <span className="contacts-row-chevron" aria-hidden="true">
+                                &rsaquo;
+                              </span>
+                            </button>
+                          </td>
+                          <td>{contactDisplayLine(contact) || <span className="contacts-muted">—</span>}</td>
+                          <td className="contacts-col-actions">
+                            <div className="contacts-actions" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                className="contacts-action"
+                                onClick={() => startEdit(contact)}
+                                disabled={busy}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="contacts-action contacts-action-danger"
+                                onClick={() => void removeContact(contact)}
+                                disabled={busy}
+                              >
+                                {busy ? "Deleting..." : "Delete"}
+                              </button>
                             </div>
-                          </div>
-                        </td>
-                        <td>{contactDisplayLine(contact) || <span className="contacts-muted">—</span>}</td>
-                        <td className="contacts-col-actions">
-                          <div className="contacts-actions">
-                            <button
-                              type="button"
-                              className="contacts-action"
-                              onClick={() => startEdit(contact)}
-                              disabled={busy}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              className="contacts-action contacts-action-danger"
-                              onClick={() => void removeContact(contact)}
-                              disabled={busy}
-                            >
-                              {busy ? "Deleting..." : "Delete"}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           ) : null}
         </div>
       </div>
 
       {status ? <p className={statusTone}>{status}</p> : null}
+
+      <dialog
+        ref={contactDialogRef}
+        className="contact-details-backdrop"
+        onCancel={(event) => {
+          event.preventDefault();
+          setSelectedContact(null);
+        }}
+        onClick={(event) => {
+          if (event.target === contactDialogRef.current) {
+            setSelectedContact(null);
+          }
+        }}
+      >
+        {selectedContact ? (
+          <div className="contact-details-window" onClick={(e) => e.stopPropagation()}>
+            <div className="contact-details-head">
+              <div className="contact-details-heading">
+                <span className="contacts-avatar contact-details-avatar-lg" aria-hidden="true">
+                  {selectedContact.fn.slice(0, 1).toUpperCase() || "?"}
+                </span>
+                <div>
+                  <h3 style={{ margin: 0 }}>{selectedContact.fn}</h3>
+                  {selectedContact.org || selectedContact.title ? (
+                    <p className="contacts-sub" style={{ margin: "2px 0 0" }}>
+                      {[selectedContact.title, selectedContact.org].filter(Boolean).join(" · ")}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              <div className="contact-details-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedContact(null);
+                    startEdit(selectedContact);
+                  }}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="contacts-action-danger"
+                  onClick={() => void removeContact(selectedContact)}
+                >
+                  Delete
+                </button>
+                <button type="button" onClick={() => setSelectedContact(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="contact-details-content">
+              {[
+                selectedContact.prefix,
+                selectedContact.givenName,
+                selectedContact.middleName,
+                selectedContact.familyName,
+                selectedContact.suffix,
+                selectedContact.nickname
+              ].some(Boolean) ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">Name</h4>
+                  {selectedContact.prefix ? (
+                    <div className="contact-details-field">
+                      <span>Prefix</span>
+                      <span>{selectedContact.prefix}</span>
+                    </div>
+                  ) : null}
+                  {selectedContact.givenName ? (
+                    <div className="contact-details-field">
+                      <span>Given Name</span>
+                      <span>{selectedContact.givenName}</span>
+                    </div>
+                  ) : null}
+                  {selectedContact.middleName ? (
+                    <div className="contact-details-field">
+                      <span>Middle Name</span>
+                      <span>{selectedContact.middleName}</span>
+                    </div>
+                  ) : null}
+                  {selectedContact.familyName ? (
+                    <div className="contact-details-field">
+                      <span>Family Name</span>
+                      <span>{selectedContact.familyName}</span>
+                    </div>
+                  ) : null}
+                  {selectedContact.suffix ? (
+                    <div className="contact-details-field">
+                      <span>Suffix</span>
+                      <span>{selectedContact.suffix}</span>
+                    </div>
+                  ) : null}
+                  {selectedContact.nickname ? (
+                    <div className="contact-details-field">
+                      <span>Nickname</span>
+                      <span>{selectedContact.nickname}</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {selectedContact.emails?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">{selectedContact.emails.length > 1 ? "Emails" : "Email"}</h4>
+                  {selectedContact.emails.map((e, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{e.label || "Email"}</span>
+                      <a href={`mailto:${e.value}`}>{e.value}</a>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.phones?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">{selectedContact.phones.length > 1 ? "Phones" : "Phone"}</h4>
+                  {selectedContact.phones.map((p, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{p.label || "Phone"}</span>
+                      <a href={`tel:${p.value}`}>{p.value}</a>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.addresses?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">
+                    {selectedContact.addresses.length > 1 ? "Addresses" : "Address"}
+                  </h4>
+                  {selectedContact.addresses.map((a, i) => (
+                    <div className="contact-details-address" key={i}>
+                      {a.label ? <span className="contact-details-address-label">{a.label}</span> : null}
+                      {a.street ? <span>{a.street}</span> : null}
+                      {a.city || a.region || a.postalCode ? (
+                        <span>{[a.city, a.region, a.postalCode].filter(Boolean).join(", ")}</span>
+                      ) : null}
+                      {a.country ? <span>{a.country}</span> : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.birthday ? (
+                <div className="contact-details-field">
+                  <span>Birthday</span>
+                  <span>{selectedContact.birthday}</span>
+                </div>
+              ) : null}
+
+              {selectedContact.notes ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">Notes</h4>
+                  <p className="contact-details-notes">{selectedContact.notes}</p>
+                </div>
+              ) : null}
+
+              {!selectedContact.org &&
+              !selectedContact.title &&
+              !selectedContact.emails?.length &&
+              !selectedContact.phones?.length &&
+              !selectedContact.addresses?.length &&
+              !selectedContact.birthday &&
+              !selectedContact.notes &&
+              ![
+                selectedContact.givenName,
+                selectedContact.familyName,
+                selectedContact.middleName,
+                selectedContact.prefix,
+                selectedContact.suffix,
+                selectedContact.nickname
+              ].some(Boolean) ? (
+                <p className="contact-details-empty">No additional details on file.</p>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </dialog>
     </section>
   );
 }

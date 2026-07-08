@@ -650,154 +650,158 @@ export function ConfigPage() {
       ) : null}
 
       {activeTab === "carddav" ? (
-        <div className="config-card contacts-dav-card" role="tabpanel">
-          <h3>CardDAV Access</h3>
-          <p className="config-muted">
-            Point a CardDAV-capable app (iOS/macOS Contacts, Nextcloud, Thunderbird, or the Llama Labels mobile app) at
-            the address below using an app-specific password — never your account login password.
-          </p>
-          {davURL ? (
-            <div className="contacts-dav-url">
-              <code>{davURL}</code>
+        <div className="config-carddav-layout" role="tabpanel">
+          <div className="config-card">
+            <h3>CardDAV Client</h3>
+            <p className="config-muted">
+              Pull contacts down from an external CardDAV server (iCloud, Google, Nextcloud, Fastmail, etc.) into your
+              Llama Labels address book. Imported contacts then reach the mobile app the same way locally-added ones do.
+            </p>
+            <div className="config-grid config-grid-two">
+              <label>
+                <div>Server URL</div>
+                <input
+                  value={clientForm.serverUrl}
+                  onChange={(event) => setClientForm((prev) => ({ ...prev, serverUrl: event.target.value }))}
+                  placeholder="https://contacts.example.com/dav/"
+                />
+              </label>
+              <label>
+                <div>Username</div>
+                <input
+                  value={clientForm.username}
+                  onChange={(event) => setClientForm((prev) => ({ ...prev, username: event.target.value }))}
+                />
+              </label>
+              <label>
+                <div>Password or App Password</div>
+                <input
+                  type="password"
+                  value={clientForm.password}
+                  onChange={(event) => setClientForm((prev) => ({ ...prev, password: event.target.value }))}
+                  placeholder="Required when saving changes"
+                />
+              </label>
+              <label>
+                <div>Address Book Path (optional override)</div>
+                <input
+                  value={clientForm.addressBookPath}
+                  onChange={(event) => setClientForm((prev) => ({ ...prev, addressBookPath: event.target.value }))}
+                  placeholder="Leave blank to auto-discover"
+                />
+              </label>
             </div>
-          ) : null}
-          <div className="contacts-dav-status">
-            {davStatus?.configured ? (
-              <span className="contacts-badge contacts-status-active">
-                <span className="contacts-dot" aria-hidden="true" />
-                app password configured
-              </span>
-            ) : (
-              <span className="contacts-badge contacts-status-inactive">
-                <span className="contacts-dot" aria-hidden="true" />
-                no app password yet
-              </span>
-            )}
-          </div>
-          {revealedPassword ? (
-            <div className="contacts-dav-reveal">
-              <p className="config-muted">
-                Copy this now — it will not be shown again. Use it as the password for the CardDAV account above.
-              </p>
-              <div className="contacts-dav-secret">
-                <code>{revealedPassword}</code>
-                <button type="button" onClick={copyDavPassword}>
-                  Copy
+            <p className="config-muted">
+              By default the server is auto-discovered, and if it reports more than one address book (common on
+              providers like mailbox.org, Nextcloud, or Baikal — a personal book alongside shared/collected ones), the
+              first one that actually contains contacts is used. If it still picks the wrong one, copy a path from the
+              list below into the override field, save, and sync again.
+            </p>
+            <div className="config-actions">
+              <button type="button" onClick={() => void saveCardDAVClient()} disabled={clientBusy}>
+                {clientBusy ? "Saving..." : "Save CardDAV Client"}
+              </button>
+              <button type="button" onClick={() => void runCardDAVClientSync()} disabled={clientSyncBusy || !clientConfig?.configured}>
+                {clientSyncBusy ? "Syncing..." : "Sync Now"}
+              </button>
+              {clientConfig?.configured ? (
+                <button type="button" onClick={() => void deleteCardDAVClient()} disabled={clientBusy}>
+                  Delete Stored Configuration
                 </button>
-              </div>
-              {copyStatus ? <p className="config-muted">{copyStatus}</p> : null}
+              ) : null}
             </div>
-          ) : null}
-          <div className="config-actions">
-            <button type="button" onClick={() => void generateDavPassword()} disabled={davBusy}>
-              {davBusy ? "Working..." : davStatus?.configured ? "Regenerate Password" : "Generate Password"}
-            </button>
-            {davStatus?.configured ? (
-              <button type="button" onClick={() => void revokeDavPassword()} disabled={davBusy}>
-                Revoke
-              </button>
-            ) : null}
-          </div>
 
-          <h3 style={{ marginTop: 24 }}>CardDAV Client</h3>
-          <p className="config-muted">
-            Pull contacts down from an external CardDAV server (iCloud, Google, Nextcloud, Fastmail, etc.) into your
-            Llama Labels address book. Imported contacts then reach the mobile app the same way locally-added ones do.
-          </p>
-          <div className="config-grid config-grid-two">
-            <label>
-              <div>Server URL</div>
-              <input
-                value={clientForm.serverUrl}
-                onChange={(event) => setClientForm((prev) => ({ ...prev, serverUrl: event.target.value }))}
-                placeholder="https://contacts.example.com/dav/"
-              />
-            </label>
-            <label>
-              <div>Username</div>
-              <input
-                value={clientForm.username}
-                onChange={(event) => setClientForm((prev) => ({ ...prev, username: event.target.value }))}
-              />
-            </label>
-            <label>
-              <div>Password or App Password</div>
-              <input
-                type="password"
-                value={clientForm.password}
-                onChange={(event) => setClientForm((prev) => ({ ...prev, password: event.target.value }))}
-                placeholder="Required when saving changes"
-              />
-            </label>
-            <label>
-              <div>Address Book Path (optional override)</div>
-              <input
-                value={clientForm.addressBookPath}
-                onChange={(event) => setClientForm((prev) => ({ ...prev, addressBookPath: event.target.value }))}
-                placeholder="Leave blank to auto-discover"
-              />
-            </label>
-          </div>
-          <p className="config-muted">
-            By default the server is auto-discovered, and if it reports more than one address book (common on
-            providers like mailbox.org, Nextcloud, or Baikal — a personal book alongside shared/collected ones), the
-            first one that actually contains contacts is used. If it still picks the wrong one, copy a path from the
-            list below into the override field, save, and sync again.
-          </p>
-          <div className="config-actions">
-            <button type="button" onClick={() => void saveCardDAVClient()} disabled={clientBusy}>
-              {clientBusy ? "Saving..." : "Save CardDAV Client"}
-            </button>
-            <button type="button" onClick={() => void runCardDAVClientSync()} disabled={clientSyncBusy || !clientConfig?.configured}>
-              {clientSyncBusy ? "Syncing..." : "Sync Now"}
-            </button>
             {clientConfig?.configured ? (
-              <button type="button" onClick={() => void deleteCardDAVClient()} disabled={clientBusy}>
-                Delete Stored Configuration
-              </button>
+              <div className="config-status-card">
+                <p>Configured: Yes</p>
+                <p>Server URL: {clientConfig.serverUrl}</p>
+                <p>Username: {clientConfig.username}</p>
+                {clientConfig.addressBookPath ? <p>Address Book: {clientConfig.addressBookPath}</p> : null}
+                {clientConfig.lastSyncedAt ? <p>Last Synced: {clientConfig.lastSyncedAt}</p> : null}
+                {clientConfig.lastSyncError ? (
+                  <p>Last Sync Error: {clientConfig.lastSyncError}</p>
+                ) : clientConfig.lastSyncedAt ? (
+                  <p>Last Sync Result: {clientConfig.lastSyncImported ?? 0} imported, {clientConfig.lastSyncUpdated ?? 0} updated</p>
+                ) : null}
+                {clientConfig.discoveredAddressBooks && clientConfig.discoveredAddressBooks.length > 0 ? (
+                  <div style={{ marginTop: 10 }}>
+                    <p>Address books found on the server:</p>
+                    <div className="config-grid">
+                      {clientConfig.discoveredAddressBooks.map((book) => (
+                        <div
+                          key={book.path}
+                          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
+                        >
+                          <span>
+                            {book.path === clientConfig.addressBookPath ? <strong>{book.path}</strong> : book.path}
+                            {book.name ? ` (${book.name})` : ""} — {book.contactCount} contact
+                            {book.contactCount === 1 ? "" : "s"}
+                          </span>
+                          {book.path !== clientForm.addressBookPath ? (
+                            <button type="button" onClick={() => useDiscoveredAddressBook(book.path)}>
+                              Use This
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
+
+            {clientMessage ? <p className="config-muted">{clientMessage}</p> : null}
           </div>
 
-          {clientConfig?.configured ? (
-            <div className="config-status-card">
-              <p>Configured: Yes</p>
-              <p>Server URL: {clientConfig.serverUrl}</p>
-              <p>Username: {clientConfig.username}</p>
-              {clientConfig.addressBookPath ? <p>Address Book: {clientConfig.addressBookPath}</p> : null}
-              {clientConfig.lastSyncedAt ? <p>Last Synced: {clientConfig.lastSyncedAt}</p> : null}
-              {clientConfig.lastSyncError ? (
-                <p>Last Sync Error: {clientConfig.lastSyncError}</p>
-              ) : clientConfig.lastSyncedAt ? (
-                <p>Last Sync Result: {clientConfig.lastSyncImported ?? 0} imported, {clientConfig.lastSyncUpdated ?? 0} updated</p>
-              ) : null}
-              {clientConfig.discoveredAddressBooks && clientConfig.discoveredAddressBooks.length > 0 ? (
-                <div style={{ marginTop: 10 }}>
-                  <p>Address books found on the server:</p>
-                  <div className="config-grid">
-                    {clientConfig.discoveredAddressBooks.map((book) => (
-                      <div
-                        key={book.path}
-                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
-                      >
-                        <span>
-                          {book.path === clientConfig.addressBookPath ? <strong>{book.path}</strong> : book.path}
-                          {book.name ? ` (${book.name})` : ""} — {book.contactCount} contact
-                          {book.contactCount === 1 ? "" : "s"}
-                        </span>
-                        {book.path !== clientForm.addressBookPath ? (
-                          <button type="button" onClick={() => useDiscoveredAddressBook(book.path)}>
-                            Use This
-                          </button>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
+          <div className="config-card">
+            <h3>CardDAV Access</h3>
+            <p className="config-muted">
+              Point a CardDAV-capable app (iOS/macOS Contacts, Nextcloud, Thunderbird, or the Llama Labels mobile app) at
+              the address below using an app-specific password — never your account login password.
+            </p>
+            {davURL ? (
+              <div className="contacts-dav-url">
+                <code>{davURL}</code>
+              </div>
+            ) : null}
+            <div className="contacts-dav-status">
+              {davStatus?.configured ? (
+                <span className="contacts-badge contacts-status-active">
+                  <span className="contacts-dot" aria-hidden="true" />
+                  app password configured
+                </span>
+              ) : (
+                <span className="contacts-badge contacts-status-inactive">
+                  <span className="contacts-dot" aria-hidden="true" />
+                  no app password yet
+                </span>
+              )}
+            </div>
+            {revealedPassword ? (
+              <div className="contacts-dav-reveal">
+                <p className="config-muted">
+                  Copy this now — it will not be shown again. Use it as the password for the CardDAV account above.
+                </p>
+                <div className="contacts-dav-secret">
+                  <code>{revealedPassword}</code>
+                  <button type="button" onClick={copyDavPassword}>
+                    Copy
+                  </button>
                 </div>
+                {copyStatus ? <p className="config-muted">{copyStatus}</p> : null}
+              </div>
+            ) : null}
+            <div className="config-actions">
+              <button type="button" onClick={() => void generateDavPassword()} disabled={davBusy}>
+                {davBusy ? "Working..." : davStatus?.configured ? "Regenerate Password" : "Generate Password"}
+              </button>
+              {davStatus?.configured ? (
+                <button type="button" onClick={() => void revokeDavPassword()} disabled={davBusy}>
+                  Revoke
+                </button>
               ) : null}
             </div>
-          ) : null}
-
-          {clientMessage ? <p className="config-muted">{clientMessage}</p> : null}
+          </div>
         </div>
       ) : null}
 
