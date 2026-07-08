@@ -28,6 +28,14 @@ func (s *stubMailClient) ListUnreadMessages(_ context.Context, _ string, _ int) 
 	return nil, nil
 }
 
+func (s *stubMailClient) ListOverviews(_ context.Context, _ string, _ int) ([]imapadapter.Overview, error) {
+	return nil, nil
+}
+
+func (s *stubMailClient) GetMessageBodies(_ context.Context, _ string, _ []int) (map[int]string, error) {
+	return nil, nil
+}
+
 func (s *stubMailClient) ListLabels(_ context.Context) ([]string, error) {
 	return nil, nil
 }

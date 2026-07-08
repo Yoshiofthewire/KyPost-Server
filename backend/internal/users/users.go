@@ -443,6 +443,14 @@ func VerifyPassword(u User, candidate string) bool {
 	return verifyScryptHash(u.PasswordHash, candidate)
 }
 
+// VerifySecretHash checks a candidate secret against a scrypt-encoded hash
+// produced by HashPassword. It is a generic counterpart to VerifyPassword for
+// callers hashing something other than a User's login password (e.g. an
+// app-specific CardDAV password).
+func VerifySecretHash(encoded, candidate string) bool {
+	return verifyScryptHash(encoded, candidate)
+}
+
 // HashPassword produces a scrypt-encoded hash string in the same format
 // used historically by admin.env's ADMIN_PASS_HASH field.
 func HashPassword(password string) (string, error) {

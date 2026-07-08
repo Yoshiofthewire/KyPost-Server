@@ -1,0 +1,111 @@
+package api
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"llama-lab/backend/internal/users"
+)
+
+// davCredentialTTL bounds how long a verified Basic Auth credential is
+// trusted before re-checking scrypt. Native CardDAV clients (macOS/iOS
+// Contacts, Nextcloud) commonly re-authenticate on every PROPFIND/REPORT
+// within a sync session; without this cache each of those would pay
+// scrypt's cost (N=16384) again.
+const davCredentialTTL = 90 * time.Second
+
+type davCredentialCacheEntry struct {
+	authContext AuthContext
+	expiresAt   time.Time
+}
+
+// davCredentialCache is a short-lived, in-memory cache of verified CardDAV
+// Basic Auth credentials, keyed by a hash of username+password.
+type davCredentialCache struct {
+	mu      sync.Mutex
+	entries map[string]davCredentialCacheEntry
+}
+
+func newDAVCredentialCache() davCredentialCache {
+	return davCredentialCache{entries: map[string]davCredentialCacheEntry{}}
+}
+
+func davCredentialCacheKey(username, password string) string {
+	sum := sha256.Sum256([]byte(username + "\x00" + password))
+	return hex.EncodeToString(sum[:])
+}
+
+func (c *davCredentialCache) get(username, password string) (AuthContext, bool) {
+	key := davCredentialCacheKey(username, password)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		delete(c.entries, key)
+		return AuthContext{}, false
+	}
+	return entry.authContext, true
+}
+
+func (c *davCredentialCache) put(username, password string, ac AuthContext) {
+	key := davCredentialCacheKey(username, password)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = davCredentialCacheEntry{authContext: ac, expiresAt: time.Now().Add(davCredentialTTL)}
+}
+
+// invalidateUser drops every cached credential. There's no way to know which
+// cache keys belonged to a given username without recomputing every
+// possible password hash, so password regeneration/revocation just clears
+// the whole cache — cheap at the expected scale (a handful of self-hosted
+// users).
+func (c *davCredentialCache) invalidateUser(_ string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = map[string]davCredentialCacheEntry{}
+}
+
+// withDAVBasicAuth authenticates a CardDAV request via HTTP Basic Auth
+// against the caller's app-specific CardDAV password (not their login
+// password — see handleContactsDAVPassword), and injects an AuthContext into
+// the request context so downstream code can use authFromContext uniformly
+// with session-authenticated handlers.
+func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok || strings.TrimSpace(username) == "" || password == "" {
+			s.requireDAVAuth(w)
+			return
+		}
+
+		if ac, cached := s.davCredentials.get(username, password); cached {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
+			return
+		}
+
+		u, err := s.users.GetByUsername(username)
+		if err != nil || !u.Active {
+			s.requireDAVAuth(w)
+			return
+		}
+		passFile, exists, err := s.readDAVPassword(u.ID)
+		if err != nil || !exists || !users.VerifySecretHash(passFile.Hash, password) {
+			s.requireDAVAuth(w)
+			return
+		}
+
+		ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
+		s.davCredentials.put(username, password, ac)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
+	})
+}
+
+func (s *Server) requireDAVAuth(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="llama-mail"`)
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}

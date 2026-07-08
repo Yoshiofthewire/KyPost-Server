@@ -7,6 +7,60 @@ import (
 	"llama-lab/backend/internal/config"
 )
 
+// TestMailCacheEntriesFromMessages covers the pure conversion tickUser uses
+// to opportunistically warm the mail cache with what ListUnreadInbox just
+// fetched for classification (poller.go). Full tickUser integration
+// (constructing a Poller against a fake IMAP dialer) isn't covered here —
+// this codebase has no fake-goimap-Dialer test infrastructure, matching the
+// same gap noted for adapters/imap's ListOverviews/GetMessageBodies.
+func TestMailCacheEntriesFromMessages(t *testing.T) {
+	messages := []imapadapter.Message{
+		{
+			ID: "42", Subject: "Invoice", Sender: "alice@example.com", SentTo: "me@example.com",
+			CC: "cc@example.com", BCC: "bcc@example.com", Keywords: []string{"Work"},
+			AtUTC: "2026-01-01T00:00:00Z", Body: "the body",
+		},
+		// Malformed IDs (shouldn't happen in practice, since imap.Message.ID
+		// is always strconv.Itoa(uid)) must be skipped, not panic or produce
+		// a garbage UID.
+		{ID: "not-a-number", Subject: "bad"},
+	}
+
+	entries := mailCacheEntriesFromMessages(messages)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry (malformed ID skipped), got %d: %+v", len(entries), entries)
+	}
+
+	e := entries[0]
+	if e.UID != 42 || e.MessageID != "42" {
+		t.Fatalf("expected uid/messageId 42, got %+v", e)
+	}
+	if e.Subject != "Invoice" || e.Sender != "alice@example.com" || e.SentTo != "me@example.com" {
+		t.Fatalf("expected envelope fields carried over, got %+v", e)
+	}
+	if e.CC != "cc@example.com" || e.BCC != "bcc@example.com" {
+		t.Fatalf("expected CC/BCC carried over, got %+v", e)
+	}
+	if len(e.Keywords) != 1 || e.Keywords[0] != "Work" {
+		t.Fatalf("expected keywords carried over, got %+v", e.Keywords)
+	}
+	if e.Body != "the body" {
+		t.Fatalf("expected body carried over so the classic cache-first path can serve it, got %q", e.Body)
+	}
+	// ListUnreadInbox only ever returns messages matching an IMAP UNSEEN
+	// search, so Status is always "unread" regardless of flags.
+	if e.Status != "unread" {
+		t.Fatalf("expected status always unread, got %q", e.Status)
+	}
+}
+
+func TestMailCacheEntriesFromMessages_EmptyInput(t *testing.T) {
+	entries := mailCacheEntriesFromMessages(nil)
+	if len(entries) != 0 {
+		t.Fatalf("expected no entries for empty input, got %+v", entries)
+	}
+}
+
 func TestBuildNativeNotificationText(t *testing.T) {
 	tests := []struct {
 		name      string

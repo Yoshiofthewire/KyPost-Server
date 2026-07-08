@@ -19,6 +19,7 @@ import (
 	"llama-lab/backend/internal/config"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
+	"llama-lab/backend/internal/mailcache"
 	"llama-lab/backend/internal/redaction"
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/users"
@@ -44,13 +45,13 @@ type Poller struct {
 	users *users.Store
 	// globalStore holds install-wide state: the sticky AI-credits flag for
 	// the one shared LLM backend. Per-user mailbox state lives in stores.
-	globalStore  *state.Store
-	health       *health.Service
-	llama               llama.Client
-	redaction           *redaction.Engine
+	globalStore          *state.Store
+	health               *health.Service
+	llama                llama.Client
+	redaction            *redaction.Engine
 	nativePushDispatcher *NativePushDispatcher
-	cancel              context.CancelFunc
-	tickSem         chan struct{}
+	cancel               context.CancelFunc
+	tickSem              chan struct{}
 
 	stateDir    string
 	configDir   string
@@ -59,6 +60,7 @@ type Poller struct {
 	userMu      sync.Mutex
 	stores      map[string]*state.Store
 	mailClients map[string]*mailClientEntry
+	mailCaches  map[string]*mailcache.Store
 	rate        map[string][]time.Time
 }
 
@@ -83,20 +85,21 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		return nil, err
 	}
 	p := &Poller{
-		cfg:                   cfg,
-		log:                   log,
-		users:                 usersStore,
-		globalStore:           globalStore,
-		health:                healthSvc,
-		llama:                 llamaClient,
-		redaction:             re,
-		nativePushDispatcher:  NewNativePushDispatcher(log),
-		stateDir:              stateDir,
-		configDir:             configDir,
-		imapKeyPath:           envOrDefaultProc("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key"),
-		stores:                map[string]*state.Store{},
-		mailClients:           map[string]*mailClientEntry{},
-		rate:                  map[string][]time.Time{},
+		cfg:                  cfg,
+		log:                  log,
+		users:                usersStore,
+		globalStore:          globalStore,
+		health:               healthSvc,
+		llama:                llamaClient,
+		redaction:            re,
+		nativePushDispatcher: NewNativePushDispatcher(log),
+		stateDir:             stateDir,
+		configDir:            configDir,
+		imapKeyPath:          envOrDefaultProc("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key"),
+		stores:               map[string]*state.Store{},
+		mailClients:          map[string]*mailClientEntry{},
+		mailCaches:           map[string]*mailcache.Store{},
+		rate:                 map[string][]time.Time{},
 	}
 	p.tickSem = make(chan struct{}, 1)
 	p.tickSem <- struct{}{}
@@ -155,6 +158,25 @@ func (p *Poller) userMailClient(userID string, configModTime time.Time) imapadap
 	client := imapadapter.NewAPIClientFromStoredConfig(p.userIMAPConfigPath(userID), p.imapKeyPath)
 	p.mailClients[userID] = &mailClientEntry{client: client, modTime: configModTime}
 	return client
+}
+
+// userMailCacheStore returns the cached mail-cache store for a user,
+// mirroring userStore — the api process independently constructs its own
+// mailcache.Store over the same on-disk file (see server_userscope.go's
+// userMailCacheStore); refreshFromDiskLocked is what keeps the two
+// processes' in-memory views coherent, exactly as with state.Store.
+func (p *Poller) userMailCacheStore(userID string) (*mailcache.Store, error) {
+	p.userMu.Lock()
+	defer p.userMu.Unlock()
+	if st, ok := p.mailCaches[userID]; ok {
+		return st, nil
+	}
+	st, err := mailcache.New(p.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	p.mailCaches[userID] = st
+	return st, nil
 }
 
 func (p *Poller) SetConfigPath(path string) {
@@ -321,6 +343,34 @@ func (p *Poller) tick() {
 // tickUser polls one user's mailbox. Errors are logged with the user id and
 // reported to the caller for the all-users-failed health check; they never
 // affect other users.
+// mailCacheEntriesFromMessages converts freshly fetched UNSEEN messages into
+// mail-cache entries. Status is always "unread": ListUnreadInbox only ever
+// returns messages matching an IMAP UNSEEN search, so there's nothing to
+// infer from flags here (unlike the live overview-sync path).
+func mailCacheEntriesFromMessages(messages []imapadapter.Message) []mailcache.Entry {
+	entries := make([]mailcache.Entry, 0, len(messages))
+	for _, msg := range messages {
+		uid, err := strconv.Atoi(strings.TrimSpace(msg.ID))
+		if err != nil {
+			continue
+		}
+		entries = append(entries, mailcache.Entry{
+			UID:       uid,
+			MessageID: msg.ID,
+			Subject:   msg.Subject,
+			Sender:    msg.Sender,
+			SentTo:    msg.SentTo,
+			CC:        msg.CC,
+			BCC:       msg.BCC,
+			Keywords:  msg.Keywords,
+			Status:    "unread",
+			AtUTC:     msg.AtUTC,
+			Body:      msg.Body,
+		})
+	}
+	return entries
+}
+
 func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	store, err := p.userStore(u.ID)
 	if err != nil {
@@ -359,6 +409,20 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	if err != nil {
 		p.log.Error("fetch unread inbox failed", "user_id", u.ID, "error", err.Error())
 		return err
+	}
+
+	// Opportunistically warm the mail cache with what was just fetched for
+	// classification below — reuses the same IMAP round trip and bodies, no
+	// extra IMAP calls. Done before classification, and independent of its
+	// outcome, so a slow or rate-limited classification run never delays
+	// cache freshness. INBOX only, matching ListUnreadInbox's scope — see
+	// mailcache/AGENTS.md for why other folders are warmed lazily instead.
+	if len(messages) > 0 {
+		if cache, err := p.userMailCacheStore(u.ID); err != nil {
+			p.log.Error("failed to open mail cache store", "user_id", u.ID, "error", err.Error())
+		} else if err := cache.Upsert("INBOX", mailCacheEntriesFromMessages(messages)); err != nil {
+			p.log.Error("failed to warm mail cache", "user_id", u.ID, "error", err.Error())
+		}
 	}
 
 	processedCount := 0
@@ -683,8 +747,8 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	removed := 0
 	// Track relay health per platform. A response from the relay (success or stale
 	// token) means the relay answered; only non-stale errors mean the relay is failing.
-	relayResponded := make(map[string]bool)     // platform -> responded
-	relayFailure := make(map[string]string)     // platform -> failure reason
+	relayResponded := make(map[string]bool) // platform -> responded
+	relayFailure := make(map[string]string) // platform -> failure reason
 	for _, device := range devices {
 		platform := strings.ToLower(strings.TrimSpace(device.Platform))
 		if platform == "" {

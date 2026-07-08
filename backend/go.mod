@@ -4,11 +4,13 @@ go 1.26.4
 
 require (
 	github.com/BrianLeishman/go-imap v0.1.28
+	github.com/SherClockHolmes/webpush-go v1.4.0
+	github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9
+	github.com/emersion/go-webdav v0.7.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/SherClockHolmes/webpush-go v1.4.0 // indirect
 	github.com/StirlingMarketingGroup/go-retry v0.0.0-20190512160921-94a8eb23e893 // indirect
 	github.com/cention-sany/utf7 v0.0.0-20170124080048-26cad61bd60a // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

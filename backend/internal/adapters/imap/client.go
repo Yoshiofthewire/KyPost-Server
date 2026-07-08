@@ -19,11 +19,15 @@ import (
 )
 
 type Message struct {
-	ID      string
-	Subject string
-	Sender  string
-	SentTo  string
-	Body    string
+	ID       string
+	Subject  string
+	Sender   string
+	SentTo   string
+	CC       string
+	BCC      string
+	Keywords []string
+	AtUTC    string
+	Body     string
 }
 
 type UnreadMessage struct {
@@ -39,6 +43,24 @@ type UnreadMessage struct {
 	Status    string
 }
 
+// Overview is UID + envelope + flags for one message, without body content
+// — backed by GetOverviews (UID FETCH ... ALL), which per RFC 3501 never
+// includes body text. Used by the mail-cache sync path (ListOverviews) so
+// the expensive body fetch (GetMessageBodies) happens only for UIDs the
+// cache doesn't already have.
+type Overview struct {
+	MessageID string
+	Subject   string
+	Sender    string
+	SentTo    string
+	CC        string
+	BCC       string
+	Keywords  []string
+	AtUTC     string
+	Status    string
+	UID       int
+}
+
 type DraftMessage struct {
 	To      []string
 	CC      []string
@@ -51,6 +73,13 @@ type DraftMessage struct {
 type Client interface {
 	ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error)
 	ListUnreadMessages(ctx context.Context, mailbox string, limit int) ([]UnreadMessage, error)
+	// ListOverviews returns UID + envelope + flags for the last N messages
+	// in mailbox, without a body fetch — the selective, cheap counterpart
+	// to ListUnreadMessages used by the mail cache's live-diff path.
+	ListOverviews(ctx context.Context, mailbox string, limit int) ([]Overview, error)
+	// GetMessageBodies fetches body content for exactly the given UIDs —
+	// called only for UIDs the mail cache reports as genuinely new.
+	GetMessageBodies(ctx context.Context, mailbox string, uids []int) (map[int]string, error)
 	ListLabels(ctx context.Context) ([]string, error)
 	ListSubfolders(ctx context.Context, parent string) ([]string, error)
 	CreateFolder(ctx context.Context, parent, name string) (string, error)
@@ -220,6 +249,63 @@ func decryptStoredPayload(raw []byte, keyPath string) ([]byte, error) {
 	return plain, nil
 }
 
+// overviewFromEmail builds an Overview from a go-imap *Email, parsing IMAP
+// flags into Keywords/Status (a \Seen flag maps to Status "read", leading
+// backslash flags are otherwise ignored, everything else is a label
+// keyword). Works regardless of whether e came from GetOverviews directly
+// or from GetEmails (which internally calls GetOverviews first and never
+// overwrites Flags/Sent/Received when it later merges in body content).
+func overviewFromEmail(uid int, e *goimap.Email) Overview {
+	if e == nil {
+		return Overview{MessageID: strconv.Itoa(uid), UID: uid, Status: "unread"}
+	}
+
+	keywords := []string{}
+	status := "unread"
+	seen := map[string]bool{}
+	for _, flag := range e.Flags {
+		clean := strings.TrimSpace(flag)
+		if clean == "" {
+			continue
+		}
+		if strings.EqualFold(clean, "\\Seen") {
+			status = "read"
+			continue
+		}
+		if strings.HasPrefix(clean, "\\") {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		keywords = append(keywords, clean)
+	}
+
+	ts := e.Sent
+	if ts.IsZero() {
+		ts = e.Received
+	}
+	atUTC := ""
+	if !ts.IsZero() {
+		atUTC = ts.UTC().Format(time.RFC3339)
+	}
+
+	return Overview{
+		MessageID: strconv.Itoa(uid),
+		Subject:   strings.TrimSpace(e.Subject),
+		Sender:    strings.TrimSpace(e.From.String()),
+		SentTo:    strings.TrimSpace(e.To.String()),
+		CC:        strings.TrimSpace(e.CC.String()),
+		BCC:       strings.TrimSpace(e.BCC.String()),
+		Keywords:  keywords,
+		AtUTC:     atUTC,
+		Status:    status,
+		UID:       uid,
+	}
+}
+
 func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error) {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
@@ -272,12 +358,17 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 		if body == "" {
 			body = strings.TrimSpace(e.HTML)
 		}
+		ov := overviewFromEmail(uid, e)
 		out = append(out, Message{
-			ID:      strconv.Itoa(uid),
-			Subject: strings.TrimSpace(e.Subject),
-			Sender:  strings.TrimSpace(e.From.String()),
-			SentTo:  strings.TrimSpace(e.To.String()),
-			Body:    body,
+			ID:       ov.MessageID,
+			Subject:  ov.Subject,
+			Sender:   ov.Sender,
+			SentTo:   ov.SentTo,
+			CC:       ov.CC,
+			BCC:      ov.BCC,
+			Keywords: ov.Keywords,
+			AtUTC:    ov.AtUTC,
+			Body:     body,
 		})
 		if uid > maxUID {
 			maxUID = uid
@@ -323,14 +414,13 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 
 	sort.Ints(uids)
 
+	// A single GetEmails call is enough: it internally calls GetOverviews
+	// first and never overwrites Flags/Sent/Received when it later merges
+	// in body content, so overviewFromEmail(uid, e) below already has
+	// everything a second, separate GetOverviews call used to provide.
 	emails, err := d.GetEmails(uids...)
 	if err != nil {
 		return nil, fmt.Errorf("imap fetch emails: %w", err)
-	}
-
-	overviews, err := d.GetOverviews(uids...)
-	if err != nil {
-		return nil, fmt.Errorf("imap fetch overviews: %w", err)
 	}
 
 	out := make([]UnreadMessage, 0, len(uids))
@@ -344,39 +434,7 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 			continue
 		}
 
-		keywords := []string{}
-		status := "unread"
-		if ov := overviews[uid]; ov != nil {
-			seen := map[string]bool{}
-			for _, flag := range ov.Flags {
-				clean := strings.TrimSpace(flag)
-				if clean == "" {
-					continue
-				}
-				if strings.EqualFold(clean, "\\Seen") {
-					status = "read"
-					continue
-				}
-				if strings.HasPrefix(clean, "\\") {
-					continue
-				}
-				key := strings.ToLower(clean)
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				keywords = append(keywords, clean)
-			}
-		}
-
-		ts := e.Sent
-		if ts.IsZero() {
-			ts = e.Received
-		}
-		atUTC := ""
-		if !ts.IsZero() {
-			atUTC = ts.UTC().Format(time.RFC3339)
-		}
+		ov := overviewFromEmail(uid, e)
 
 		// Prefer HTML for inbox preview so the UI can render rich email content.
 		// Fall back to plain text for text-only messages.
@@ -386,19 +444,123 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 		}
 
 		out = append(out, UnreadMessage{
-			MessageID: strconv.Itoa(uid),
-			Subject:   strings.TrimSpace(e.Subject),
-			Sender:    strings.TrimSpace(e.From.String()),
-			SentTo:    strings.TrimSpace(e.To.String()),
-			CC:        strings.TrimSpace(e.CC.String()),
-			BCC:       strings.TrimSpace(e.BCC.String()),
-			Keywords:  keywords,
-			AtUTC:     atUTC,
+			MessageID: ov.MessageID,
+			Subject:   ov.Subject,
+			Sender:    ov.Sender,
+			SentTo:    ov.SentTo,
+			CC:        ov.CC,
+			BCC:       ov.BCC,
+			Keywords:  ov.Keywords,
+			AtUTC:     ov.AtUTC,
 			Body:      body,
-			Status:    status,
+			Status:    ov.Status,
 		})
 	}
 
+	return out, nil
+}
+
+// ListOverviews returns UID + envelope + flags for the last N messages in
+// mailbox, without a body fetch (GetLastNUIDs + GetOverviews only — no
+// GetEmails/body FETCH). Used by the mail-cache Sync path so the expensive
+// body fetch happens only for UIDs the cache doesn't already have.
+func (c *APIClient) ListOverviews(ctx context.Context, mailbox string, limit int) ([]Overview, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	mailbox = strings.TrimSpace(mailbox)
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return nil, err
+	}
+	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
+		if err := d.SelectFolder(mailbox); err != nil {
+			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
+		}
+	}
+
+	uids, err := d.GetLastNUIDs(limit)
+	if err != nil {
+		return nil, fmt.Errorf("imap list recent messages: %w", err)
+	}
+	if len(uids) == 0 {
+		return []Overview{}, nil
+	}
+
+	sort.Ints(uids)
+
+	overviews, err := d.GetOverviews(uids...)
+	if err != nil {
+		return nil, fmt.Errorf("imap fetch overviews: %w", err)
+	}
+
+	out := make([]Overview, 0, len(uids))
+	for i := len(uids) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		uid := uids[i]
+		e := overviews[uid]
+		if e == nil {
+			continue
+		}
+		out = append(out, overviewFromEmail(uid, e))
+	}
+	return out, nil
+}
+
+// GetMessageBodies fetches full body content (HTML preferred, falling back
+// to plain text) for exactly the given UIDs — the selective counterpart to
+// ListOverviews, called only for UIDs the mail cache reports as new.
+func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids []int) (map[int]string, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(uids) == 0 {
+		return map[int]string{}, nil
+	}
+	mailbox = strings.TrimSpace(mailbox)
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return nil, err
+	}
+	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
+		if err := d.SelectFolder(mailbox); err != nil {
+			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
+		}
+	}
+
+	emails, err := d.GetEmails(uids...)
+	if err != nil {
+		return nil, fmt.Errorf("imap fetch emails: %w", err)
+	}
+
+	out := make(map[int]string, len(uids))
+	for _, uid := range uids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		e := emails[uid]
+		if e == nil {
+			continue
+		}
+		body := strings.TrimSpace(e.HTML)
+		if body == "" {
+			body = strings.TrimSpace(e.Text)
+		}
+		out[uid] = body
+	}
 	return out, nil
 }
 

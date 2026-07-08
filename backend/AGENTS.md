@@ -10,7 +10,7 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 
 ## Local Contracts
 
-- Go 1.26.4; direct dependencies: `go-imap`, `yaml.v3`, `webpush-go`, `golang.org/x/crypto`
+- Go 1.26.4; direct dependencies: `go-imap`, `yaml.v3`, `webpush-go`, `golang.org/x/crypto`, `emersion/go-webdav` (CardDAV protocol handling, `carddav` subpackage; transitively pulls `emersion/go-vcard`)
 - Entry point: `cmd/main.go` → `app.Run(os.Args)`
 - All business logic lives under `internal/`; `cmd/` contains only the entry point
 - Binary output: `llama-lab`, deployed to `/app/bin/llama-lab` in the container
@@ -18,7 +18,9 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 - Three runtime modes: `daemon` (poller only), `server` (API only), `all` (both)
 - In Docker `server` and `daemon` run as separate processes that share no memory; all cross-process coordination happens through disk. Any store mutated by both processes must re-read from disk before mutating and write atomically (see `state.Store` and `users.Store`)
 - Multi-user with roles (`admin`, `user`): accounts in `$CONFIG_DIR/users.json` (`users.Store`); sessions map token → `{userID, expiresAt}`; role is looked up live per request so deactivation/role changes apply immediately. Legacy `admin.env` is imported into `users.json` on first start (`users.LoadOrMigrate`), and legacy global data files are copied into the first admin's per-user dirs (`app/migrate.go`)
-- Per-user data: IMAP credentials/tuning/notification prefs under `$CONFIG_DIR/users/<userID>/`; mailbox state (checkpoint, processed set, decisions, push subscriptions, native devices, pairing `subscriberId`) under `$STATE_DIR/users/<userID>/`. Global: `config.yaml` (timezone, log level, scan interval, rate limits, redaction, labels, Remote LLM, VAPID keys), root `$STATE_DIR/state.json` (AI-credits flag only)
+- Per-user data: IMAP credentials/tuning/notification prefs/CardDAV app-password hash under `$CONFIG_DIR/users/<userID>/`; mailbox state (checkpoint, processed set, decisions, push subscriptions, native devices, pairing `subscriberId`, contacts, mail cache) under `$STATE_DIR/users/<userID>/`. Global: `config.yaml` (timezone, log level, scan interval, rate limits, redaction, labels, Remote LLM, VAPID keys), root `$STATE_DIR/state.json` (AI-credits flag only)
+- Contacts: per-user address book (`contacts/` package) synced two ways — a session-authenticated JSON CRUD API for the web UI, a real CardDAV surface (`/dav/{username}/contacts/`, HTTP Basic Auth against a separate app-specific password, not the login password) for native OS/CardDAV clients, and a subscriber-hash-authenticated two-way JSON sync endpoint (`/api/contacts/sync`) mirroring the native push pull/pairing mechanism, for the companion mobile app. See [internal/contacts/AGENTS.md](internal/contacts/AGENTS.md) and root `Mobile_Contact_Sync.md`
+- Mail cache: per-mailbox metadata cache (`mailcache/` package) backing `GET /api/inbox` — warmed opportunistically by the `processor/` poller's existing ~90s fetch (INBOX only) and by `api/`'s own live-fetch fallback, so the classic (no-`since`) response is usually served with zero IMAP calls, and a `since`-based delta mode avoids re-fetching bodies for already-seen messages. Not a permanent store like contacts — see [internal/mailcache/AGENTS.md](internal/mailcache/AGENTS.md) and root `Mobile_Mail_Relay.md`
 - Secrets (IMAP passwords) are encrypted at rest with the single master key `$SECRET_DIR/imap-config.key`
 - Logs are structured JSON, written to stdout and a rotating file (16 MB max × 8 backups) under `LOG_DIR`
 
@@ -34,6 +36,8 @@ All code under `backend/`. Produces the `llama-lab` binary consumed by the conta
 | `processor/` | Timed polling loop (~90s default); polls every active user's mailbox per tick with bounded concurrency (4); per-user rate budgets; fault isolation (only all-users-failing flips global health) |
 | `config/` | YAML config load/init; global `Config` plus per-user `UserSettings` (notification prefs) |
 | `state/` | Per-user checkpoint, processed-set, decisions, subscriptions, devices; instantiated per user directory |
+| `contacts/` | Per-user address book (`contacts.json`); monotonic `Rev`/tombstoned deletes double as the CardDAV ETag/sync-token and the mobile-sync cursor; instantiated per user directory |
+| `mailcache/` | Per-user, per-mailbox mail metadata cache (`mailcache.json`); not permanent like `contacts/` — represents only the current top-N window, warmed by both `api/` (live-fetch fallback) and `processor/` (opportunistic, INBOX-only); instantiated per user directory in both processes |
 | `fsutil/` | Shared atomic file write + UUIDv4 helpers |
 | `health/` | Health status; sticky `aiCreditsExhausted` flag |
 | `logging/` | Structured logger; rotating file writer |
@@ -94,6 +98,11 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `POST /api/notifications/native/register` | no | Native mobile registration. Accepts `subscriberId`, `pairingToken`, `deviceToken`, optional `subscriberHash` + device metadata; validates pairing token, resolves `subscriberId` → owning user (in-memory index over `$STATE_DIR/users/*/state.json`, lazily rescanned), stores the device in that user's state |
 | `GET\|DELETE /api/notifications/native/devices` | yes | Lists or removes the caller's native devices by `deviceId` |
 | `POST /api/notifications/native/unpair` | yes | Removes all of the caller's paired native devices |
+| `GET\|POST /api/contacts` | yes | List / create in the caller's address book |
+| `GET\|PUT\|DELETE /api/contacts/{id}` | yes | Read / update / tombstone-delete a single contact by `uid` |
+| `GET\|POST\|DELETE /api/contacts/dav-password` | yes | Manage the caller's app-specific CardDAV Basic Auth password (separate from their login password); `POST` returns the raw secret exactly once |
+| `GET\|POST /api/contacts/sync` | subscriber-hash | Mobile two-way sync (`?sub=&hash=&since=` / body `{baseCursor, changes[]}`), authenticated like `native/pull` — not a web session. Conflict policy is last-write-wins |
+| `PROPFIND\|REPORT\|GET\|PUT\|DELETE /dav/{username}/contacts/...` | CardDAV Basic Auth | Real CardDAV surface (`emersion/go-webdav`) for native OS/CardDAV clients; authenticated with the app-specific password above, not session cookies or the login password. `/.well-known/carddav` is also mounted here for client auto-discovery |
 
 ### Environment Variables
 
@@ -133,6 +142,9 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `$STATE_DIR/state.json` | Global state: sticky AI-credits flag |
 | `$STATE_DIR/users/<userID>/state.json` | User's checkpoint + processed-set + push subscriptions + pairing `subscriberId` + native devices |
 | `$STATE_DIR/users/<userID>/decisions.json` | User's decision audit log |
+| `$STATE_DIR/users/<userID>/contacts.json` | User's address book (contacts, revisions, tombstones) |
+| `$STATE_DIR/users/<userID>/mailcache.json` | User's mail metadata cache, per mailbox (not full message bodies except where opportunistically warmed) |
+| `$CONFIG_DIR/users/<userID>/carddav-auth.json` | Scrypt hash of the user's app-specific CardDAV password (never the raw secret) |
 
 ### Log Files
 
@@ -162,3 +174,5 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 ## Child DOX Index
 
 - `internal/adapters/` — external protocol clients (IMAP + Ollama); see [internal/adapters/AGENTS.md](internal/adapters/AGENTS.md)
+- `internal/contacts/` — per-user address book storage; see [internal/contacts/AGENTS.md](internal/contacts/AGENTS.md)
+- `internal/mailcache/` — per-user, per-mailbox mail metadata cache; see [internal/mailcache/AGENTS.md](internal/mailcache/AGENTS.md)

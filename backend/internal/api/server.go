@@ -34,9 +34,11 @@ import (
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/adapters/llama"
 	"llama-lab/backend/internal/config"
+	"llama-lab/backend/internal/contacts"
 	"llama-lab/backend/internal/fsutil"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
+	"llama-lab/backend/internal/mailcache"
 	"llama-lab/backend/internal/processor"
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/users"
@@ -62,29 +64,32 @@ type AuthContext struct {
 }
 
 type Server struct {
-	mu                sync.RWMutex
-	cfg               config.Config
-	onConfigUpdated   func(config.Config)
-	logger            *logging.Logger
-	health            *health.Service
-	users             *users.Store
-	configDir         string
-	stateDir          string
-	configPath        string
-	logPath           string
-	imapConfigKeyPath        string
-	sessions                 map[string]Session
-	pairingSecret            string
-	serverBaseURL            string
-	nativePushDispatcher     *processor.NativePushDispatcher
+	mu                   sync.RWMutex
+	cfg                  config.Config
+	onConfigUpdated      func(config.Config)
+	logger               *logging.Logger
+	health               *health.Service
+	users                *users.Store
+	configDir            string
+	stateDir             string
+	configPath           string
+	logPath              string
+	imapConfigKeyPath    string
+	sessions             map[string]Session
+	pairingSecret        string
+	serverBaseURL        string
+	nativePushDispatcher *processor.NativePushDispatcher
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
 	// pairing registration endpoint.
-	userMu     sync.Mutex
-	userStores map[string]*state.Store
-	userMail   map[string]*serverMailEntry
-	subIndex   map[string]string
+	userMu         sync.Mutex
+	userStores     map[string]*state.Store
+	userContacts   map[string]*contacts.Store
+	userMailCache  map[string]*mailcache.Store
+	userMail       map[string]*serverMailEntry
+	subIndex       map[string]string
+	davCredentials davCredentialCache
 }
 
 func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config)) *Server {
@@ -94,23 +99,26 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	imapConfigKeyPath := envOrDefault("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key")
 	pairingSecret := strings.TrimSpace(os.Getenv("PAIRING_SECRET"))
 	return &Server{
-		cfg:               cfg,
-		onConfigUpdated:   onConfigUpdated,
-		logger:            logger,
-		health:            healthSvc,
-		users:             usersStore,
-		configDir:         configDir,
-		stateDir:          stateDir,
-		configPath:        filepath.Join(configDir, "config.yaml"),
-		logPath:           logPath,
+		cfg:                  cfg,
+		onConfigUpdated:      onConfigUpdated,
+		logger:               logger,
+		health:               healthSvc,
+		users:                usersStore,
+		configDir:            configDir,
+		stateDir:             stateDir,
+		configPath:           filepath.Join(configDir, "config.yaml"),
+		logPath:              logPath,
 		imapConfigKeyPath:    imapConfigKeyPath,
 		sessions:             map[string]Session{},
 		pairingSecret:        pairingSecret,
 		serverBaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
 		nativePushDispatcher: processor.NewNativePushDispatcher(logger),
 		userStores:           map[string]*state.Store{},
-		userMail:          map[string]*serverMailEntry{},
-		subIndex:          map[string]string{},
+		userContacts:         map[string]*contacts.Store{},
+		userMailCache:        map[string]*mailcache.Store{},
+		userMail:             map[string]*serverMailEntry{},
+		subIndex:             map[string]string{},
+		davCredentials:       newDAVCredentialCache(),
 	}
 }
 
@@ -127,12 +135,12 @@ func (s *Server) Run() error {
 	mux.HandleFunc("PUT /api/config", s.withAuth(s.handleConfig))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("GET /api/decisions", s.withAuth(s.handleDecisions))
-	mux.HandleFunc("GET /api/inbox", s.withAuth(s.handleInbox))
-	mux.HandleFunc("GET /api/inbox/folders", s.withAuth(s.handleInboxFolders))
-	mux.HandleFunc("POST /api/inbox/folders", s.withAuth(s.handleInboxFolders))
-	mux.HandleFunc("PUT /api/inbox/folders", s.withAuth(s.handleInboxFolders))
-	mux.HandleFunc("DELETE /api/inbox/folders", s.withAuth(s.handleInboxFolders))
-	mux.HandleFunc("POST /api/inbox/actions", s.withAuth(s.handleInboxActions))
+	mux.HandleFunc("GET /api/inbox", s.withMailAuth(s.handleInbox))
+	mux.HandleFunc("GET /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("PUT /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("DELETE /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/actions", s.withMailAuth(s.handleInboxActions))
 	mux.HandleFunc("GET /api/logs", s.withAdmin(s.handleLogs))
 	mux.HandleFunc("GET /api/logs/list", s.withAdmin(s.handleLogsList))
 	mux.HandleFunc("GET /api/users", s.withAdmin(s.handleUsersList))
@@ -145,8 +153,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/test", s.withAuth(s.handleIMAPTest))
-	mux.HandleFunc("POST /api/mail/draft", s.withAuth(s.handleMailDraft))
-	mux.HandleFunc("POST /api/mail/send", s.withAuth(s.handleMailSend))
+	mux.HandleFunc("POST /api/mail/draft", s.withMailAuth(s.handleMailDraft))
+	mux.HandleFunc("POST /api/mail/send", s.withMailAuth(s.handleMailSend))
 	mux.HandleFunc("POST /api/llama/test", s.withAuth(s.handleLlamaTest))
 	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
@@ -163,6 +171,18 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
 	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
 	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
+	mux.HandleFunc("GET /api/contacts", s.withAuth(s.handleContacts))
+	mux.HandleFunc("POST /api/contacts", s.withAuth(s.handleContacts))
+	mux.HandleFunc("GET /api/contacts/{id}", s.withAuth(s.handleContactByID))
+	mux.HandleFunc("PUT /api/contacts/{id}", s.withAuth(s.handleContactByID))
+	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
+	mux.HandleFunc("GET /api/contacts/dav-password", s.withAuth(s.handleContactsDAVPassword))
+	mux.HandleFunc("POST /api/contacts/dav-password", s.withAuth(s.handleContactsDAVPassword))
+	mux.HandleFunc("DELETE /api/contacts/dav-password", s.withAuth(s.handleContactsDAVPassword))
+	mux.HandleFunc("GET /api/contacts/sync", s.handleContactsSync)
+	mux.HandleFunc("POST /api/contacts/sync", s.handleContactsSync)
+	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.HandleFunc("GET /api/setup", s.handleSetup)
 	mux.HandleFunc("/", s.handleFrontend)
 
@@ -1060,8 +1080,8 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		}
 		// Relay health for this probe: track per platform. A success or a stale-token
 		// response means the relay answered; only a non-stale error means the relay is failing.
-		relayResponded := make(map[string]bool)     // platform -> responded
-		relayFailure := make(map[string]string)     // platform -> failure reason
+		relayResponded := make(map[string]bool) // platform -> responded
+		relayFailure := make(map[string]string) // platform -> failure reason
 		for _, device := range nativeDevices {
 			platform := strings.ToLower(strings.TrimSpace(device.Platform))
 			if platform == "" {
@@ -1546,6 +1566,11 @@ type inboxEmail struct {
 	Status    string `json:"status"`
 	Detail    string `json:"detail,omitempty"`
 	AtUTC     string `json:"atUtc"`
+	// ChangeType is only ever set on a delta (since=) response: "new" (Body
+	// populated, client should insert) or "updated" (flags/label changed,
+	// Body intentionally empty — the client already has it cached). Absent
+	// entirely on classic responses, so old clients see no shape change.
+	ChangeType string `json:"changeType,omitempty"`
 }
 
 type inboxFolder struct {
@@ -1649,20 +1674,60 @@ func collectAllowedKeywords(cfg config.Config) []string {
 	return out
 }
 
-func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
-	limit := 500
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 5000 {
-			limit = v
-		}
+// inboxCacheMailboxKey normalizes the mailbox query param into a stable
+// mailcache window key: empty (account default) is aliased to "INBOX" so
+// omitting the param and passing it explicitly share one window — both
+// already resolve to the same selected IMAP folder. The raw (possibly
+// empty) mailbox string is still passed to mailClient calls unchanged; this
+// normalization is cache-key-only.
+func inboxCacheMailboxKey(mailbox string) string {
+	trimmed := strings.TrimSpace(mailbox)
+	if trimmed == "" || strings.EqualFold(trimmed, "INBOX") {
+		return "INBOX"
 	}
-	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
+	return trimmed
+}
 
-	s.mu.RLock()
-	cfg := s.cfg
-	s.mu.RUnlock()
-	allowedKeywords := collectAllowedKeywords(cfg)
+func mailCacheEntryFromOverview(ov imapadapter.Overview) mailcache.Overview {
+	return mailcache.Overview{
+		UID:      ov.UID,
+		Subject:  ov.Subject,
+		Sender:   ov.Sender,
+		SentTo:   ov.SentTo,
+		CC:       ov.CC,
+		BCC:      ov.BCC,
+		Keywords: ov.Keywords,
+		Status:   ov.Status,
+		AtUTC:    ov.AtUTC,
+	}
+}
 
+func mailCacheEntryFromUnreadMessage(msg imapadapter.UnreadMessage, status string) mailcache.Entry {
+	uid, _ := strconv.Atoi(strings.TrimSpace(msg.MessageID))
+	return mailcache.Entry{
+		UID:       uid,
+		MessageID: msg.MessageID,
+		Subject:   msg.Subject,
+		Sender:    msg.Sender,
+		SentTo:    msg.SentTo,
+		CC:        msg.CC,
+		BCC:       msg.BCC,
+		Keywords:  msg.Keywords,
+		Status:    status,
+		AtUTC:     msg.AtUTC,
+		Body:      msg.Body,
+	}
+}
+
+// inboxUncategorizedTab is the fallback tab for messages matching none of
+// the configured label keywords.
+const inboxUncategorizedTab = "Uncategorized"
+
+// buildInboxTabScaffold seeds the tabs/byTab response shape from the
+// account's configured label keywords, before any messages are bucketed in
+// — shared by handleInbox's no-mail-client empty scaffold and serveInbox's
+// populated response, so both start from identical tab ordering.
+func buildInboxTabScaffold(allowedKeywords []string) ([]string, map[string][]inboxEmail) {
 	tabs := make([]string, 0, len(allowedKeywords)+1)
 	byTab := map[string][]inboxEmail{}
 	seenTab := map[string]bool{}
@@ -1680,58 +1745,233 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		byTab[name] = []inboxEmail{}
 	}
 
-	const uncategorizedTab = "Uncategorized"
-	byTab[uncategorizedTab] = []inboxEmail{}
+	byTab[inboxUncategorizedTab] = []inboxEmail{}
+	return tabs, byTab
+}
+
+func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
+	limit := 500
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 5000 {
+			limit = v
+		}
+	}
+	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
+	useDelta := strings.TrimSpace(r.URL.Query().Get("since")) != ""
+	since := parseNonNegativeInt64Query(r, "since")
+
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
 
 	mailClient, err := s.mailFor(r)
 	if err != nil {
 		// No mailbox configured yet — show the empty tab scaffold rather
 		// than an error so the page still renders.
-		tabs = append(tabs, uncategorizedTab)
+		tabs, byTab := buildInboxTabScaffold(collectAllowedKeywords(cfg))
+		tabs = append(tabs, inboxUncategorizedTab)
 		writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
 		return
 	}
 
-	unread, err := mailClient.ListUnreadMessages(r.Context(), mailbox, limit)
+	cache, err := s.mailCacheFor(r)
+	if err != nil {
+		http.Error(w, "failed to open mail cache", http.StatusInternalServerError)
+		return
+	}
+
+	s.serveInbox(w, r.Context(), mailClient, cache, cfg, mailbox, limit, since, useDelta)
+}
+
+// serveInbox contains handleInbox's core logic once a mail client and cache
+// store are resolved — split out from handleInbox (which only does
+// param/auth/store resolution) so it can be exercised directly in tests
+// against a fake imapadapter.Client, without a real IMAP connection.
+func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, useDelta bool) {
+	allowedKeywords := collectAllowedKeywords(cfg)
+	tabs, byTab := buildInboxTabScaffold(allowedKeywords)
+
+	// bucket appends entry into the tab its keywords match (or
+	// Uncategorized), stamping Label and registering any newly-seen tab —
+	// shared by every path below (cache-warmed classic, live-fallback
+	// classic, and delta) so bucketing stays identical regardless of where
+	// the data came from.
+	bucket := func(keywords []string, entry inboxEmail) {
+		tab := firstMatchingKeyword(keywords, allowedKeywords)
+		if tab == "" {
+			tab = inboxUncategorizedTab
+		}
+		if _, ok := byTab[tab]; !ok {
+			byTab[tab] = []inboxEmail{}
+			if tab != inboxUncategorizedTab {
+				tabs = append(tabs, tab)
+			}
+		}
+		entry.Label = tab
+		byTab[tab] = append(byTab[tab], entry)
+	}
+
+	cacheKey := inboxCacheMailboxKey(mailbox)
+
+	if !useDelta {
+		// Cache-first: if the background poller (or an earlier request)
+		// has already warmed a full window of `limit` messages with
+		// bodies, serve it with zero IMAP calls.
+		if entries, warmed := cache.Snapshot(cacheKey, limit); warmed {
+			for _, e := range entries {
+				bucket(e.Keywords, inboxEmail{
+					MessageID: e.MessageID,
+					Sender:    e.Sender,
+					SentTo:    e.SentTo,
+					CC:        e.CC,
+					BCC:       e.BCC,
+					Subject:   e.Subject,
+					Body:      e.Body,
+					Status:    e.Status,
+					AtUTC:     e.AtUTC,
+				})
+			}
+			tabs = append(tabs, inboxUncategorizedTab)
+			writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
+			return
+		}
+
+		// Cold or partial cache (new user, non-INBOX folder the poller
+		// never touches, or fewer entries than requested) — fall back to a
+		// live fetch exactly as before, then self-warm the cache so the
+		// next load for this user+mailbox+limit can be served from it.
+		unread, err := mailClient.ListUnreadMessages(ctx, mailbox, limit)
+		if err != nil {
+			http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
+			return
+		}
+
+		warmEntries := make([]mailcache.Entry, 0, len(unread))
+		for _, msg := range unread {
+			status := strings.TrimSpace(msg.Status)
+			if status == "" {
+				status = "unread"
+			}
+			bucket(msg.Keywords, inboxEmail{
+				MessageID: msg.MessageID,
+				Sender:    msg.Sender,
+				SentTo:    msg.SentTo,
+				CC:        msg.CC,
+				BCC:       msg.BCC,
+				Subject:   msg.Subject,
+				Body:      msg.Body,
+				Status:    status,
+				AtUTC:     msg.AtUTC,
+			})
+			warmEntries = append(warmEntries, mailCacheEntryFromUnreadMessage(msg, status))
+		}
+		if len(warmEntries) > 0 {
+			if err := cache.Upsert(cacheKey, warmEntries); err != nil {
+				s.logger.Error("failed to warm mail cache", "error", err.Error())
+			}
+		}
+
+		tabs = append(tabs, inboxUncategorizedTab)
+		writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
+		return
+	}
+
+	// Delta path: cheap overview fetch (no bodies), diff against the cache,
+	// and only pay for a body fetch on genuinely new messages the cache
+	// (and the daemon's opportunistic warming) hasn't already seen.
+	overviews, err := mailClient.ListOverviews(ctx, mailbox, limit)
 	if err != nil {
 		http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
 		return
 	}
+	live := make([]mailcache.Overview, 0, len(overviews))
+	for _, ov := range overviews {
+		live = append(live, mailCacheEntryFromOverview(ov))
+	}
 
-	for _, msg := range unread {
-		tab := firstMatchingKeyword(msg.Keywords, allowedKeywords)
-		if tab == "" {
-			tab = uncategorizedTab
+	result, err := cache.Sync(cacheKey, limit, live, since)
+	if err != nil {
+		http.Error(w, "failed to sync mail cache", http.StatusInternalServerError)
+		return
+	}
+
+	needBodies := make([]int, 0, len(result.New))
+	for _, e := range result.New {
+		if e.Body == "" {
+			needBodies = append(needBodies, e.UID)
 		}
-
-		if _, ok := byTab[tab]; !ok {
-			byTab[tab] = []inboxEmail{}
-			if tab != uncategorizedTab {
-				tabs = append(tabs, tab)
+	}
+	bodies := map[int]string{}
+	if len(needBodies) > 0 {
+		bodies, err = mailClient.GetMessageBodies(ctx, mailbox, needBodies)
+		if err != nil {
+			http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
+			return
+		}
+		// Attach the freshly fetched bodies back onto the cache (metadata
+		// is unchanged from what Sync just stored, so this only warms
+		// Body without bumping Rev) so a subsequent classic-path load
+		// doesn't re-fetch them live.
+		warmEntries := make([]mailcache.Entry, 0, len(needBodies))
+		for i, e := range result.New {
+			if body := bodies[e.UID]; body != "" {
+				e.Body = body
+				result.New[i] = e
+				warmEntries = append(warmEntries, e)
 			}
 		}
-
-		status := strings.TrimSpace(msg.Status)
-		if status == "" {
-			status = "unread"
+		if len(warmEntries) > 0 {
+			if err := cache.Upsert(cacheKey, warmEntries); err != nil {
+				s.logger.Error("failed to warm mail cache from delta fetch", "error", err.Error())
+			}
 		}
+	}
 
-		byTab[tab] = append(byTab[tab], inboxEmail{
-			MessageID: msg.MessageID,
-			Sender:    msg.Sender,
-			SentTo:    msg.SentTo,
-			CC:        msg.CC,
-			BCC:       msg.BCC,
-			Subject:   msg.Subject,
-			Body:      msg.Body,
-			Label:     tab,
-			Status:    status,
-			AtUTC:     msg.AtUTC,
+	for _, e := range result.New {
+		body := e.Body
+		if body == "" {
+			body = bodies[e.UID]
+		}
+		bucket(e.Keywords, inboxEmail{
+			MessageID:  e.MessageID,
+			Sender:     e.Sender,
+			SentTo:     e.SentTo,
+			CC:         e.CC,
+			BCC:        e.BCC,
+			Subject:    e.Subject,
+			Body:       body,
+			Status:     e.Status,
+			AtUTC:      e.AtUTC,
+			ChangeType: "new",
+		})
+	}
+	for _, e := range result.Updated {
+		bucket(e.Keywords, inboxEmail{
+			MessageID:  e.MessageID,
+			Sender:     e.Sender,
+			SentTo:     e.SentTo,
+			CC:         e.CC,
+			BCC:        e.BCC,
+			Subject:    e.Subject,
+			Status:     e.Status,
+			AtUTC:      e.AtUTC,
+			ChangeType: "updated",
 		})
 	}
 
-	tabs = append(tabs, uncategorizedTab)
-	writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
+	removed := make([]string, 0, len(result.Removed))
+	for _, e := range result.Removed {
+		removed = append(removed, e.MessageID)
+	}
+
+	tabs = append(tabs, inboxUncategorizedTab)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tabs":    tabs,
+		"byTab":   byTab,
+		"delta":   true,
+		"cursor":  result.Cursor,
+		"removed": removed,
+	})
 }
 
 func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
@@ -2264,14 +2504,38 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// withMailAuth gates mail read/act-on endpoints (inbox, folders, actions,
+// draft, send) for either a web session cookie or mobile's paired
+// subscriberId/subscriberHash — see resolveMailAuthContext. IMAP/SMTP
+// account setup (/api/imap/config, /api/imap/test) intentionally stays on
+// withAuth only; mobile never configures or views raw mail credentials.
+func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ac, err := s.resolveMailAuthContext(r)
+		if err != nil {
+			if errors.Is(err, errMailPairingNotConfigured) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
+	}
+}
+
 type authContextKey struct{}
 
-// authFromContext retrieves the AuthContext injected by withAuth. It only
-// returns ok=false if called on a request that never passed through
-// withAuth (a programming error), since withAuth already rejects the
-// request before next() runs otherwise.
+// authFromContext retrieves the AuthContext injected by withAuth or
+// withDAVBasicAuth. It only returns ok=false if called on a request that
+// never passed through either (a programming error), since both already
+// reject the request before next() runs otherwise.
 func authFromContext(r *http.Request) (AuthContext, bool) {
-	ac, ok := r.Context().Value(authContextKey{}).(AuthContext)
+	return authContextFromContext(r.Context())
+}
+
+func authContextFromContext(ctx context.Context) (AuthContext, bool) {
+	ac, ok := ctx.Value(authContextKey{}).(AuthContext)
 	return ac, ok
 }
 

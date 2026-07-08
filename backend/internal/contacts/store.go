@@ -1,0 +1,280 @@
+package contacts
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"llama-lab/backend/internal/fsutil"
+)
+
+// defaultTombstoneRetention is how long a deleted contact's tombstone is kept
+// before GC permanently removes it. A sync client whose cursor predates the
+// retention window can no longer be given an accurate deleted[] list and must
+// be told to discard its cursor and re-fetch a full snapshot (see
+// ChangedSince's tooOld return value).
+const defaultTombstoneRetention = 30 * 24 * time.Hour
+
+// Store is one user's address book, persisted as contacts.json alongside
+// state.json and decisions.json in the user's state directory. The API and
+// daemon processes share no memory, so every read and mutation re-reads the
+// file from disk first (matching state.Store's convention), even though only
+// the API process touches contacts today.
+type Store struct {
+	mu             sync.Mutex
+	baseDir        string
+	contacts       []Contact
+	seq            int64
+	gcHighWaterRev int64
+}
+
+type contactsFile struct {
+	Contacts       []Contact `json:"contacts"`
+	Seq            int64     `json:"seq"`
+	GCHighWaterRev int64     `json:"gcHighWaterRev,omitempty"`
+}
+
+func New(baseDir string) (*Store, error) {
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return nil, err
+	}
+	s := &Store{baseDir: baseDir, contacts: []Contact{}}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) path() string {
+	return filepath.Join(s.baseDir, "contacts.json")
+}
+
+func (s *Store) load() error {
+	b, err := os.ReadFile(s.path())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return s.persistLocked()
+		}
+		return err
+	}
+	var cf contactsFile
+	if err := json.Unmarshal(b, &cf); err != nil {
+		return err
+	}
+	s.applyFile(cf)
+	return nil
+}
+
+func (s *Store) applyFile(cf contactsFile) {
+	s.contacts = append([]Contact{}, cf.Contacts...)
+	s.seq = cf.Seq
+	s.gcHighWaterRev = cf.GCHighWaterRev
+}
+
+func (s *Store) refreshFromDiskLocked() error {
+	b, err := os.ReadFile(s.path())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var cf contactsFile
+	if err := json.Unmarshal(b, &cf); err != nil {
+		return err
+	}
+	s.applyFile(cf)
+	return nil
+}
+
+func (s *Store) persistLocked() error {
+	b, err := json.MarshalIndent(contactsFile{
+		Contacts:       s.contacts,
+		Seq:            s.seq,
+		GCHighWaterRev: s.gcHighWaterRev,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := fsutil.AtomicWriteFile(s.path(), b, 0o600); err != nil {
+		return fmt.Errorf("write contacts: %w", err)
+	}
+	return nil
+}
+
+// List returns all non-deleted contacts.
+func (s *Store) List() []Contact {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshFromDiskLocked()
+	out := make([]Contact, 0, len(s.contacts))
+	for _, c := range s.contacts {
+		if !c.Deleted {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Get returns a contact by UID, including a tombstoned one (callers decide
+// whether Deleted should be treated as not-found).
+func (s *Store) Get(uid string) (Contact, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshFromDiskLocked()
+	for _, c := range s.contacts {
+		if c.UID == uid {
+			return c, true
+		}
+	}
+	return Contact{}, false
+}
+
+// Upsert creates (when c.UID is empty) or replaces a contact, stamping a new
+// Rev/UpdatedAt. Conflict detection (e.g. CardDAV If-Match, mobile-sync
+// last-write-wins bookkeeping) is the caller's responsibility, applied before
+// calling Upsert; the store itself always accepts the write.
+func (s *Store) Upsert(c Contact) (Contact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Contact{}, err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	s.seq++
+	c.Rev = s.seq
+	c.Deleted = false
+	c.UpdatedAt = now
+
+	if c.UID == "" {
+		uid, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return Contact{}, err
+		}
+		c.UID = uid
+		c.CreatedAt = now
+		s.contacts = append(s.contacts, c)
+		if err := s.persistLocked(); err != nil {
+			return Contact{}, err
+		}
+		return c, nil
+	}
+
+	for i, existing := range s.contacts {
+		if existing.UID == c.UID {
+			if c.CreatedAt == "" {
+				c.CreatedAt = existing.CreatedAt
+			}
+			s.contacts[i] = c
+			if err := s.persistLocked(); err != nil {
+				return Contact{}, err
+			}
+			return c, nil
+		}
+	}
+
+	// UID was supplied but not found (e.g. mobile client offline-created a
+	// contact and assigned its own UID) — treat as a create under that UID.
+	c.CreatedAt = now
+	s.contacts = append(s.contacts, c)
+	if err := s.persistLocked(); err != nil {
+		return Contact{}, err
+	}
+	return c, nil
+}
+
+// Delete tombstones a contact (clearing its PII fields, keeping only
+// identity/bookkeeping) so sync consumers can observe the deletion. Returns
+// false if no contact with that UID exists.
+func (s *Store) Delete(uid string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return false, err
+	}
+	for i, c := range s.contacts {
+		if c.UID != uid {
+			continue
+		}
+		s.seq++
+		c.tombstone()
+		c.Rev = s.seq
+		c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		s.contacts[i] = c
+		if err := s.persistLocked(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// ChangedSince returns contacts created/updated/deleted after rev, plus the
+// current cursor (the highest assigned Rev). tooOld is true when rev predates
+// the tombstone GC watermark, meaning some deletions may no longer be
+// representable as tombstones — the caller must discard its cursor and
+// request a full snapshot (rev=0) instead of trusting a partial delta.
+func (s *Store) ChangedSince(rev int64) (changed, deleted []Contact, cursor int64, tooOld bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshFromDiskLocked()
+
+	tooOld = rev > 0 && rev < s.gcHighWaterRev
+	changed = make([]Contact, 0)
+	deleted = make([]Contact, 0)
+	if !tooOld {
+		for _, c := range s.contacts {
+			if c.Rev <= rev {
+				continue
+			}
+			if c.Deleted {
+				deleted = append(deleted, c)
+			} else {
+				changed = append(changed, c)
+			}
+		}
+	}
+	return changed, deleted, s.seq, tooOld
+}
+
+// GC permanently removes tombstones older than retention (nil selects
+// defaultTombstoneRetention), recording the highest purged Rev as the new GC
+// watermark so ChangedSince can detect stale cursors.
+func (s *Store) GC(retention time.Duration) error {
+	if retention <= 0 {
+		retention = defaultTombstoneRetention
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-retention)
+	kept := make([]Contact, 0, len(s.contacts))
+	changed := false
+	for _, c := range s.contacts {
+		if !c.Deleted {
+			kept = append(kept, c)
+			continue
+		}
+		updatedAt, err := time.Parse(time.RFC3339, c.UpdatedAt)
+		if err == nil && updatedAt.Before(cutoff) {
+			if c.Rev > s.gcHighWaterRev {
+				s.gcHighWaterRev = c.Rev
+			}
+			changed = true
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if !changed {
+		return nil
+	}
+	s.contacts = kept
+	return s.persistLocked()
+}

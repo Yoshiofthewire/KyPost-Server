@@ -5,6 +5,7 @@ import "quill/dist/quill.snow.css";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
 import { AuthContext, type AuthState } from "./auth";
 import { ConfigPage } from "./pages/ConfigPage";
+import { ContactsPage } from "./pages/ContactsPage";
 import { HealthPage } from "./pages/HealthPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
@@ -22,6 +23,7 @@ const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: b
   { to: "/health", label: "System Health" },
   { to: "/config", label: "Configuration" },
   { to: "/notifications", label: "Notifications" },
+  { to: "/contacts", label: "Contacts" },
   { to: "/tuning", label: "Prompt Tuning" },
   { to: "/users", label: "Manage Users", adminOnly: true },
   { to: "/logs", label: "System Logs", adminOnly: true }
@@ -782,6 +784,7 @@ export function App() {
           <Route path="/health" element={protect(<HealthPage />)} />
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/notifications" element={protect(<NotificationsPage />)} />
+          <Route path="/contacts" element={protect(<ContactsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
           <Route path="/users" element={protect(<UsersPage />, true)} />
           <Route path="/logs" element={protect(<LogsPage />, true)} />

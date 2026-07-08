@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,12 +10,24 @@ import (
 	"strings"
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
+	"llama-lab/backend/internal/contacts"
+	"llama-lab/backend/internal/mailcache"
 	"llama-lab/backend/internal/state"
 )
 
 // errIMAPNotConfigured is returned when a caller has not stored IMAP
 // credentials yet; handlers translate it into a 400 with a clear message.
 var errIMAPNotConfigured = errors.New("imap configuration is required")
+
+// errMailUnauthorized and errMailPairingNotConfigured are the two failure
+// modes withMailAuth distinguishes: a bad/missing credential (401) versus a
+// mobile-shaped request (sub+hash supplied) hitting a server that has no
+// PAIRING_SECRET set (503) — mirroring handleContactsSync's precedent
+// without misreporting 503 for an ordinary unauthenticated web request.
+var (
+	errMailUnauthorized         = errors.New("unauthorized")
+	errMailPairingNotConfigured = errors.New("pairing is not configured")
+)
 
 func (s *Server) userConfigDir(userID string) string {
 	return filepath.Join(s.configDir, "users", userID)
@@ -34,6 +47,13 @@ func (s *Server) userTuningPath(userID string) string {
 
 func (s *Server) userSettingsPath(userID string) string {
 	return filepath.Join(s.userConfigDir(userID), "config.yaml")
+}
+
+// userCardDAVAuthPath is where the user's app-specific CardDAV password hash
+// is stored — separate from imap-config.json since it's a plain scrypt hash
+// (not reversible credentials), so it needs no encryption-at-rest key.
+func (s *Server) userCardDAVAuthPath(userID string) string {
+	return filepath.Join(s.userConfigDir(userID), "carddav-auth.json")
 }
 
 func (s *Server) userStore(userID string) (*state.Store, error) {
@@ -58,6 +78,55 @@ func (s *Server) storeFor(r *http.Request) (*state.Store, error) {
 		return nil, errors.New("no auth context on request")
 	}
 	return s.userStore(ac.UserID)
+}
+
+func (s *Server) userContactsStore(userID string) (*contacts.Store, error) {
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	if st, ok := s.userContacts[userID]; ok {
+		return st, nil
+	}
+	st, err := contacts.New(s.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	s.userContacts[userID] = st
+	return st, nil
+}
+
+// contactsFor resolves the calling user's contacts store from the request's
+// AuthContext (requires the handler to be wrapped in withAuth).
+func (s *Server) contactsFor(r *http.Request) (*contacts.Store, error) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		return nil, errors.New("no auth context on request")
+	}
+	return s.userContactsStore(ac.UserID)
+}
+
+func (s *Server) userMailCacheStore(userID string) (*mailcache.Store, error) {
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	if st, ok := s.userMailCache[userID]; ok {
+		return st, nil
+	}
+	st, err := mailcache.New(s.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	s.userMailCache[userID] = st
+	return st, nil
+}
+
+// mailCacheFor resolves the calling user's mail cache store from the
+// request's AuthContext (requires the handler to be wrapped in
+// withMailAuth, as handleInbox already is).
+func (s *Server) mailCacheFor(r *http.Request) (*mailcache.Store, error) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		return nil, errors.New("no auth context on request")
+	}
+	return s.userMailCacheStore(ac.UserID)
 }
 
 type serverMailEntry struct {
@@ -92,6 +161,35 @@ func (s *Server) mailFor(r *http.Request) (imapadapter.Client, error) {
 		return nil, errors.New("no auth context on request")
 	}
 	return s.userMailClient(ac.UserID)
+}
+
+// resolveMailAuthContext authenticates a mail request either by session
+// cookie (web) or by subscriberId/subscriberHash query params (mobile,
+// reusing the same pairing trust boundary as native push and contacts
+// sync — see contacts_handlers.go's handleContactsSync). Mobile never sees
+// or sets raw IMAP/SMTP credentials; it only acts on an account already
+// configured through the web UI.
+func (s *Server) resolveMailAuthContext(r *http.Request) (AuthContext, error) {
+	if ac, ok := s.currentUser(r); ok {
+		return ac, nil
+	}
+	subscriberID := strings.TrimSpace(r.URL.Query().Get("sub"))
+	subscriberHash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("hash")))
+	if subscriberID == "" || subscriberHash == "" {
+		return AuthContext{}, errMailUnauthorized
+	}
+	if s.pairingSecret == "" {
+		return AuthContext{}, errMailPairingNotConfigured
+	}
+	expectedHash := s.pairingSubscriberHash(subscriberID)
+	if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
+		return AuthContext{}, errMailUnauthorized
+	}
+	ownerID, ok := s.lookupUserBySubscriber(subscriberID)
+	if !ok {
+		return AuthContext{}, errMailUnauthorized
+	}
+	return AuthContext{UserID: ownerID}, nil
 }
 
 func (s *Server) invalidateUserMail(userID string) {
