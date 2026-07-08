@@ -96,6 +96,12 @@ export function revokeDAVPassword(): Promise<{ ok: boolean }> {
   return deleteJSON<{ ok: boolean }>("/api/contacts/dav-password");
 }
 
+export type DiscoveredAddressBook = {
+  path: string;
+  name?: string;
+  contactCount: number;
+};
+
 export type CardDAVClientConfig = {
   configured: boolean;
   serverUrl?: string;
@@ -106,12 +112,14 @@ export type CardDAVClientConfig = {
   lastSyncError?: string;
   lastSyncImported?: number;
   lastSyncUpdated?: number;
+  discoveredAddressBooks?: DiscoveredAddressBook[];
 };
 
 export type CardDAVClientInput = {
   serverUrl: string;
   username: string;
   password: string;
+  addressBookPath?: string;
 };
 
 export function getCardDAVClientConfig(): Promise<CardDAVClientConfig> {
@@ -133,6 +141,7 @@ export type CardDAVClientSyncResult = {
   addressBookPath?: string;
   syncedAt?: string;
   error?: string;
+  discoveredAddressBooks?: DiscoveredAddressBook[];
 };
 
 export function syncCardDAVClient(): Promise<CardDAVClientSyncResult> {

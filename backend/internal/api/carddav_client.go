@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -34,10 +35,21 @@ type carddavClientConfigPayload struct {
 	AddressBookPath string `json:"addressBookPath,omitempty"`
 	UpdatedAt       string `json:"updatedAt,omitempty"`
 
-	LastSyncedAt     string `json:"lastSyncedAt,omitempty"`
-	LastSyncError    string `json:"lastSyncError,omitempty"`
-	LastSyncImported int    `json:"lastSyncImported,omitempty"`
-	LastSyncUpdated  int    `json:"lastSyncUpdated,omitempty"`
+	LastSyncedAt           string                  `json:"lastSyncedAt,omitempty"`
+	LastSyncError          string                  `json:"lastSyncError,omitempty"`
+	LastSyncImported       int                     `json:"lastSyncImported,omitempty"`
+	LastSyncUpdated        int                     `json:"lastSyncUpdated,omitempty"`
+	DiscoveredAddressBooks []discoveredAddressBook `json:"discoveredAddressBooks,omitempty"`
+}
+
+// discoveredAddressBook is one address book collection found on the remote
+// server during auto-discovery, reported back to the caller so they can see
+// what was found and, if the auto-picked one is wrong, paste a different
+// path into AddressBookPath to pin it explicitly.
+type discoveredAddressBook struct {
+	Path         string `json:"path"`
+	Name         string `json:"name,omitempty"`
+	ContactCount int    `json:"contactCount"`
 }
 
 func normalizeCardDAVClientPayload(p carddavClientConfigPayload) carddavClientConfigPayload {
@@ -128,15 +140,16 @@ func (s *Server) handleContactsCardDAVClientConfig(w http.ResponseWriter, r *htt
 
 func cardDAVClientStatusResponse(payload carddavClientConfigPayload) map[string]any {
 	return map[string]any{
-		"configured":       true,
-		"serverUrl":        payload.ServerURL,
-		"username":         payload.Username,
-		"addressBookPath":  payload.AddressBookPath,
-		"updatedAt":        payload.UpdatedAt,
-		"lastSyncedAt":     payload.LastSyncedAt,
-		"lastSyncError":    payload.LastSyncError,
-		"lastSyncImported": payload.LastSyncImported,
-		"lastSyncUpdated":  payload.LastSyncUpdated,
+		"configured":             true,
+		"serverUrl":              payload.ServerURL,
+		"username":               payload.Username,
+		"addressBookPath":        payload.AddressBookPath,
+		"updatedAt":              payload.UpdatedAt,
+		"lastSyncedAt":           payload.LastSyncedAt,
+		"lastSyncError":          payload.LastSyncError,
+		"lastSyncImported":       payload.LastSyncImported,
+		"lastSyncUpdated":        payload.LastSyncUpdated,
+		"discoveredAddressBooks": payload.DiscoveredAddressBooks,
 	}
 }
 
@@ -174,9 +187,12 @@ func (s *Server) handleContactsCardDAVClientSync(w http.ResponseWriter, r *http.
 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
-	imported, updated, addressBookPath, syncErr := syncCardDAVClient(ctx, payload, store)
+	imported, updated, addressBookPath, discovered, syncErr := syncCardDAVClient(ctx, payload, store)
 
 	payload.LastSyncedAt = time.Now().UTC().Format(time.RFC3339)
+	if discovered != nil {
+		payload.DiscoveredAddressBooks = discovered
+	}
 	if syncErr != nil {
 		payload.LastSyncError = syncErr.Error()
 	} else {
@@ -192,61 +208,218 @@ func (s *Server) handleContactsCardDAVClientSync(w http.ResponseWriter, r *http.
 	_ = writeCardDAVClientConfigPayload(cfgPath, s.imapConfigKeyPath, payload)
 
 	if syncErr != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": syncErr.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": syncErr.Error(), "discoveredAddressBooks": discovered})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":              true,
-		"imported":        imported,
-		"updated":         updated,
-		"addressBookPath": addressBookPath,
-		"syncedAt":        payload.LastSyncedAt,
+		"ok":                     true,
+		"imported":               imported,
+		"updated":                updated,
+		"addressBookPath":        addressBookPath,
+		"syncedAt":               payload.LastSyncedAt,
+		"discoveredAddressBooks": discovered,
 	})
 }
 
+// allPropsAddressBookQuery requests every property/field of every card in an
+// address book — v1 does no server-side filtering (see contactFromVCard's
+// caller and backend/internal/contacts/AGENTS.md for the matching policy on
+// our own DAV server side).
+func allPropsAddressBookQuery() *carddav.AddressBookQuery {
+	return &carddav.AddressBookQuery{DataRequest: carddav.AddressDataRequest{AllProp: true}}
+}
+
+// cardDAVHostRoot returns the bare scheme+host root ("https://host/") of a
+// CardDAV server URL, discarding any path component. Used as a client base
+// for resolving address-book-relative paths (which are always absolute on
+// the host, regardless of which discovery candidate found them).
+func cardDAVHostRoot(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	root := url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/"}
+	return root.String(), nil
+}
+
+// cardDAVURLPath returns just the path component of a CardDAV server URL,
+// for use as a resource path relative to a client rooted at the same host.
+func cardDAVURLPath(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if u.Path == "" {
+		return "/", nil
+	}
+	return u.Path, nil
+}
+
+// cardDAVDiscoveryCandidates returns endpoints to try discovery against, from
+// most to least specific: the URL as configured, then each ancestor path one
+// segment at a time, down to the bare scheme+host root.
+//
+// This matters because CardDAV discovery (current-user-principal) only
+// resolves correctly when run against a server's actual DAV mount point —
+// and a user-supplied URL is often a deeper, account-specific path (e.g. an
+// address someone copied while already logged into their account, like
+// ".../carddav/33") that isn't itself the mount point (which might be
+// ".../carddav/", one level up). Walking up one segment at a time finds that
+// mount point without assuming it's the bare domain root, which many
+// providers don't use for CardDAV at all.
+func cardDAVDiscoveryCandidates(rawURL string) ([]string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []string{u.String()}
+
+	p := u.Path
+	for {
+		trimmed := strings.TrimRight(p, "/")
+		idx := strings.LastIndex(trimmed, "/")
+		if idx < 0 {
+			break
+		}
+		p = trimmed[:idx+1]
+		next := *u
+		next.Path = p
+		candidates = append(candidates, next.String())
+		if p == "/" {
+			break
+		}
+	}
+	if p != "/" {
+		root := *u
+		root.Path = "/"
+		candidates = append(candidates, root.String())
+	}
+	return candidates, nil
+}
+
+// discoverAddressBooksFrom runs the full RFC 6352 discovery chain (current
+// user principal -> address book home set -> address books) starting at
+// endpoint.
+func discoverAddressBooksFrom(ctx context.Context, httpClient webdav.HTTPClient, endpoint string) ([]carddav.AddressBook, error) {
+	client, err := carddav.NewClient(httpClient, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	principal, err := client.FindCurrentUserPrincipal(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("discover current user principal: %w", err)
+	}
+	homeSet, err := client.FindAddressBookHomeSet(ctx, principal)
+	if err != nil {
+		return nil, fmt.Errorf("discover address book home set: %w", err)
+	}
+	books, err := client.FindAddressBooks(ctx, homeSet)
+	if err != nil {
+		return nil, fmt.Errorf("discover address books: %w", err)
+	}
+	if len(books) == 0 {
+		return nil, errors.New("no address books found on remote server")
+	}
+	return books, nil
+}
+
 // syncCardDAVClient connects to the external CardDAV server described by cfg,
-// discovers its address book (unless AddressBookPath is already cached from
-// a previous sync), and upserts every card it finds into store.
-func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store) (imported, updated int, addressBookPath string, err error) {
+// resolves its address book, and upserts every card it finds into store.
+//
+// When cfg.AddressBookPath is already cached from a previous sync (or was
+// explicitly pinned by the caller), that exact collection is queried
+// directly. Otherwise it discovers the account's address books:
+//
+//  1. Try discovery starting at the exact URL the caller configured.
+//  2. If that fails, retry from the bare scheme+host root — some servers
+//     only resolve current-user-principal correctly at their DAV root, not
+//     at an arbitrary account-shaped path a user may have copied from
+//     elsewhere (which can silently resolve to the wrong account/collection
+//     rather than erroring).
+//  3. If discovery fails outright, fall back to treating the configured URL
+//     itself as the exact address book collection (some providers document
+//     that directly instead of a discovery root).
+//
+// When discovery succeeds, every returned address book is probed — a single
+// account commonly has more than one collection (a personal book alongside
+// shared/collected/GAL ones) — and the first one that actually contains
+// contacts is used rather than trusting the server's ordering. discovered
+// reports every collection found (with its contact count) so the caller can
+// see what was found and pin a specific path if the auto-pick is still
+// wrong.
+func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store) (imported, updated int, addressBookPath string, discovered []discoveredAddressBook, err error) {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	authed := webdav.HTTPClientWithBasicAuth(httpClient, cfg.Username, cfg.Password)
-	client, err := carddav.NewClient(authed, cfg.ServerURL)
+	hostRoot, err := cardDAVHostRoot(cfg.ServerURL)
 	if err != nil {
-		return 0, 0, "", fmt.Errorf("connect to carddav server: %w", err)
+		return 0, 0, "", nil, fmt.Errorf("parse server url: %w", err)
+	}
+	queryClient, err := carddav.NewClient(authed, hostRoot)
+	if err != nil {
+		return 0, 0, "", nil, fmt.Errorf("connect to carddav server: %w", err)
 	}
 
+	var objects []carddav.AddressObject
 	addressBookPath = cfg.AddressBookPath
-	if addressBookPath == "" {
-		principal, err := client.FindCurrentUserPrincipal(ctx)
+	if addressBookPath != "" {
+		objects, err = queryClient.QueryAddressBook(ctx, addressBookPath, allPropsAddressBookQuery())
 		if err != nil {
-			return 0, 0, "", fmt.Errorf("discover current user principal: %w", err)
+			return 0, 0, addressBookPath, nil, fmt.Errorf("fetch address book contents: %w", err)
 		}
-		homeSet, err := client.FindAddressBookHomeSet(ctx, principal)
-		if err != nil {
-			return 0, 0, "", fmt.Errorf("discover address book home set: %w", err)
+	} else {
+		candidates, cerr := cardDAVDiscoveryCandidates(cfg.ServerURL)
+		if cerr != nil {
+			return 0, 0, "", nil, fmt.Errorf("parse server url: %w", cerr)
 		}
-		books, err := client.FindAddressBooks(ctx, homeSet)
-		if err != nil {
-			return 0, 0, "", fmt.Errorf("discover address books: %w", err)
+		var books []carddav.AddressBook
+		var discoverErr error
+		for _, candidate := range candidates {
+			books, discoverErr = discoverAddressBooksFrom(ctx, authed, candidate)
+			if discoverErr == nil {
+				break
+			}
 		}
-		if len(books) == 0 {
-			return 0, 0, "", errors.New("no address books found on remote server")
+		if discoverErr != nil {
+			// Last resort: maybe the configured URL already *is* the exact
+			// address book collection.
+			directPath, perr := cardDAVURLPath(cfg.ServerURL)
+			if perr != nil {
+				return 0, 0, "", nil, fmt.Errorf("discover address books: %w", discoverErr)
+			}
+			objs, qerr := queryClient.QueryAddressBook(ctx, directPath, allPropsAddressBookQuery())
+			if qerr != nil {
+				return 0, 0, "", nil, fmt.Errorf("discover address books: %w", discoverErr)
+			}
+			addressBookPath = directPath
+			objects = objs
+		} else {
+			discovered = make([]discoveredAddressBook, len(books))
+			perBookObjects := make([][]carddav.AddressObject, len(books))
+			chosen := 0
+			foundNonEmpty := false
+			for i, b := range books {
+				objs, qerr := queryClient.QueryAddressBook(ctx, b.Path, allPropsAddressBookQuery())
+				count := 0
+				if qerr == nil {
+					count = len(objs)
+					perBookObjects[i] = objs
+				}
+				discovered[i] = discoveredAddressBook{Path: b.Path, Name: b.Name, ContactCount: count}
+				if qerr == nil && count > 0 && !foundNonEmpty {
+					chosen = i
+					foundNonEmpty = true
+				}
+			}
+			addressBookPath = books[chosen].Path
+			objects = perBookObjects[chosen]
 		}
-		addressBookPath = books[0].Path
-	}
-
-	objects, err := client.QueryAddressBook(ctx, addressBookPath, &carddav.AddressBookQuery{
-		DataRequest: carddav.AddressDataRequest{AllProp: true},
-	})
-	if err != nil {
-		return 0, 0, addressBookPath, fmt.Errorf("fetch address book contents: %w", err)
 	}
 
 	for _, obj := range objects {
 		uid := remoteContactUID(obj)
 		_, existed := store.Get(uid)
 		if _, err := store.Upsert(contactFromVCard(uid, obj.Card)); err != nil {
-			return imported, updated, addressBookPath, fmt.Errorf("save contact %s: %w", uid, err)
+			return imported, updated, addressBookPath, discovered, fmt.Errorf("save contact %s: %w", uid, err)
 		}
 		if existed {
 			updated++
@@ -254,7 +427,7 @@ func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, stor
 			imported++
 		}
 	}
-	return imported, updated, addressBookPath, nil
+	return imported, updated, addressBookPath, discovered, nil
 }
 
 // remoteContactUID derives the local store UID for a card pulled from an

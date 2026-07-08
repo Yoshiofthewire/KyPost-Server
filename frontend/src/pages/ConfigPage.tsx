@@ -130,7 +130,7 @@ export function ConfigPage() {
   const davURL = auth.username ? `${window.location.origin}/dav/${encodeURIComponent(auth.username)}/contacts/` : "";
 
   const [clientConfig, setClientConfig] = useState<CardDAVClientConfig | null>(null);
-  const [clientForm, setClientForm] = useState({ serverUrl: "", username: "", password: "" });
+  const [clientForm, setClientForm] = useState({ serverUrl: "", username: "", password: "", addressBookPath: "" });
   const [clientBusy, setClientBusy] = useState(false);
   const [clientSyncBusy, setClientSyncBusy] = useState(false);
   const [clientMessage, setClientMessage] = useState("");
@@ -189,7 +189,8 @@ export function ConfigPage() {
       setClientForm((prev) => ({
         serverUrl: status.serverUrl ?? prev.serverUrl,
         username: status.username ?? prev.username,
-        password: ""
+        password: "",
+        addressBookPath: status.addressBookPath ?? prev.addressBookPath
       }));
     }
   }
@@ -406,7 +407,8 @@ export function ConfigPage() {
       await saveCardDAVClientConfig({
         serverUrl: clientForm.serverUrl.trim(),
         username: clientForm.username.trim(),
-        password: clientForm.password.trim()
+        password: clientForm.password.trim(),
+        addressBookPath: clientForm.addressBookPath.trim()
       });
       setClientMessage("CardDAV client configuration saved.");
       await refreshCardDAVClientConfig();
@@ -415,6 +417,11 @@ export function ConfigPage() {
     } finally {
       setClientBusy(false);
     }
+  }
+
+  function useDiscoveredAddressBook(path: string) {
+    setClientForm((prev) => ({ ...prev, addressBookPath: path }));
+    setClientMessage(`Address book pinned to ${path} — click "Save CardDAV Client" then "Sync Now" to apply.`);
   }
 
   async function deleteCardDAVClient() {
@@ -426,7 +433,7 @@ export function ConfigPage() {
     try {
       await deleteCardDAVClientConfig();
       setClientConfig({ configured: false });
-      setClientForm({ serverUrl: "", username: "", password: "" });
+      setClientForm({ serverUrl: "", username: "", password: "", addressBookPath: "" });
       setClientMessage("CardDAV client configuration removed.");
     } catch (error: unknown) {
       setClientMessage(`Failed to remove CardDAV client configuration: ${toErrorMessage(error, "unknown error")}`);
@@ -722,7 +729,21 @@ export function ConfigPage() {
                 placeholder="Required when saving changes"
               />
             </label>
+            <label>
+              <div>Address Book Path (optional override)</div>
+              <input
+                value={clientForm.addressBookPath}
+                onChange={(event) => setClientForm((prev) => ({ ...prev, addressBookPath: event.target.value }))}
+                placeholder="Leave blank to auto-discover"
+              />
+            </label>
           </div>
+          <p className="config-muted">
+            By default the server is auto-discovered, and if it reports more than one address book (common on
+            providers like mailbox.org, Nextcloud, or Baikal — a personal book alongside shared/collected ones), the
+            first one that actually contains contacts is used. If it still picks the wrong one, copy a path from the
+            list below into the override field, save, and sync again.
+          </p>
           <div className="config-actions">
             <button type="button" onClick={() => void saveCardDAVClient()} disabled={clientBusy}>
               {clientBusy ? "Saving..." : "Save CardDAV Client"}
@@ -748,6 +769,30 @@ export function ConfigPage() {
                 <p>Last Sync Error: {clientConfig.lastSyncError}</p>
               ) : clientConfig.lastSyncedAt ? (
                 <p>Last Sync Result: {clientConfig.lastSyncImported ?? 0} imported, {clientConfig.lastSyncUpdated ?? 0} updated</p>
+              ) : null}
+              {clientConfig.discoveredAddressBooks && clientConfig.discoveredAddressBooks.length > 0 ? (
+                <div style={{ marginTop: 10 }}>
+                  <p>Address books found on the server:</p>
+                  <div className="config-grid">
+                    {clientConfig.discoveredAddressBooks.map((book) => (
+                      <div
+                        key={book.path}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
+                      >
+                        <span>
+                          {book.path === clientConfig.addressBookPath ? <strong>{book.path}</strong> : book.path}
+                          {book.name ? ` (${book.name})` : ""} — {book.contactCount} contact
+                          {book.contactCount === 1 ? "" : "s"}
+                        </span>
+                        {book.path !== clientForm.addressBookPath ? (
+                          <button type="button" onClick={() => useDiscoveredAddressBook(book.path)}>
+                            Use This
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               ) : null}
             </div>
           ) : null}

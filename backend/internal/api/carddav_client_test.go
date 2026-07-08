@@ -1,0 +1,173 @@
+package api
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path"
+	"testing"
+
+	"llama-lab/backend/internal/contacts"
+
+	"github.com/emersion/go-vcard"
+	"github.com/emersion/go-webdav"
+	"github.com/emersion/go-webdav/carddav"
+)
+
+// fakeMultiBookBackend serves two address books for a single fixed user: an
+// empty one (listed first, mirroring servers like mailbox.org/SOGo that put
+// a "Collected addresses" style book ahead of the personal one) and a second
+// one holding the real contact. It exists to prove syncCardDAVClient probes
+// every discovered book instead of trusting the server's ordering.
+type fakeMultiBookBackend struct {
+	prefix string
+}
+
+const (
+	// fakeUsername mirrors the reported bug's shape: a numeric account
+	// segment under the real CardDAV mount ("/carddav/"), not a nicely
+	// human-readable one, and not itself the mount point.
+	fakeUsername  = "33"
+	fakeEmptyPath = "/carddav/33/contacts/empty/"
+	fakeMainPath  = "/carddav/33/contacts/main/"
+	fakeCardUID   = "remote-card-1"
+)
+
+func (b *fakeMultiBookBackend) CurrentUserPrincipal(ctx context.Context) (string, error) {
+	return path.Join(b.prefix, fakeUsername) + "/", nil
+}
+
+func (b *fakeMultiBookBackend) AddressBookHomeSetPath(ctx context.Context) (string, error) {
+	return path.Join(b.prefix, fakeUsername, "contacts") + "/", nil
+}
+
+func (b *fakeMultiBookBackend) ListAddressBooks(ctx context.Context) ([]carddav.AddressBook, error) {
+	return []carddav.AddressBook{
+		{Path: fakeEmptyPath, Name: "Collected"},
+		{Path: fakeMainPath, Name: "Contacts"},
+	}, nil
+}
+
+func (b *fakeMultiBookBackend) GetAddressBook(ctx context.Context, p string) (*carddav.AddressBook, error) {
+	books, _ := b.ListAddressBooks(ctx)
+	for _, ab := range books {
+		if ab.Path == p {
+			return &ab, nil
+		}
+	}
+	return nil, webdav.NewHTTPError(http.StatusNotFound, nil)
+}
+
+func (b *fakeMultiBookBackend) CreateAddressBook(ctx context.Context, _ *carddav.AddressBook) error {
+	return webdav.NewHTTPError(http.StatusForbidden, nil)
+}
+
+func (b *fakeMultiBookBackend) DeleteAddressBook(ctx context.Context, _ string) error {
+	return webdav.NewHTTPError(http.StatusForbidden, nil)
+}
+
+func (b *fakeMultiBookBackend) mainCard() vcard.Card {
+	card := make(vcard.Card)
+	card.SetValue(vcard.FieldVersion, "4.0")
+	card.SetValue(vcard.FieldUID, fakeCardUID)
+	card.SetValue(vcard.FieldFormattedName, "Remote Person")
+	card.Add(vcard.FieldEmail, &vcard.Field{Value: "remote@example.com"})
+	return card
+}
+
+func (b *fakeMultiBookBackend) ListAddressObjects(ctx context.Context, p string, _ *carddav.AddressDataRequest) ([]carddav.AddressObject, error) {
+	if p != fakeMainPath {
+		return nil, nil
+	}
+	return []carddav.AddressObject{{
+		Path: fakeMainPath + fakeCardUID + ".vcf",
+		ETag: "rev-1",
+		Card: b.mainCard(),
+	}}, nil
+}
+
+func (b *fakeMultiBookBackend) QueryAddressObjects(ctx context.Context, p string, query *carddav.AddressBookQuery) ([]carddav.AddressObject, error) {
+	return b.ListAddressObjects(ctx, p, &query.DataRequest)
+}
+
+func (b *fakeMultiBookBackend) GetAddressObject(ctx context.Context, p string, _ *carddav.AddressDataRequest) (*carddav.AddressObject, error) {
+	if p == fakeMainPath+fakeCardUID+".vcf" {
+		return &carddav.AddressObject{Path: p, ETag: "rev-1", Card: b.mainCard()}, nil
+	}
+	return nil, webdav.NewHTTPError(http.StatusNotFound, nil)
+}
+
+func (b *fakeMultiBookBackend) PutAddressObject(ctx context.Context, p string, card vcard.Card, opts *carddav.PutAddressObjectOptions) (*carddav.AddressObject, error) {
+	return nil, webdav.NewHTTPError(http.StatusForbidden, nil)
+}
+
+func (b *fakeMultiBookBackend) DeleteAddressObject(ctx context.Context, p string) error {
+	return webdav.NewHTTPError(http.StatusForbidden, nil)
+}
+
+// TestSyncCardDAVClientProbesEveryDiscoveredBook guards against two bugs at
+// once, using routing that mirrors our real server (and, per the bug report
+// against mailbox.org, real third-party ones too): CardDAV is mounted under
+// a path prefix ("/carddav/"), not served at the bare domain root, and the
+// configured URL is a deeper, account-specific path under that prefix
+// ("/carddav/33") rather than the prefix itself.
+//
+//  1. Discovery must walk up from the configured URL to find the actual
+//     mount point ("/carddav/") rather than either trusting the exact
+//     configured path (which RFC 6352 current-user-principal discovery
+//     rejects here) or jumping straight to the bare domain root (which
+//     isn't the CardDAV mount and would wrongly fall through to treating
+//     the configured URL as if it were itself an address book).
+//  2. Once discovered, the server lists an empty collection before the one
+//     holding the actual contact (a real-world ordering seen on servers
+//     like mailbox.org/SOGo), and the sync must still end up importing the
+//     contact from the second one instead of blindly using the first.
+func TestSyncCardDAVClientProbesEveryDiscoveredBook(t *testing.T) {
+	backend := &fakeMultiBookBackend{prefix: "/carddav"}
+	handler := &carddav.Handler{Backend: backend, Prefix: "/carddav"}
+
+	mux := http.NewServeMux()
+	mux.Handle("/carddav/", handler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	store, err := contacts.New(dir)
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+
+	cfg := carddavClientConfigPayload{
+		ServerURL: srv.URL + "/carddav/" + fakeUsername,
+		Username:  fakeUsername,
+		Password:  "irrelevant",
+	}
+
+	imported, updated, addressBookPath, discovered, err := syncCardDAVClient(context.Background(), cfg, store)
+	if err != nil {
+		t.Fatalf("syncCardDAVClient returned error: %v", err)
+	}
+	if addressBookPath != fakeMainPath {
+		t.Errorf("addressBookPath = %q, want %q (should skip the empty book)", addressBookPath, fakeMainPath)
+	}
+	if imported != 1 || updated != 0 {
+		t.Errorf("imported=%d updated=%d, want imported=1 updated=0", imported, updated)
+	}
+	if len(discovered) != 2 {
+		t.Fatalf("discovered = %d books, want 2 (discovery should have succeeded, not fallen through to the direct-query last resort)", len(discovered))
+	}
+	if discovered[0].ContactCount != 0 || discovered[1].ContactCount != 1 {
+		t.Errorf("discovered counts = %+v, want [0, 1]", discovered)
+	}
+
+	list := store.List()
+	if len(list) != 1 || list[0].FormattedName != "Remote Person" {
+		t.Fatalf("store.List() = %+v, want one contact named Remote Person", list)
+	}
+	if list[0].UID != "carddav-import-"+fakeCardUID {
+		t.Errorf("UID = %q, want namespaced remote UID", list[0].UID)
+	}
+}
