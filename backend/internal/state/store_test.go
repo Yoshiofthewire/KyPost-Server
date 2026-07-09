@@ -183,3 +183,33 @@ func TestSetCheckpointDoesNotWipeNativeDevices(t *testing.T) {
 		t.Fatalf("deviceId = %q, want %q", devices[0].DeviceID, device.DeviceID)
 	}
 }
+
+func TestNativeDeviceMFAApproverToggle(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.UpsertNativeDevice(NativeDevice{DeviceID: "dev-1", Platform: "android", PushToken: "tok-1", UserID: "user-1", MFAApprover: true}); err != nil {
+		t.Fatalf("UpsertNativeDevice: %v", err)
+	}
+
+	got, ok := s.GetNativeDevice("dev-1")
+	if !ok || !got.MFAApprover || got.UserID != "user-1" {
+		t.Fatalf("GetNativeDevice = %+v ok=%v", got, ok)
+	}
+
+	updated, err := s.SetNativeDeviceMFAApprover("dev-1", false)
+	if err != nil || !updated {
+		t.Fatalf("SetNativeDeviceMFAApprover: updated=%v err=%v", updated, err)
+	}
+	got, _ = s.GetNativeDevice("dev-1")
+	if got.MFAApprover {
+		t.Fatalf("expected approver cleared, got %+v", got)
+	}
+
+	missing, err := s.SetNativeDeviceMFAApprover("nope", true)
+	if err != nil || missing {
+		t.Fatalf("expected updated=false for unknown device, got updated=%v err=%v", missing, err)
+	}
+}

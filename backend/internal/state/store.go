@@ -74,6 +74,14 @@ type NativeDevice struct {
 	UserAgent    string `json:"userAgent,omitempty"`
 	RegisteredAt string `json:"registeredAt"`
 	UpdatedAt    string `json:"updatedAt"`
+	// UserID is a self-describing/defense-in-depth stamp of the owning user;
+	// per-user isolation is already structural via the state directory layout.
+	UserID string `json:"userId,omitempty"`
+	// MFAApprover reports whether this device may approve/deny push-2FA login
+	// challenges. New pairings set it true. Devices paired before this field
+	// existed decode as false and are handled by the graceful-default rule at
+	// challenge-fanout time (see api.approverDevices).
+	MFAApprover bool `json:"mfaApprover"`
 }
 
 // PullNotification is one queued notification awaiting an App Pull fetch. Seq
@@ -586,6 +594,46 @@ func (s *Store) RemoveNativeDevice(deviceID string) (bool, error) {
 			return false, err
 		}
 		return true, nil
+	}
+	return false, nil
+}
+
+// GetNativeDevice returns a single device by ID, reading through to disk.
+func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshNativeDevicesFromDiskLocked()
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return NativeDevice{}, false
+	}
+	for _, d := range s.nativeDevices {
+		if d.DeviceID == deviceID {
+			return d, true
+		}
+	}
+	return NativeDevice{}, false
+}
+
+// SetNativeDeviceMFAApprover flips a device's MFAApprover flag. It returns
+// updated=false (and no error) when no device matches deviceID.
+func (s *Store) SetNativeDeviceMFAApprover(deviceID string, approver bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return false, err
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return false, nil
+	}
+	for i := range s.nativeDevices {
+		if s.nativeDevices[i].DeviceID == deviceID {
+			s.nativeDevices[i].MFAApprover = approver
+			s.nativeDevices[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.nativeDevicesDirty = true
+			return true, s.persistLocked()
+		}
 	}
 	return false, nil
 }
