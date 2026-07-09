@@ -11,6 +11,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { ReadPage } from "./pages/ReadPage";
+import { SecurityPage } from "./pages/SecurityPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
 import agplLicenseText from "./agpl-3.0.txt?raw";
@@ -23,6 +24,7 @@ const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: b
   { to: "/health", label: "System Health" },
   { to: "/config", label: "Configuration" },
   { to: "/notifications", label: "Notifications" },
+  { to: "/security", label: "Security" },
   { to: "/tuning", label: "Prompt Tuning" },
   { to: "/users", label: "Manage Users", adminOnly: true },
   { to: "/logs", label: "System Logs", adminOnly: true }
@@ -790,6 +792,7 @@ export function App() {
           <Route path="/health" element={protect(<HealthPage />)} />
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/notifications" element={protect(<NotificationsPage />)} />
+          <Route path="/security" element={protect(<SecurityPage />)} />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
           <Route path="/users" element={protect(<UsersPage />, true)} />
