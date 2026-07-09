@@ -26,6 +26,9 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
   const [needsPasswordChange, setNeedsPasswordChange] = useState(false);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mfaChallengeId, setMfaChallengeId] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
   const passwordMode = mode === "password";
 
   useEffect(() => {
@@ -55,25 +58,59 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       });
   }, []);
 
+  function finishSignIn(mustChangePassword: boolean) {
+    if (mustChangePassword) {
+      setNeedsPasswordChange(true);
+      setOldPassword(password);
+      setStatus("Password change required before using the app.");
+    } else {
+      navigate("/read", { replace: true });
+    }
+  }
+
   async function submitLogin(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setStatus("");
     try {
-      const res = await postJSON<{ ok: boolean; mustChangePassword?: boolean }>("/api/auth/login", {
-        username,
-        password
-      });
-      await onAuthChanged();
-      if (res.mustChangePassword) {
-        setNeedsPasswordChange(true);
-        setOldPassword(password);
-        setStatus("Password change required before using the app.");
-      } else {
-        navigate("/read", { replace: true });
+      const res = await postJSON<{
+        ok?: boolean;
+        mustChangePassword?: boolean;
+        mfaRequired?: boolean;
+        challengeId?: string;
+      }>("/api/auth/login", { username, password });
+      if (res.mfaRequired && res.challengeId) {
+        setMfaChallengeId(res.challengeId);
+        setMfaCode("");
+        setUseRecoveryCode(false);
+        setStatus("");
+        return;
       }
+      await onAuthChanged();
+      finishSignIn(Boolean(res.mustChangePassword));
     } catch {
       setStatus("Login failed. Check username and password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitMfa(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setStatus("");
+    const endpoint = useRecoveryCode ? "/api/auth/mfa/recovery-code" : "/api/auth/mfa/totp";
+    try {
+      const res = await postJSON<{ ok: boolean; mustChangePassword?: boolean }>(endpoint, {
+        challengeId: mfaChallengeId,
+        code: mfaCode.trim()
+      });
+      await onAuthChanged();
+      setMfaChallengeId("");
+      setMfaCode("");
+      finishSignIn(Boolean(res.mustChangePassword));
+    } catch {
+      setStatus(useRecoveryCode ? "Invalid recovery code." : "Invalid authentication code.");
     } finally {
       setBusy(false);
     }
@@ -119,7 +156,55 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       <h2>{passwordMode ? "Change Password" : "Login and Setup"}</h2>
       <p>{passwordMode ? "Update your current password." : "Use your local admin credentials to access configuration and daemon controls."}</p>
 
-      {!needsPasswordChange ? (
+      {mfaChallengeId ? (
+        <form onSubmit={submitMfa} className="auth-form">
+          <h3>Two-Factor Authentication</h3>
+          {useRecoveryCode ? (
+            <>
+              <p>Enter one of your saved recovery codes.</p>
+              <label>
+                <div>Recovery Code</div>
+                <input
+                  value={mfaCode}
+                  onChange={(e) => setMfaCode(e.target.value)}
+                  autoComplete="one-time-code"
+                  placeholder="xxxx-xxxx-xxxx"
+                  autoFocus
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <p>Enter the 6-digit code from your authenticator app.</p>
+              <label>
+                <div>Authentication Code</div>
+                <input
+                  value={mfaCode}
+                  onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="123456"
+                  autoFocus
+                />
+              </label>
+            </>
+          )}
+          <button type="submit" disabled={busy || mfaCode.trim() === ""}>
+            {busy ? "Verifying..." : "Verify"}
+          </button>
+          <button
+            type="button"
+            className="nav-link-button"
+            onClick={() => {
+              setUseRecoveryCode((v) => !v);
+              setMfaCode("");
+              setStatus("");
+            }}
+          >
+            {useRecoveryCode ? "Use authenticator code instead" : "Use a recovery code instead"}
+          </button>
+        </form>
+      ) : !needsPasswordChange ? (
         <form onSubmit={submitLogin} className="auth-form">
           <label>
             <div>Username</div>
