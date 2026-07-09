@@ -2268,6 +2268,8 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
+
+	s.mfaChallenges.Delete(ch.ID)
 	if err := s.startSession(w, u.ID); err != nil {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return

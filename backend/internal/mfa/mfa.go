@@ -146,8 +146,8 @@ func (s *Store) Delete(id string) {
 }
 
 // recoveryAlphabet has exactly 32 characters so a random byte modulo 32 is
-// unbiased. It omits visually ambiguous characters is not required here since
-// codes are copy/pasted, not transcribed by hand.
+// unbiased. It does not avoid visually ambiguous characters (e.g. i/l/o vs
+// 1/0) since codes are copy/pasted, not transcribed by hand.
 const recoveryAlphabet = "0123456789abcdefghijklmnopqrstuv"
 
 // GenerateRecoveryCodes returns n one-time recovery codes formatted
