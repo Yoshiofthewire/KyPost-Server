@@ -100,6 +100,7 @@ func newTestServer(t *testing.T) *Server {
 	srv.pairingSecret = "test-pairing-secret"
 	srv.stateDir = stateDir
 	srv.configDir = configDir
+	srv.totpSecretKeyPath = filepath.Join(configDir, "totp-secret.key")
 	return srv
 }
 
