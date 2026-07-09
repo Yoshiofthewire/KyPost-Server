@@ -134,6 +134,9 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
 	mux.HandleFunc("POST /api/auth/mfa/recovery-code", s.handleMFARecoveryCode)
+	mux.HandleFunc("POST /api/auth/mfa/push/poll", s.handlePushPoll)
+	mux.HandleFunc("POST /api/auth/mfa/push/finish", s.handlePushFinish)
+	mux.HandleFunc("POST /api/mfa/push/respond", s.handlePushRespond)
 	mux.HandleFunc("GET /api/mfa/status", s.withAuth(s.handleMFAStatus))
 	mux.HandleFunc("POST /api/mfa/totp/setup", s.withAuth(s.handleMFASetup))
 	mux.HandleFunc("POST /api/mfa/totp/confirm", s.withAuth(s.handleMFAConfirm))
@@ -2182,19 +2185,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TOTP-enabled users must clear a second factor before a session exists.
-	// No cookie is set here; the client receives a challenge id to POST to
-	// /api/auth/mfa/totp or /api/auth/mfa/recovery-code.
-	if u.TOTPEnabled {
+	// Second-factor users must clear a challenge before a session exists. No
+	// cookie is set here; the client receives a challenge id plus the methods it
+	// may use. A push-enabled challenge additionally fans a notification out to
+	// the user's approver devices (asynchronously — see dispatchPushChallenge).
+	if u.TOTPEnabled || u.PushMFAEnabled {
 		ch, err := s.mfaChallenges.Create(u.ID)
 		if err != nil {
 			http.Error(w, "session creation failed", http.StatusInternalServerError)
 			return
 		}
+		methods := make([]string, 0, 2)
+		if u.TOTPEnabled {
+			methods = append(methods, "totp")
+		}
+		if u.PushMFAEnabled {
+			methods = append(methods, "push")
+			go s.dispatchPushChallenge(u.ID, ch.ID)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"mfaRequired": true,
 			"challengeId": ch.ID,
-			"methods":     []string{"totp"},
+			"methods":     methods,
 		})
 		return
 	}

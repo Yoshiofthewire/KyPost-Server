@@ -115,3 +115,179 @@ func TestPushEnableAndStatusAndDeviceToggle(t *testing.T) {
 		t.Fatalf("expected approver cleared after toggle")
 	}
 }
+
+// loginChallenge performs a password login and returns the MFA challenge id and
+// offered methods (asserting a challenge was issued and no cookie was set).
+func loginChallenge(t *testing.T, srv *Server, username, password string) (challengeID string, methods []string) {
+	t.Helper()
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": username, "password": password})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if cookies := rec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("expected no session cookie on MFA login, got %+v", cookies)
+	}
+	var resp struct {
+		MFARequired bool     `json:"mfaRequired"`
+		ChallengeID string   `json:"challengeId"`
+		Methods     []string `json:"methods"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal login: %v", err)
+	}
+	if !resp.MFARequired || resp.ChallengeID == "" {
+		t.Fatalf("expected mfa challenge, got %s", rec.Body.String())
+	}
+	return resp.ChallengeID, resp.Methods
+}
+
+func methodsContain(methods []string, want string) bool {
+	for _, m := range methods {
+		if m == want {
+			return true
+		}
+	}
+	return false
+}
+
+func respondPush(srv *Server, challengeID, subscriberID, subscriberHash, deviceID string, approve bool) *httptest.ResponseRecorder {
+	return doJSON(srv, srv.handlePushRespond, http.MethodPost, "/api/mfa/push/respond", map[string]any{
+		"challengeId":    challengeID,
+		"subscriberId":   subscriberID,
+		"subscriberHash": subscriberHash,
+		"deviceId":       deviceID,
+		"approve":        approve,
+	})
+}
+
+func pollPush(srv *Server, challengeID string) string {
+	rec := doJSON(srv, srv.handlePushPoll, http.MethodPost, "/api/auth/mfa/push/poll",
+		map[string]string{"challengeId": challengeID})
+	var resp struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	return resp.Status
+}
+
+func enablePush(t *testing.T, srv *Server, userID string) {
+	t.Helper()
+	rec := doJSONAuth(srv, srv.withAuth(srv.handleMFAPushEnabled), http.MethodPut,
+		"/api/mfa/push/enabled", map[string]bool{"enabled": true}, userID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable push: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPushLoginApproveFlow(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("quinn", "pw-quinn", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-quinn")
+	enablePush(t, srv, u.ID)
+
+	challengeID, methods := loginChallenge(t, srv, "quinn", "pw-quinn")
+	if !methodsContain(methods, "push") || !methodsContain(methods, "totp") {
+		t.Fatalf("methods = %v, want both push and totp", methods)
+	}
+	if pollPush(srv, challengeID) != "pending" {
+		t.Fatalf("expected pending before response")
+	}
+
+	if rec := respondPush(srv, challengeID, sub, hash, "dev-quinn", true); rec.Code != http.StatusOK {
+		t.Fatalf("respond approve: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if pollPush(srv, challengeID) != "approved" {
+		t.Fatalf("expected approved after response")
+	}
+
+	finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+		map[string]string{"challengeId": challengeID})
+	if finishRec.Code != http.StatusOK {
+		t.Fatalf("finish: status=%d body=%s", finishRec.Code, finishRec.Body.String())
+	}
+	cookies := finishRec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "llama_session" {
+		t.Fatalf("expected session cookie after finish, got %+v", cookies)
+	}
+}
+
+func TestPushLoginDenyFlow(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("rex", "pw-rex", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-rex")
+	enablePush(t, srv, u.ID)
+
+	challengeID, _ := loginChallenge(t, srv, "rex", "pw-rex")
+	if rec := respondPush(srv, challengeID, sub, hash, "dev-rex", false); rec.Code != http.StatusOK {
+		t.Fatalf("respond deny: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if pollPush(srv, challengeID) != "denied" {
+		t.Fatalf("expected denied")
+	}
+	finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+		map[string]string{"challengeId": challengeID})
+	if finishRec.Code != http.StatusConflict {
+		t.Fatalf("finish after deny: status=%d, want 409", finishRec.Code)
+	}
+}
+
+func TestPushRespondCrossUserRejected(t *testing.T) {
+	srv := newTestServer(t)
+	a, err := srv.users.Create("alice", "pw-alice", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create alice: %v", err)
+	}
+	b, err := srv.users.Create("bob", "pw-bob", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create bob: %v", err)
+	}
+	enrollTOTP(t, srv, a.ID)
+	pairApproverDevice(t, srv, a.ID, "dev-alice")
+	enablePush(t, srv, a.ID)
+	// Bob's own device + credential.
+	subB, hashB := pairApproverDevice(t, srv, b.ID, "dev-bob")
+
+	// Alice logs in; Bob's device tries to approve her challenge.
+	challengeID, _ := loginChallenge(t, srv, "alice", "pw-alice")
+	rec := respondPush(srv, challengeID, subB, hashB, "dev-bob", true)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-user respond: status=%d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	// Alice's challenge must remain unresolved.
+	if pollPush(srv, challengeID) != "pending" {
+		t.Fatalf("cross-user attempt must not resolve the challenge")
+	}
+}
+
+func TestPushFirstResponseWins(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("sam", "pw-sam", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-sam")
+	enablePush(t, srv, u.ID)
+
+	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam")
+	if rec := respondPush(srv, challengeID, sub, hash, "dev-sam", true); rec.Code != http.StatusOK {
+		t.Fatalf("first respond: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// A second response (even from the same device) is rejected, not overwritten.
+	second := respondPush(srv, challengeID, sub, hash, "dev-sam", false)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second respond: status=%d, want 409 (body=%s)", second.Code, second.Body.String())
+	}
+	if pollPush(srv, challengeID) != "approved" {
+		t.Fatalf("status must remain approved after a rejected second response")
+	}
+}
