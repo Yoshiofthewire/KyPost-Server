@@ -1,10 +1,19 @@
 import { FormEvent, useEffect, useState } from "react";
 import QRCode from "qrcode";
-import { getJSON, postJSON, toErrorMessage } from "../api/client";
+import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+
+type ApproverDevice = {
+  deviceId: string;
+  deviceName?: string;
+  platform?: string;
+  approver: boolean;
+};
 
 type MfaStatus = {
   totpEnabled: boolean;
   recoveryCodesRemaining: number;
+  pushMfaEnabled: boolean;
+  approverDevices: ApproverDevice[];
 };
 
 type SetupResponse = {
@@ -146,6 +155,35 @@ export function SecurityPage() {
     }
   }
 
+  async function togglePush(enabled: boolean) {
+    setBusy(true);
+    setMessage("");
+    try {
+      await putJSON<{ ok: boolean; pushMfaEnabled: boolean }>("/api/mfa/push/enabled", { enabled });
+      await refreshStatus();
+    } catch (err) {
+      setMessage(toErrorMessage(err, "Failed to update push approval."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleApprover(deviceId: string, approver: boolean) {
+    setBusy(true);
+    setMessage("");
+    try {
+      await putJSON<{ ok: boolean }>(
+        `/api/notifications/native/devices/${encodeURIComponent(deviceId)}/mfa`,
+        { approver }
+      );
+      await refreshStatus();
+    } catch (err) {
+      setMessage(toErrorMessage(err, "Failed to update device."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function copyRecoveryCodes() {
     void navigator.clipboard?.writeText(recoveryCodes.join("\n"));
   }
@@ -276,6 +314,52 @@ export function SecurityPage() {
           </button>
         </div>
       )}
+
+      <div className="auth-form">
+        <h3>Push approval (2FA)</h3>
+        {!status?.totpEnabled ? (
+          <p>
+            Enable an authenticator app (TOTP) above first. Push approval always keeps TOTP as a
+            fallback, so it can only be turned on once TOTP is active.
+          </p>
+        ) : (
+          <>
+            <p>
+              Approve sign-ins from a paired device. You can still use your authenticator code at any
+              time.
+            </p>
+            <label>
+              <input
+                type="checkbox"
+                checked={Boolean(status?.pushMfaEnabled)}
+                disabled={busy}
+                onChange={(e) => void togglePush(e.target.checked)}
+              />{" "}
+              Enable push approval
+            </label>
+            {status && status.approverDevices.length > 0 ? (
+              <ul>
+                {status.approverDevices.map((device) => (
+                  <li key={device.deviceId}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={device.approver}
+                        disabled={busy}
+                        onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
+                      />{" "}
+                      {device.deviceName?.trim() || device.platform || device.deviceId} — may approve
+                      sign-ins
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>No paired devices yet. Pair a device on the Notifications page to use push approval.</p>
+            )}
+          </>
+        )}
+      </div>
     </section>
   );
 }
