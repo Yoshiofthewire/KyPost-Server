@@ -32,6 +32,8 @@ type Store struct {
 
 	aiCreditsExhausted   bool
 	aiCreditsExhaustedAt string
+	desktopPairingCodes map[string]string // code -> expiresAt (RFC3339)
+	pairingCodesDirty   bool
 }
 
 // Native notification delivery modes. "push" (the default) sends via the
@@ -106,13 +108,19 @@ type stateFile struct {
 	PullSeq              int64                      `json:"pullSeq,omitempty"`
 	AICreditsExhausted   bool                       `json:"aiCreditsExhausted,omitempty"`
 	AICreditsExhaustedAt string                     `json:"aiCreditsExhaustedAt,omitempty"`
+	DesktopPairingCodes  map[string]string          `json:"desktopPairingCodes,omitempty"`
 }
 
 func New(baseDir string) (*Store, error) {
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, err
 	}
-	s := &Store{baseDir: baseDir, processedSet: map[string]time.Time{}, decisions: []Decision{}}
+	s := &Store{
+		baseDir:              baseDir,
+		processedSet:         map[string]time.Time{},
+		decisions:            []Decision{},
+		desktopPairingCodes: map[string]string{},
+	}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -169,6 +177,21 @@ func (s *Store) applyStateFile(sf stateFile) {
 		processed[id] = t
 	}
 	s.processedSet = processed
+
+	// Load desktop pairing codes, removing expired ones
+	now := time.Now().UTC()
+	validCodes := make(map[string]string)
+	for code, expiresAtStr := range sf.DesktopPairingCodes {
+		expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+		if err != nil {
+			continue
+		}
+		if expiresAt.After(now) {
+			validCodes[code] = expiresAtStr
+		}
+	}
+	s.desktopPairingCodes = validCodes
+	s.pairingCodesDirty = len(validCodes) < len(sf.DesktopPairingCodes)
 }
 
 func (s *Store) refreshStateFromDiskLocked() error {
@@ -465,6 +488,7 @@ func (s *Store) persistLocked() error {
 		PullSeq:              s.pullSeq,
 		AICreditsExhausted:   s.aiCreditsExhausted,
 		AICreditsExhaustedAt: s.aiCreditsExhaustedAt,
+		DesktopPairingCodes:  s.desktopPairingCodes,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -702,6 +726,85 @@ func (s *Store) persistDecisionsLocked() error {
 		return fmt.Errorf("write decisions: %w", err)
 	}
 	return nil
+}
+
+// SetDesktopPairingCode stores a pairing code with 5-minute expiration
+func (s *Store) SetDesktopPairingCode(code string, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return err
+	}
+
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	s.desktopPairingCodes[strings.TrimSpace(code)] = expiresAt.Format(time.RFC3339)
+	s.pairingCodesDirty = true
+	return s.persistLocked()
+}
+
+// ValidateDesktopPairingCode checks if a code is valid and not expired.
+// Returns true if valid, false if expired or not found.
+func (s *Store) ValidateDesktopPairingCode(code string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cleaned := strings.TrimSpace(code)
+	expiresAtStr, ok := s.desktopPairingCodes[cleaned]
+	if !ok {
+		return false
+	}
+
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	if err != nil {
+		return false
+	}
+
+	if time.Now().UTC().After(expiresAt) {
+		// Code has expired, clean it up
+		delete(s.desktopPairingCodes, cleaned)
+		return false
+	}
+
+	return true
+}
+
+// ConsumeDesktopPairingCode validates and removes a pairing code.
+// Returns true if code was valid, false if expired or not found.
+func (s *Store) ConsumeDesktopPairingCode(code string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateFromDiskLocked(); err != nil {
+		return false, err
+	}
+
+	cleaned := strings.TrimSpace(code)
+	expiresAtStr, ok := s.desktopPairingCodes[cleaned]
+	if !ok {
+		return false, nil
+	}
+
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	if err != nil {
+		delete(s.desktopPairingCodes, cleaned)
+		return false, nil
+	}
+
+	if time.Now().UTC().After(expiresAt) {
+		// Code has expired
+		delete(s.desktopPairingCodes, cleaned)
+		return false, nil
+	}
+
+	// Code is valid, consume it
+	delete(s.desktopPairingCodes, cleaned)
+	s.pairingCodesDirty = true
+	if err := s.persistLocked(); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func newUUIDv4() (string, error) {

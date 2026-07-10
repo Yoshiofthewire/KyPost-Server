@@ -6,11 +6,14 @@ Desktop pairing allows users to initiate pairing with a desktop application. The
 
 ## Current Implementation Status
 
-✅ **Completed:**
+✅ **Phase 1 Completed:**
 - Frontend UI with "Pair Desktop App" button
 - Backend endpoint: `POST /api/notifications/desktop/pair`
 - Pairing code generation (6-byte random, formatted as XXXX-XXXX)
-- Logging of pairing initiation events
+- Persistent storage of pairing codes in user state
+- 5-minute TTL with automatic expiration
+- Code validation methods for backend consumers
+- Security-conscious logging (code not exposed in logs)
 
 ## API Endpoint
 
@@ -45,24 +48,38 @@ failed to generate pairing code
 
 ## Implementation Details
 
-### Backend (server.go)
+### Backend (server.go + state/store.go)
 
 The `handleDesktopPair` handler:
 1. Validates user authentication via session cookie
-2. Generates a 6-byte random code
+2. Generates a 6-byte random code (48 bits entropy)
 3. Formats code as `XXXX-XXXX` (hex, uppercase)
-4. Logs the pairing event with user ID only (code not logged for security)
-5. Returns the code to the frontend
+4. Stores code in user's state store with 5-minute expiration
+5. Logs the pairing event with user ID only (code not logged for security)
+6. Returns the code to the frontend
+
+**State Store Methods:**
+- `SetDesktopPairingCode(code string, ttl time.Duration)` — Stores code with expiration
+- `ValidateDesktopPairingCode(code string) bool` — Checks if code is valid/not expired
+- `ConsumeDesktopPairingCode(code string) (bool, error)` — Validates and removes code
+
+**Persistence:**
+- Codes stored in user's state.json file (encrypted at rest if configured)
+- Automatic cleanup of expired codes on load/persist
+- Survives server restart (codes are persisted until TTL)
+
+**TTL Details:**
+- **Default:** 5 minutes (300 seconds)
+- **Storage:** RFC3339 formatted timestamp in user state
+- **Cleanup:** Expired codes removed when state is loaded or persisted
 
 **Security notes:**
-- Pairing code is NOT logged (prevents credential leakage via logs)
-- Code returned only in JSON response to authenticated user
-- Code is sensitive and should be treated as a credential
-
-**Current limitations:**
-- Code is generated on-demand, not persisted (suitable for testing/demo)
-- No expiration tracking or validation yet
-- No rate limiting
+- ✅ Pairing code is NOT logged (prevents credential leakage via logs)
+- ✅ Code returned only in JSON response to authenticated user
+- ✅ Code stored only in user's isolated state directory
+- ✅ Codes are cryptographically random (6 bytes)
+- ⚠️ TODO: Add rate limiting per user per time window
+- ⚠️ TODO: Add verification/exchange endpoint for desktop app
 
 ### Frontend (NotificationsPage.tsx)
 
@@ -80,31 +97,49 @@ The `pairDesktopApp()` function:
 
 ## Future Enhancements
 
-### Phase 2: Persistent Pairing State
-- Store pairing codes in user's state store with 15-minute expiration
-- Add `SetDesktopPairingCode()` and validation methods to `state.Store`
-- Implement cleanup of expired codes
-
-### Phase 3: Desktop App Registration
+### Phase 2: Desktop App Registration Endpoint ✅ NEXT
+- Add `POST /api/notifications/desktop/register` endpoint
 - Desktop app exchanges pairing code for access token (similar to mobile register)
+- Validate code using `store.ConsumeDesktopPairingCode()`
+- Return session token with appropriate claims
 - Store paired desktop sessions with metadata (app version, last seen, etc.)
-- Implement session revocation
+
+### Phase 3: Desktop Session Management
+- Add `GET /api/notifications/desktop/sessions` — List paired desktop apps
+- Add `DELETE /api/notifications/desktop/sessions/{id}` — Revoke specific session
+- Add `POST /api/notifications/desktop/unpair` — Revoke all desktop pairings
+- Track session metadata: app name, version, OS, last activity time
 
 ### Phase 4: Advanced Features
-- QR code for desktop app enrollment
+- QR code generation for desktop app enrollment
 - Deep linking: `llamalabels://desktop-pair?code=XXXX-XXXX`
-- Multiple simultaneous desktop pairings per user
-- List and manage paired desktop sessions
-- Activity logging for security audits
+- Activity logging for security audits (who paired, when, from where)
+- Rate limiting per user (e.g., max 5 pairing attempts per hour)
+- Optional: Desktop app push notifications via established session
 
 ## Security Considerations
 
-- ✅ Codes are random (6 bytes = 48 bits entropy)
-- ✅ Requires valid session to initiate pairing
-- ⚠️ TODO: Add rate limiting per user
-- ⚠️ TODO: Add code expiration validation
-- ⚠️ TODO: Add verification on the receiving end (not just code generation)
-- ⚠️ TODO: Audit logging of all pairing events
+**Implemented:**
+- ✅ Codes are cryptographically random (6 bytes = 48 bits entropy)
+- ✅ Requires valid session to initiate pairing (authenticated endpoint)
+- ✅ 5-minute time limit (automatic expiration)
+- ✅ Codes stored in isolated per-user state directory
+- ✅ Codes NOT exposed in server logs
+- ✅ Automatic cleanup of expired codes on state operations
+
+**Recommended Before Production:**
+- ⚠️ Add rate limiting per user (e.g., 5 attempts per hour)
+- ⚠️ Add HTTPS enforcement in frontend (for code transmission)
+- ⚠️ Add second factor verification for sensitive operations
+- ⚠️ Implement audit logging of all pairing/unpairing events
+- ⚠️ Add brute-force detection on code validation endpoint
+- ⚠️ Consider additional verification (email confirmation, etc.)
+
+**Attack Scenarios:**
+- **Code interception:** Limited by 5-min TTL; HTTPS required
+- **Brute force:** 6 bytes = 281.5 trillion combinations; rate limit recommended
+- **Session hijacking:** Uses standard authenticated session; no additional risk
+- **Log exposure:** Codes never logged; only IDs and timestamps
 
 ## Related Files
 

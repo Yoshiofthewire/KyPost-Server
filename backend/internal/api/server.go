@@ -1342,6 +1342,19 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 	codeHex := hex.EncodeToString(codeBytes)
 	pairingCode := strings.ToUpper(codeHex[:4] + "-" + codeHex[4:])
 
+	// Store pairing code with 5-minute expiration
+	store, err := s.userStore(ac.UserID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
+	if err := store.SetDesktopPairingCode(pairingCode, 5*time.Minute); err != nil {
+		s.logger.Error("failed to store desktop pairing code", "user_id", ac.UserID, "error", err.Error())
+		http.Error(w, "failed to create pairing code", http.StatusInternalServerError)
+		return
+	}
+
 	// Log pairing event without exposing the full code
 	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID)
 
