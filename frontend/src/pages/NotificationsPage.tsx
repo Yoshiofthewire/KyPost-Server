@@ -100,6 +100,15 @@ function buildNativePairingLink(pairing: PairingStatusResponse): string {
   return `llamalabels://native-pair?${params.toString()}`;
 }
 
+function buildDesktopPairingLink(pairingCode: string, serverUrl?: string): string {
+  const params = new URLSearchParams();
+  params.set("code", pairingCode);
+  if (serverUrl) {
+    params.set("srv", serverUrl);
+  }
+  return `llamalabels://desktop-pair?${params.toString()}`;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -251,9 +260,8 @@ export function NotificationsPage() {
         refreshTriggered = true;
         setPairingRefreshBusy(true);
         void refreshPairingStatus().finally(() => {
-          if (!cancelled) {
-            setPairingRefreshBusy(false);
-          }
+          // Always clear the busy flag, even if effect was cleaned up
+          setPairingRefreshBusy(false);
         });
       }
     };
@@ -485,11 +493,35 @@ export function NotificationsPage() {
   async function pairDesktopApp() {
     setDesktopPairingBusy(true);
     try {
-      const result = await postJSON<{ ok: boolean; pairingCode?: string }>("/api/notifications/desktop/pair", {});
-      if (result.pairingCode) {
-        setStatus(`Desktop pairing initiated. Code: ${result.pairingCode}`);
-      } else {
-        setStatus("Desktop pairing initiated. Check your desktop app.");
+      const result = await postJSON<{
+        ok: boolean;
+        pairingCode?: string;
+        ttlSeconds?: number;
+      }>("/api/notifications/desktop/pair", {});
+
+      if (!result.pairingCode) {
+        setStatus("Failed to generate pairing code.");
+        return;
+      }
+
+      // Get current server URL for deep link
+      const serverUrl = window.location.origin;
+      const deepLink = buildDesktopPairingLink(result.pairingCode, serverUrl);
+
+      // Attempt to launch desktop app via deep link
+      try {
+        window.location.href = deepLink;
+        setStatus(`Launching desktop app with pairing code (valid for ${result.ttlSeconds ?? 300} seconds)...`);
+
+        // Fallback: if desktop app not installed, show code after a delay
+        setTimeout(() => {
+          if (document.hasFocus()) {
+            setStatus(`Desktop app not detected. Share this code: ${result.pairingCode}`);
+          }
+        }, 2000);
+      } catch {
+        // Fallback if deep link launch fails
+        setStatus(`Desktop app not installed. Pairing code: ${result.pairingCode}`);
       }
     } catch (error: unknown) {
       const detail = toErrorMessage(error, "unknown error");

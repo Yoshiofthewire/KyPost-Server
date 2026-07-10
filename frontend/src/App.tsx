@@ -17,7 +17,7 @@ import { UsersPage } from "./pages/UsersPage";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
 // Bump this when releasing a new build. Shown in the license overlay.
-const APP_VERSION = 23;
+const APP_VERSION = 24;
 
 const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: boolean }> = [
   { to: "/login", label: "Login" },

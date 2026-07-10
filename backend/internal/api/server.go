@@ -1375,11 +1375,23 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 	// Log pairing event without exposing the full code (only hash for correlation)
 	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID, "code_hash", pairingCode[:8])
 
+	// Build server URL and register endpoint for desktop app
+	serverBaseURL := s.serverBaseURL
+	if serverBaseURL == "" {
+		serverBaseURL = externalBaseURL(r)
+	}
+	registerEndpoint := ""
+	if serverBaseURL != "" {
+		registerEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/desktop/register"
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"pairingCode":  pairingCode,
-		"ttlSeconds":   300,
-		"rateLimit":    remaining,
+		"ok":                true,
+		"pairingCode":       pairingCode,
+		"ttlSeconds":        300,
+		"rateLimit":         remaining,
+		"serverBaseUrl":     serverBaseURL,
+		"registerEndpoint":  registerEndpoint,
 	})
 }
 
