@@ -189,6 +189,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
 	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
 	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
+	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
 	mux.HandleFunc("GET /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("GET /api/contacts/{id}", s.withAuth(s.handleContactByID))
@@ -1320,6 +1321,33 @@ func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Req
 		"deliveryMode":  store.NativeDeliveryMode(),
 		"cursor":        cursor,
 		"notifications": notifications,
+	})
+}
+
+func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
+	ac, okAuth := authFromContext(r)
+	if !okAuth {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
+	// Generate a pairing code for desktop app
+	codeBytes := make([]byte, 6)
+	if _, err := rand.Read(codeBytes); err != nil {
+		http.Error(w, "failed to generate pairing code", http.StatusInternalServerError)
+		return
+	}
+
+	// Format as XXXX-XXXX for readability
+	codeHex := hex.EncodeToString(codeBytes)
+	pairingCode := strings.ToUpper(codeHex[:4] + "-" + codeHex[4:])
+
+	// Log pairing event without exposing the full code
+	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"pairingCode": pairingCode,
 	})
 }
 
