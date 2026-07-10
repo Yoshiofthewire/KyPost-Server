@@ -155,6 +155,20 @@ func (s *Server) handleUsersReactivate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, u.Public())
 }
 
+// handleUsersClearMFA lets an admin reset another user's two-factor auth
+// (TOTP, recovery codes, and push approval) when they've lost access to their
+// authenticator, e.g. a new device with no recovery codes saved.
+func (s *Server) handleUsersClearMFA(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u, err := s.users.DisableTOTP(id)
+	if err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("user MFA cleared by admin", "user_id", u.ID)
+	writeJSON(w, http.StatusOK, u.Public())
+}
+
 // isLastActiveAdmin reports whether the given user is the only active admin
 // left, in which case deactivating or demoting them would lock everyone out
 // of user management permanently.

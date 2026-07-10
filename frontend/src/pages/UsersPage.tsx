@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { toErrorMessage } from "../api/client";
 import {
+  clearUserMFA,
   createUser,
   deactivateUser,
   listUsers,
@@ -114,6 +115,19 @@ export function UsersPage() {
     void withRowBusy(user, async () => {
       await resetUserPassword(user.id, password);
       setStatus(`Password reset for ${user.username}. They must change it on next login.`);
+    });
+  }
+
+  function clearMFA(user: ManagedUser) {
+    const confirmed = window.confirm(
+      `Clear two-factor authentication for ${user.username}? They will need to re-enroll.`
+    );
+    if (!confirmed) {
+      return;
+    }
+    void withRowBusy(user, async () => {
+      await clearUserMFA(user.id);
+      setStatus(`Two-factor authentication cleared for ${user.username}.`);
     });
   }
 
@@ -251,6 +265,16 @@ export function UsersPage() {
                             >
                               Reset Password
                             </button>
+                            {user.totpEnabled ? (
+                              <button
+                                type="button"
+                                className="users-action users-action-danger"
+                                onClick={() => clearMFA(user)}
+                                disabled={busy}
+                              >
+                                Clear MFA
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               className={user.active ? "users-action users-action-danger" : "users-action"}

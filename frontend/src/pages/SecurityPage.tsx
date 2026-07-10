@@ -189,176 +189,216 @@ export function SecurityPage() {
   }
 
   const showRecoveryPanel = recoveryCodes.length > 0;
+  const totpOn = showRecoveryPanel || Boolean(status?.totpEnabled);
+  const messageTone = message.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
   return (
-    <section className="panel">
-      <h2>Security</h2>
-      <p>Protect your account with an authenticator app (TOTP) as a second factor.</p>
+    <section className="panel security-page">
+      <header className="security-header">
+        <h2>Security</h2>
+        <p>Protect your account with an authenticator app, and optionally approve sign-ins from a paired device.</p>
+      </header>
 
-      {message ? <p>{message}</p> : null}
+      {message ? <p className={messageTone}>{message}</p> : null}
 
-      {showRecoveryPanel ? (
-        <div className="auth-form">
-          <h3>Save your recovery codes</h3>
-          <p>
-            Store these one-time recovery codes somewhere safe. Each works once if you lose access to
-            your authenticator. They will not be shown again.
-          </p>
-          <ul>
-            {recoveryCodes.map((code) => (
-              <li key={code}>
-                <code>{code}</code>
-              </li>
-            ))}
-          </ul>
-          <button type="button" onClick={copyRecoveryCodes}>
-            Copy codes
-          </button>
-          <label>
-            <input
-              type="checkbox"
-              checked={savedAcknowledged}
-              onChange={(e) => setSavedAcknowledged(e.target.checked)}
-            />{" "}
-            I have saved these recovery codes
-          </label>
-          <button type="button" disabled={!savedAcknowledged} onClick={() => setRecoveryCodes([])}>
-            Done
-          </button>
-        </div>
-      ) : status?.totpEnabled ? (
-        <div className="auth-form">
-          <p>Two-factor authentication is enabled.</p>
-          <p>Recovery codes remaining: {status.recoveryCodesRemaining}</p>
-          <button type="button" onClick={() => setShowRegenerate(true)}>
-            Regenerate recovery codes
-          </button>
-          <button type="button" onClick={() => setShowDisable(true)}>
-            Disable two-factor auth
-          </button>
+      <div className="security-layout">
+        <div className="security-card">
+          <div className="security-card-head">
+            <h3>Authenticator app (TOTP)</h3>
+            <span className={`security-badge ${totpOn ? "security-badge-on" : "security-badge-off"}`}>
+              <span className="security-dot" aria-hidden="true" />
+              {totpOn ? "enabled" : "not enabled"}
+            </span>
+          </div>
 
-          {showRegenerate ? (
-            <form onSubmit={submitRegenerate} className="auth-form">
-              <h3>Confirm your password</h3>
-              <label>
-                <div>Password</div>
-                <input
-                  type="password"
-                  value={regeneratePassword}
-                  onChange={(e) => setRegeneratePassword(e.target.value)}
-                  autoComplete="current-password"
-                />
-              </label>
-              <button type="submit" disabled={busy || regeneratePassword === ""}>
-                {busy ? "Working..." : "Regenerate"}
-              </button>
-              <button type="button" className="nav-link-button" onClick={() => setShowRegenerate(false)}>
-                Cancel
-              </button>
-            </form>
-          ) : null}
-
-          {showDisable ? (
-            <form onSubmit={submitDisable} className="auth-form">
-              <h3>Confirm your password</h3>
-              <label>
-                <div>Password</div>
-                <input
-                  type="password"
-                  value={disablePassword}
-                  onChange={(e) => setDisablePassword(e.target.value)}
-                  autoComplete="current-password"
-                />
-              </label>
-              <button type="submit" disabled={busy || disablePassword === ""}>
-                {busy ? "Working..." : "Disable"}
-              </button>
-              <button type="button" className="nav-link-button" onClick={() => setShowDisable(false)}>
-                Cancel
-              </button>
-            </form>
-          ) : null}
-        </div>
-      ) : setup ? (
-        <form onSubmit={submitConfirm} className="auth-form">
-          <h3>Scan this QR code</h3>
-          <p>Scan with your authenticator app, or enter the key manually.</p>
-          {qrDataUrl ? (
-            <img src={qrDataUrl} alt="TOTP enrollment QR code" width={220} height={220} />
-          ) : null}
-          <p>
-            Manual entry key: <code>{setup.secret}</code>
-          </p>
-          <label>
-            <div>Enter the 6-digit code to confirm</div>
-            <input
-              value={confirmCode}
-              onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              placeholder="123456"
-            />
-          </label>
-          <button type="submit" disabled={busy || confirmCode.trim().length !== 6}>
-            {busy ? "Confirming..." : "Confirm and enable"}
-          </button>
-          <button type="button" className="nav-link-button" onClick={() => setSetup(null)}>
-            Cancel
-          </button>
-        </form>
-      ) : (
-        <div className="auth-form">
-          <p>Two-factor authentication is not enabled.</p>
-          <button type="button" disabled={busy} onClick={() => void beginSetup()}>
-            {busy ? "Starting..." : "Enable 2FA"}
-          </button>
-        </div>
-      )}
-
-      <div className="auth-form">
-        <h3>Push approval (2FA)</h3>
-        {!status?.totpEnabled ? (
-          <p>
-            Enable an authenticator app (TOTP) above first. Push approval always keeps TOTP as a
-            fallback, so it can only be turned on once TOTP is active.
-          </p>
-        ) : (
-          <>
-            <p>
-              Approve sign-ins from a paired device. You can still use your authenticator code at any
-              time.
-            </p>
-            <label>
-              <input
-                type="checkbox"
-                checked={Boolean(status?.pushMfaEnabled)}
-                disabled={busy}
-                onChange={(e) => void togglePush(e.target.checked)}
-              />{" "}
-              Enable push approval
-            </label>
-            {status && status.approverDevices.length > 0 ? (
-              <ul>
-                {status.approverDevices.map((device) => (
-                  <li key={device.deviceId}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={device.approver}
-                        disabled={busy}
-                        onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
-                      />{" "}
-                      {device.deviceName?.trim() || device.platform || device.deviceId} — may approve
-                      sign-ins
-                    </label>
+          {showRecoveryPanel ? (
+            <div className="security-section">
+              <h4>Save your recovery codes</h4>
+              <p className="security-muted">
+                Store these one-time recovery codes somewhere safe. Each works once if you lose access to
+                your authenticator. They will not be shown again.
+              </p>
+              <ul className="security-codes">
+                {recoveryCodes.map((code) => (
+                  <li key={code}>
+                    <code>{code}</code>
                   </li>
                 ))}
               </ul>
-            ) : (
-              <p>No paired devices yet. Pair a device on the Notifications page to use push approval.</p>
-            )}
-          </>
-        )}
+              <div className="security-actions">
+                <button type="button" onClick={copyRecoveryCodes}>
+                  Copy codes
+                </button>
+              </div>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={savedAcknowledged}
+                  onChange={(e) => setSavedAcknowledged(e.target.checked)}
+                />
+                I have saved these recovery codes
+              </label>
+              <div className="security-actions">
+                <button type="button" disabled={!savedAcknowledged} onClick={() => setRecoveryCodes([])}>
+                  Done
+                </button>
+              </div>
+            </div>
+          ) : status?.totpEnabled ? (
+            <div className="security-section">
+              <p className="security-muted">Recovery codes remaining: {status.recoveryCodesRemaining}</p>
+              <div className="security-actions">
+                <button type="button" onClick={() => setShowRegenerate(true)}>
+                  Regenerate recovery codes
+                </button>
+                <button type="button" className="security-action-danger" onClick={() => setShowDisable(true)}>
+                  Disable two-factor auth
+                </button>
+              </div>
+
+              {showRegenerate ? (
+                <form onSubmit={submitRegenerate} className="auth-form security-inline-form">
+                  <h4>Confirm your password</h4>
+                  <label>
+                    <div>Password</div>
+                    <input
+                      type="password"
+                      value={regeneratePassword}
+                      onChange={(e) => setRegeneratePassword(e.target.value)}
+                      autoComplete="current-password"
+                    />
+                  </label>
+                  <div className="security-actions">
+                    <button type="submit" disabled={busy || regeneratePassword === ""}>
+                      {busy ? "Working..." : "Regenerate"}
+                    </button>
+                    <button type="button" className="nav-link-button" onClick={() => setShowRegenerate(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+
+              {showDisable ? (
+                <form onSubmit={submitDisable} className="auth-form security-inline-form">
+                  <h4>Confirm your password</h4>
+                  <label>
+                    <div>Password</div>
+                    <input
+                      type="password"
+                      value={disablePassword}
+                      onChange={(e) => setDisablePassword(e.target.value)}
+                      autoComplete="current-password"
+                    />
+                  </label>
+                  <div className="security-actions">
+                    <button type="submit" disabled={busy || disablePassword === ""}>
+                      {busy ? "Working..." : "Disable"}
+                    </button>
+                    <button type="button" className="nav-link-button" onClick={() => setShowDisable(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+            </div>
+          ) : setup ? (
+            <form onSubmit={submitConfirm} className="auth-form security-inline-form">
+              <h4>Scan this QR code</h4>
+              <p className="security-muted">Scan with your authenticator app, or enter the key manually.</p>
+              {qrDataUrl ? (
+                <img src={qrDataUrl} alt="TOTP enrollment QR code" width={220} height={220} />
+              ) : null}
+              <p className="security-muted">
+                Manual entry key: <code>{setup.secret}</code>
+              </p>
+              <label>
+                <div>Enter the 6-digit code to confirm</div>
+                <input
+                  value={confirmCode}
+                  onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="123456"
+                />
+              </label>
+              <div className="security-actions">
+                <button type="submit" disabled={busy || confirmCode.trim().length !== 6}>
+                  {busy ? "Confirming..." : "Confirm and enable"}
+                </button>
+                <button type="button" className="nav-link-button" onClick={() => setSetup(null)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="security-section">
+              <p className="security-muted">Add an authenticator app as a second factor on sign-in.</p>
+              <div className="security-actions">
+                <button type="button" disabled={busy} onClick={() => void beginSetup()}>
+                  {busy ? "Starting..." : "Enable 2FA"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="security-card">
+          <div className="security-card-head">
+            <h3>Push approval</h3>
+            <span
+              className={`security-badge ${status?.pushMfaEnabled ? "security-badge-on" : "security-badge-off"}`}
+            >
+              <span className="security-dot" aria-hidden="true" />
+              {status?.pushMfaEnabled ? "enabled" : "not enabled"}
+            </span>
+          </div>
+
+          {!status?.totpEnabled ? (
+            <p className="security-muted">
+              Enable an authenticator app (TOTP) above first. Push approval always keeps TOTP as a
+              fallback, so it can only be turned on once TOTP is active.
+            </p>
+          ) : (
+            <div className="security-section">
+              <p className="security-muted">
+                Approve sign-ins from a paired device. You can still use your authenticator code at any
+                time.
+              </p>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={Boolean(status?.pushMfaEnabled)}
+                  disabled={busy}
+                  onChange={(e) => void togglePush(e.target.checked)}
+                />
+                Enable push approval
+              </label>
+              {status && status.approverDevices.length > 0 ? (
+                <ul className="security-devices">
+                  {status.approverDevices.map((device) => (
+                    <li key={device.deviceId}>
+                      <label className="security-check">
+                        <input
+                          type="checkbox"
+                          checked={device.approver}
+                          disabled={busy}
+                          onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
+                        />
+                        {device.deviceName?.trim() || device.platform || device.deviceId} — may approve
+                        sign-ins
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="security-muted">
+                  No paired devices yet. Pair a device on the Notifications page to use push approval.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );

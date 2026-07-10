@@ -82,6 +82,8 @@ func Run(args []string) error {
 		logger.Error("legacy single-user data migration failed", "error", err.Error())
 	}
 
+	clearAllMFAIfRequested(logger, usersStore)
+
 	healthSvc := health.NewService()
 	healthSvc.MarkHealthy()
 
@@ -170,6 +172,37 @@ func runAll(d runDeps) error {
 	<-stop
 	poller.Stop()
 	return nil
+}
+
+// clearAllMFAIfRequested is a break-glass recovery path for self-hosters
+// locked out by MFA with no other admin able to reach the Manage Users page.
+// Setting MFA_CLEAR_ALL wipes TOTP/recovery codes/push-MFA for every user on
+// every boot until the operator unsets it and restarts; it is intentionally
+// not self-disabling since the process cannot safely rewrite the host .env.
+func clearAllMFAIfRequested(logger *logging.Logger, usersStore *users.Store) {
+	if raw := strings.TrimSpace(os.Getenv("MFA_CLEAR_ALL")); raw == "" {
+		return
+	} else if enabled, err := strconv.ParseBool(raw); err != nil || !enabled {
+		return
+	}
+	all, err := usersStore.List()
+	if err != nil {
+		logger.Error("MFA_CLEAR_ALL: failed to list users", "error", err.Error())
+		return
+	}
+	cleared := 0
+	for _, u := range all {
+		if !u.TOTPEnabled && !u.PushMFAEnabled {
+			continue
+		}
+		if _, err := usersStore.DisableTOTP(u.ID); err != nil {
+			logger.Error("MFA_CLEAR_ALL: failed to clear user", "user_id", u.ID, "error", err.Error())
+			continue
+		}
+		cleared++
+	}
+	logger.Error("MFA_CLEAR_ALL is set: cleared two-factor auth for all users", "users_cleared", strconv.Itoa(cleared))
+	logger.Error("MFA_CLEAR_ALL: unset this variable and restart once users have re-enrolled, or it will keep clearing MFA on every boot")
 }
 
 func envDurationSeconds(name string, fallback int) int {

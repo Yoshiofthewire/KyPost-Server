@@ -166,6 +166,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.withAdmin(s.handleUsersResetPassword))
 	mux.HandleFunc("POST /api/users/{id}/deactivate", s.withAdmin(s.handleUsersDeactivate))
 	mux.HandleFunc("POST /api/users/{id}/reactivate", s.withAdmin(s.handleUsersReactivate))
+	mux.HandleFunc("POST /api/users/{id}/clear-mfa", s.withAdmin(s.handleUsersClearMFA))
 	mux.HandleFunc("GET /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))

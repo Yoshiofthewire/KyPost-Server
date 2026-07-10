@@ -64,6 +64,7 @@ type Public struct {
 	CreatedAt          string `json:"createdAt"`
 	UpdatedAt          string `json:"updatedAt"`
 	DeactivatedAt      string `json:"deactivatedAt,omitempty"`
+	TOTPEnabled        bool   `json:"totpEnabled,omitempty"`
 }
 
 func (u User) Public() Public {
@@ -76,6 +77,7 @@ func (u User) Public() Public {
 		CreatedAt:          u.CreatedAt,
 		UpdatedAt:          u.UpdatedAt,
 		DeactivatedAt:      u.DeactivatedAt,
+		TOTPEnabled:        u.TOTPEnabled,
 	}
 }
 

@@ -10,6 +10,7 @@ export type ManagedUser = {
   createdAt: string;
   updatedAt: string;
   deactivatedAt?: string;
+  totpEnabled?: boolean;
 };
 
 type UsersListResponse = {
@@ -39,4 +40,8 @@ export function deactivateUser(id: string): Promise<ManagedUser> {
 
 export function reactivateUser(id: string): Promise<ManagedUser> {
   return postJSON<ManagedUser>(`/api/users/${encodeURIComponent(id)}/reactivate`, {});
+}
+
+export function clearUserMFA(id: string): Promise<ManagedUser> {
+  return postJSON<ManagedUser>(`/api/users/${encodeURIComponent(id)}/clear-mfa`, {});
 }
