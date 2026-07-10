@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -634,10 +635,21 @@ func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, 
 
 	title := "New Email"
 	body := buildNotificationBody(msg)
+
+	// Deep-link straight to the email that triggered the notification
+	// instead of the generic inbox view, so tapping the notification opens
+	// the message rather than dropping the user on whatever tab happens to
+	// be active.
+	linkParams := url.Values{}
+	linkParams.Set("message", strings.TrimSpace(msg.ID))
+	if tab := strings.TrimSpace(selectedLabel); tab != "" {
+		linkParams.Set("tab", tab)
+	}
+
 	payloadBytes, err := json.Marshal(map[string]any{
 		"title": title,
 		"body":  body,
-		"url":   "/read",
+		"url":   "/read?" + linkParams.Encode(),
 		"tag":   fmt.Sprintf("llama-mail-email-%s", strings.TrimSpace(msg.ID)),
 	})
 	if err != nil {

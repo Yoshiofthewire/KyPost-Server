@@ -229,7 +229,7 @@ function buildReplyAllRecipients(email: InboxEmail): { to: string; cc: string } 
 }
 
 export function ReadPage({ onOpenDraft }: ReadPageProps) {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const mailbox = (searchParams.get("mailbox") || "").trim();
   const isInboxMailbox = mailbox.length === 0;
   const [tabs, setTabs] = useState<string[]>([]);
@@ -382,6 +382,44 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       dialog.close();
     }
   }, [selected]);
+
+  // Deep-link support: a push notification click lands here with
+  // ?message=<id>&tab=<label> (see maybeSendPushNotification on the
+  // backend). Find that email once its tab has loaded and open it, instead
+  // of always leaving the user on the generic inbox view.
+  useEffect(() => {
+    const targetMessageId = searchParams.get("message");
+    if (!targetMessageId) return;
+    const targetTab = searchParams.get("tab") || "";
+
+    const candidateTabs = targetTab && byTab[targetTab] ? [targetTab] : tabs;
+    let match: InboxEmail | undefined;
+    let matchTab = "";
+    for (const tab of candidateTabs) {
+      match = (byTab[tab] ?? []).find((item) => item.messageId === targetMessageId);
+      if (match) {
+        matchTab = tab;
+        break;
+      }
+    }
+
+    if (match) {
+      if (isInboxMailbox && matchTab) {
+        setActiveTab(matchTab);
+      }
+      void openEmailDetails(match);
+    }
+
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("message");
+        next.delete("tab");
+        return next;
+      },
+      { replace: true }
+    );
+  }, [byTab, tabs, searchParams, isInboxMailbox, setSearchParams]);
 
   useEffect(() => {
     const timer = setInterval(() => {
