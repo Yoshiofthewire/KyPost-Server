@@ -1,15 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getJSON, postJSON } from "../api/client";
+import { postJSON } from "../api/client";
 import type { AuthState } from "../auth";
-
-type SetupState = {
-  configured: boolean;
-  setup?: {
-    admin_user?: string;
-    must_change_password?: boolean;
-  };
-};
 
 type LoginPageProps = {
   auth: AuthState;
@@ -47,18 +39,6 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       setUsername(auth.username ?? username);
     }
   }, [auth.authenticated, auth.mustChangePassword, auth.username, navigate, passwordMode, username]);
-
-  useEffect(() => {
-    getJSON<SetupState>("/api/setup")
-      .then((res) => {
-        if (res.setup?.admin_user) {
-          setUsername(res.setup.admin_user);
-        }
-      })
-      .catch(() => {
-        // Keep defaults if setup endpoint is unavailable.
-      });
-  }, []);
 
   function finishSignIn(mustChangePassword: boolean) {
     if (mustChangePassword) {
