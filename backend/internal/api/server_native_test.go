@@ -68,6 +68,14 @@ func (s *stubMailClient) ApplyInboxAction(_ context.Context, _ string, _ string,
 	return nil
 }
 
+func (s *stubMailClient) ListAttachments(_ context.Context, _ string, _ int) ([]imapadapter.AttachmentInfo, error) {
+	return nil, nil
+}
+
+func (s *stubMailClient) GetAttachment(_ context.Context, _ string, _ int, _ int) (imapadapter.AttachmentInfo, []byte, error) {
+	return imapadapter.AttachmentInfo{}, nil, imapadapter.ErrAttachmentNotFound
+}
+
 func (s *stubMailClient) SaveDraft(_ context.Context, _ imapadapter.DraftMessage) error {
 	return nil
 }

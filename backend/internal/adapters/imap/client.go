@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"llama-lab/backend/internal/cryptutil"
+	"llama-lab/backend/internal/mailmsg"
 
 	goimap "github.com/BrianLeishman/go-imap"
 )
@@ -61,13 +62,27 @@ type Overview struct {
 }
 
 type DraftMessage struct {
-	To      []string
-	CC      []string
-	BCC     []string
-	Subject string
-	Body    string
-	Mode    string
+	To          []string
+	CC          []string
+	BCC         []string
+	Subject     string
+	Body        string
+	Mode        string
+	Attachments []mailmsg.Attachment
 }
+
+// AttachmentInfo is one attachment's metadata, without its content. JSON
+// tags match the /api/mail/attachments wire shape.
+type AttachmentInfo struct {
+	Index    int    `json:"index"`
+	Name     string `json:"name"`
+	MimeType string `json:"mimeType"`
+	Size     int    `json:"size"`
+}
+
+// ErrAttachmentNotFound reports an attachment index that doesn't exist on
+// the message; the API maps it to 404.
+var ErrAttachmentNotFound = errors.New("attachment not found")
 
 type Client interface {
 	ListUnreadInbox(ctx context.Context, sinceCheckpoint string) ([]Message, string, error)
@@ -87,6 +102,10 @@ type Client interface {
 	EnsureLabel(ctx context.Context, label string) error
 	ApplyLabel(ctx context.Context, messageID, label string) error
 	ApplyInboxAction(ctx context.Context, messageID, action, mailbox, targetMailbox string) error
+	// ListAttachments returns attachment metadata for one message (UID).
+	ListAttachments(ctx context.Context, mailbox string, uid int) ([]AttachmentInfo, error)
+	// GetAttachment returns one attachment's metadata and content by index.
+	GetAttachment(ctx context.Context, mailbox string, uid int, index int) (AttachmentInfo, []byte, error)
 	SaveDraft(ctx context.Context, draft DraftMessage) error
 	SaveSent(ctx context.Context, draft DraftMessage) error
 }
@@ -1058,8 +1077,74 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 	}
 }
 
-func sanitizeDraftHeaderValue(value string) string {
-	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+// fetchAttachments pulls one message and returns its parsed attachments
+// (go-imap's GetEmails decodes MIME parts into Email.Attachments).
+func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid int) ([]goimap.Attachment, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if uid <= 0 {
+		return nil, fmt.Errorf("invalid message id %d", uid)
+	}
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return nil, err
+	}
+	mailbox = strings.TrimSpace(mailbox)
+	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
+		if err := d.SelectFolder(mailbox); err != nil {
+			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
+		}
+	}
+
+	emails, err := d.GetEmails(uid)
+	if err != nil {
+		return nil, fmt.Errorf("imap fetch emails: %w", err)
+	}
+	e := emails[uid]
+	if e == nil {
+		return nil, fmt.Errorf("message %d not found in %q", uid, mailbox)
+	}
+	return e.Attachments, nil
+}
+
+func (c *APIClient) ListAttachments(ctx context.Context, mailbox string, uid int) ([]AttachmentInfo, error) {
+	attachments, err := c.fetchAttachments(ctx, mailbox, uid)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]AttachmentInfo, 0, len(attachments))
+	for i, a := range attachments {
+		infos = append(infos, AttachmentInfo{
+			Index:    i,
+			Name:     a.Name,
+			MimeType: a.MimeType,
+			Size:     len(a.Content),
+		})
+	}
+	return infos, nil
+}
+
+func (c *APIClient) GetAttachment(ctx context.Context, mailbox string, uid int, index int) (AttachmentInfo, []byte, error) {
+	attachments, err := c.fetchAttachments(ctx, mailbox, uid)
+	if err != nil {
+		return AttachmentInfo{}, nil, err
+	}
+	if index < 0 || index >= len(attachments) {
+		return AttachmentInfo{}, nil, ErrAttachmentNotFound
+	}
+	a := attachments[index]
+	info := AttachmentInfo{
+		Index:    index,
+		Name:     a.Name,
+		MimeType: a.MimeType,
+		Size:     len(a.Content),
+	}
+	return info, a.Content, nil
 }
 
 // ensureFolderThenRun runs try against folder, creating the folder and retrying
@@ -1090,29 +1175,16 @@ func (c *APIClient) saveMessage(ctx context.Context, draft DraftMessage, targets
 		return err
 	}
 
-	subject := sanitizeDraftHeaderValue(draft.Subject)
-	from := sanitizeDraftHeaderValue(c.username)
-	mode := strings.ToLower(strings.TrimSpace(draft.Mode))
-	contentType := "text/plain; charset=UTF-8"
-	if mode == "html" {
-		contentType = "text/html; charset=UTF-8"
-	}
-
-	message := strings.Builder{}
-	message.WriteString("From: " + from + "\r\n")
-	message.WriteString("To: " + strings.Join(draft.To, ", ") + "\r\n")
-	if len(draft.CC) > 0 {
-		message.WriteString("Cc: " + strings.Join(draft.CC, ", ") + "\r\n")
-	}
-	if len(draft.BCC) > 0 {
-		message.WriteString("Bcc: " + strings.Join(draft.BCC, ", ") + "\r\n")
-	}
-	message.WriteString("Subject: " + subject + "\r\n")
-	message.WriteString("MIME-Version: 1.0\r\n")
-	message.WriteString("Content-Type: " + contentType + "\r\n")
-	message.WriteString("\r\n")
-	message.WriteString(draft.Body)
-	raw := []byte(message.String())
+	raw := mailmsg.Message{
+		From:        c.username,
+		To:          draft.To,
+		CC:          draft.CC,
+		BCC:         draft.BCC,
+		Subject:     draft.Subject,
+		Body:        draft.Body,
+		Mode:        draft.Mode,
+		Attachments: draft.Attachments,
+	}.Build()
 
 	var lastErr error
 	for _, folder := range targets {

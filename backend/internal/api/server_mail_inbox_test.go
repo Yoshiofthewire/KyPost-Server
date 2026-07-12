@@ -9,6 +9,7 @@ import (
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/config"
 	"llama-lab/backend/internal/mailcache"
+	"llama-lab/backend/internal/mailmsg"
 )
 
 // fakeMailClient is a configurable imapadapter.Client for exercising
@@ -28,6 +29,9 @@ type fakeMailClient struct {
 	bodiesErr    error
 	bodiesCalls  int
 	lastBodyUIDs []int
+
+	attachments    map[int][]mailmsg.Attachment
+	attachmentsErr error
 }
 
 func (f *fakeMailClient) ListUnreadInbox(_ context.Context, _ string) ([]imapadapter.Message, string, error) {
@@ -77,6 +81,35 @@ func (f *fakeMailClient) ApplyInboxAction(_ context.Context, _ string, _ string,
 }
 func (f *fakeMailClient) SaveDraft(_ context.Context, _ imapadapter.DraftMessage) error { return nil }
 func (f *fakeMailClient) SaveSent(_ context.Context, _ imapadapter.DraftMessage) error  { return nil }
+
+// Attachment fixtures for the /api/mail/attachment(s) handler tests.
+func (f *fakeMailClient) ListAttachments(_ context.Context, _ string, uid int) ([]imapadapter.AttachmentInfo, error) {
+	if f.attachmentsErr != nil {
+		return nil, f.attachmentsErr
+	}
+	infos := make([]imapadapter.AttachmentInfo, 0, len(f.attachments[uid]))
+	for i, a := range f.attachments[uid] {
+		infos = append(infos, imapadapter.AttachmentInfo{
+			Index: i, Name: a.Name, MimeType: a.MimeType, Size: len(a.Content),
+		})
+	}
+	return infos, nil
+}
+
+func (f *fakeMailClient) GetAttachment(_ context.Context, _ string, uid int, index int) (imapadapter.AttachmentInfo, []byte, error) {
+	if f.attachmentsErr != nil {
+		return imapadapter.AttachmentInfo{}, nil, f.attachmentsErr
+	}
+	attachments := f.attachments[uid]
+	if index < 0 || index >= len(attachments) {
+		return imapadapter.AttachmentInfo{}, nil, imapadapter.ErrAttachmentNotFound
+	}
+	a := attachments[index]
+	info := imapadapter.AttachmentInfo{
+		Index: index, Name: a.Name, MimeType: a.MimeType, Size: len(a.Content),
+	}
+	return info, a.Content, nil
+}
 
 func testInboxCache(t *testing.T) *mailcache.Store {
 	t.Helper()
