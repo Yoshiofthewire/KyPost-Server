@@ -25,7 +25,7 @@ iOS/Android can pick up extra data later. Merge provenance is that first field.
 ## Decisions (locked during brainstorming)
 
 - **Trigger:** on-demand `POST /api/contacts/dedupe`, returns a report. Auto-triggering can be added later.
-- **Match key:** two contacts are candidates if they share any normalized email OR any normalized phone. Name alone never matches.
+- **Match key:** two contacts are candidates if they share any normalized email OR any normalized phone. Name alone matches if the contact is otherwise empty.
 - **Merge policy:** union multi-value fields; scalar fields take the most-recently-updated non-empty value; survivor is the oldest contact.
 - **Provenance:** survivor records absorbed UIDs; each loser tombstone points at its survivor.
 - **Transitivity + name guard:** merge connected components; a component of 3+ (chained/bridged) merges only if all members share one normalized formatted name, else the whole component is left untouched.
@@ -77,6 +77,9 @@ MergedInto string   `json:"mergedInto,omitempty"` // loser tombstone: survivor U
 - Only **live** (`!Deleted`) contacts participate; tombstones are excluded.
 - Build a value→contacts index for normalized emails and phones; union contacts
   that share any value (union-find), yielding connected components.
+- Name edge: two contacts also join if they share a non-empty normalized
+  formatted name AND at least one of them is otherwise empty (no emails and no
+  phones), so name-only imports fold into their fuller counterpart.
 
 ## Merge policy
 

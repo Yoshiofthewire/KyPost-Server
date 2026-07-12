@@ -242,6 +242,94 @@ func (s *Store) ChangedSince(rev int64) (changed, deleted []Contact, cursor int6
 	return changed, deleted, s.seq, tooOld
 }
 
+// DedupeMerge records one applied merge: the survivor UID and the UIDs it
+// absorbed (now tombstones pointing back at it).
+type DedupeMerge struct {
+	Survivor string   `json:"survivor"`
+	Absorbed []string `json:"absorbed"`
+}
+
+// DedupeReport summarizes a Dedupe run. MergedCount is the total number of
+// contacts tombstoned (losers); Groups is empty when nothing merged.
+type DedupeReport struct {
+	MergedCount int           `json:"mergedCount"`
+	Groups      []DedupeMerge `json:"groups"`
+}
+
+// Dedupe finds duplicate live contacts (sharing a normalized email or phone, or
+// a name when otherwise empty), merges each qualifying group into its oldest
+// member, and tombstones the losers so all sync clients converge. Survivors get
+// unioned multi-value fields, most-recent scalars, and a MergedUIDs provenance
+// list; losers get MergedInto set. The whole pass is applied under the lock and
+// persisted once. It is idempotent — a second run finds no live duplicates.
+func (s *Store) Dedupe() (DedupeReport, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return DedupeReport{}, err
+	}
+
+	// Live subset, remembering each member's index in s.contacts.
+	var live []Contact
+	var liveIdx []int
+	for i, c := range s.contacts {
+		if !c.Deleted {
+			live = append(live, c)
+			liveIdx = append(liveIdx, i)
+		}
+	}
+
+	report := DedupeReport{Groups: []DedupeMerge{}}
+	now := time.Now().UTC().Format(time.RFC3339)
+	changed := false
+
+	for _, group := range findDuplicateGroups(live) {
+		members := make([]Contact, len(group))
+		for i, gi := range group {
+			members[i] = live[gi]
+		}
+		if !groupShouldMerge(members) {
+			continue
+		}
+
+		survivor, absorbed := mergeGroup(members)
+		byUID := func(uid string) int {
+			for _, gi := range group {
+				if live[gi].UID == uid {
+					return liveIdx[gi]
+				}
+			}
+			return -1
+		}
+
+		s.seq++
+		survivor.Rev = s.seq
+		survivor.UpdatedAt = now
+		s.contacts[byUID(survivor.UID)] = survivor
+
+		for _, uid := range absorbed {
+			loser := s.contacts[byUID(uid)]
+			loser.tombstone()
+			loser.MergedInto = survivor.UID
+			s.seq++
+			loser.Rev = s.seq
+			loser.UpdatedAt = now
+			s.contacts[byUID(uid)] = loser
+		}
+
+		report.Groups = append(report.Groups, DedupeMerge{Survivor: survivor.UID, Absorbed: absorbed})
+		report.MergedCount += len(absorbed)
+		changed = true
+	}
+
+	if changed {
+		if err := s.persistLocked(); err != nil {
+			return DedupeReport{}, err
+		}
+	}
+	return report, nil
+}
+
 // GC permanently removes tombstones older than retention (nil selects
 // defaultTombstoneRetention), recording the highest purged Rev as the new GC
 // watermark so ChangedSince can detect stale cursors.

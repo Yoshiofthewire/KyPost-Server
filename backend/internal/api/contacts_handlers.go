@@ -90,6 +90,23 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleContactsDedupe finds and merges duplicate contacts in the caller's own
+// address book, returning a report of what merged. Duplicates arrive because
+// web CRUD, mobile sync, and the CardDAV client pull each assign their own UIDs.
+func (s *Server) handleContactsDedupe(w http.ResponseWriter, r *http.Request) {
+	store, err := s.contactsFor(r)
+	if err != nil {
+		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
+		return
+	}
+	report, err := store.Dedupe()
+	if err != nil {
+		http.Error(w, "failed to dedupe contacts", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleContactByID serves single-contact read/update/delete for the caller's
 // own address book.
 func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
