@@ -11,6 +11,17 @@ import (
 	vcard "github.com/emersion/go-vcard"
 )
 
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
+}
+
 // handleContactsExport exports all contacts in the caller's own address book
 // as either vCard (.vcf) or CSV format.
 func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
@@ -73,13 +84,13 @@ func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if err := writer.Write([]string{
-				c.FormattedName,
-				c.Org,
-				c.Title,
-				emails,
-				phones,
-				c.Notes,
-				c.Birthday,
+				csvSafe(c.FormattedName),
+				csvSafe(c.Org),
+				csvSafe(c.Title),
+				csvSafe(emails),
+				csvSafe(phones),
+				csvSafe(c.Notes),
+				csvSafe(c.Birthday),
 			}); err != nil {
 				http.Error(w, "failed to write csv", http.StatusInternalServerError)
 				return
