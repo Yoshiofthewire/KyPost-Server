@@ -34,6 +34,13 @@ type Contact struct {
 	Addresses     []ContactAddress `json:"addresses,omitempty"`
 	Notes         string           `json:"notes,omitempty"`
 	Birthday      string           `json:"birthday,omitempty"` // YYYY-MM-DD
+
+	// Server-side-only provenance from deduplication. MergedUIDs lists the
+	// UIDs a survivor absorbed; MergedInto points a loser's tombstone at the
+	// survivor it was folded into. Both ride existing CardDAV/mobile sync as
+	// plain JSON; clients that don't understand them ignore them.
+	MergedUIDs []string `json:"mergedUIDs,omitempty"`
+	MergedInto string   `json:"mergedInto,omitempty"`
 }
 
 // ETag is the CardDAV entity tag / mobile-sync change marker for this
@@ -76,4 +83,7 @@ func (c *Contact) tombstone() {
 	c.Addresses = nil
 	c.Notes = ""
 	c.Birthday = ""
+	c.MergedUIDs = nil
+	// MergedInto is intentionally preserved: a merge tombstones the loser and
+	// then records which survivor it was folded into.
 }

@@ -195,6 +195,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
 	mux.HandleFunc("GET /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts", s.withAuth(s.handleContacts))
+	mux.HandleFunc("POST /api/contacts/dedupe", s.withAuth(s.handleContactsDedupe))
 	mux.HandleFunc("GET /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("PUT /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
