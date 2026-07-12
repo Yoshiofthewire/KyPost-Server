@@ -1,0 +1,8 @@
+{
+  "projectRoot": "/home/yoshi/git/llama labels",
+  "batchFiles": [
+    {"path": "docker-compose.yml", "language": "yaml", "sizeLines": 38, "fileCategory": "infra"},
+    {"path": "Dockerfile", "language": "dockerfile", "sizeLines": 50, "fileCategory": "infra"}
+  ],
+  "batchImportData": {"docker-compose.yml":[],"Dockerfile":[]}
+}
