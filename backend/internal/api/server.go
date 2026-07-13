@@ -1326,6 +1326,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		"devices":      len(devices),
 		"deliveryMode": store.NativeDeliveryMode(),
 		"pullEndpoint": pullEndpoint,
+		"transport":    transport,
 	})
 }
 
