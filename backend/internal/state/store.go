@@ -92,6 +92,9 @@ type NativeDevice struct {
 	// existed decode as false and are handled by the graceful-default rule at
 	// challenge-fanout time (see api.approverDevices).
 	MFAApprover bool `json:"mfaApprover"`
+	// Transport specifies the push delivery transport: "fcm", "apns", or "unifiedpush".
+	// Empty/absent means derive from Platform: "ios"/"macos" -> "apns", else "fcm".
+	Transport string `json:"transport,omitempty"`
 }
 
 // PullNotification is one queued notification awaiting an App Pull fetch. Seq

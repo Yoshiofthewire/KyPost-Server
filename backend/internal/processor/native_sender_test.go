@@ -161,15 +161,15 @@ func TestNewRelaySenderFromEnvAutoRegisterPersistsAndReuses(t *testing.T) {
 }
 
 // Apple platforms (iOS and macOS) must route to the APNs sender; everything
-// else (including empty/unknown) falls back to FCM.
-func TestDispatcherSenderForRoutesApplePlatformsToAPNs(t *testing.T) {
+// else (including empty/unknown) falls back to FCM (legacy behavior with empty Transport).
+func TestDispatcherLegacyPlatformRoutingWithoutExplicitTransport(t *testing.T) {
 	fcm := &RelaySender{}
 	apns := &RelaySender{}
-	d := &NativePushDispatcher{fcmSender: fcm, apnsSender: apns}
+	d := &NativePushDispatcher{fcmSender: fcm, apnsSender: apns, unifiedPushSender: NewUnifiedPushSender()}
 
 	cases := []struct {
 		platform string
-		want     *RelaySender
+		want     interface{} // *RelaySender
 	}{
 		{"ios", apns},
 		{"iOS ", apns},
@@ -180,8 +180,10 @@ func TestDispatcherSenderForRoutesApplePlatformsToAPNs(t *testing.T) {
 		{"windows", fcm},
 	}
 	for _, c := range cases {
-		if got := d.senderFor(c.platform); got != c.want {
-			t.Errorf("senderFor(%q) routed to the wrong sender", c.platform)
+		device := state.NativeDevice{Transport: "", Platform: c.platform}
+		sender, _ := d.selectSender(device)
+		if sender != c.want {
+			t.Errorf("selectSender(Platform=%q, Transport=\"\") routed to the wrong sender (got %T, want %T)", c.platform, sender, c.want)
 		}
 	}
 }
@@ -206,5 +208,114 @@ func TestNewRelaySenderFromEnvExplicitKeyWins(t *testing.T) {
 	}
 	if _, err := os.Stat(keyFile); !os.IsNotExist(err) {
 		t.Fatalf("key file should not be written when PUSH_RELAY_KEY is set (stat err = %v)", err)
+	}
+}
+
+// UnifiedPushSender must POST to the endpoint URL with JSON payload.
+func TestUnifiedPushSenderSendSuccess(t *testing.T) {
+	var seenBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &seenBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`OK`))
+	}))
+	defer ts.Close()
+
+	sender := NewUnifiedPushSender()
+	sender.client = ts.Client()
+
+	err := sender.Send(context.Background(), state.NativeDevice{PushToken: ts.URL + "/topic"}, NativePushMessage{Title: "Title", Body: "Body", Data: map[string]string{"type": "mail"}})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if seenBody["title"] != "Title" || seenBody["body"] != "Body" {
+		t.Fatalf("unexpected body: %+v", seenBody)
+	}
+	if d, ok := seenBody["data"].(map[string]any); !ok || d["type"] != "mail" {
+		t.Fatalf("data mismatch: %+v", seenBody["data"])
+	}
+}
+
+// UnifiedPushSender must treat 404/410 as stale.
+func TestUnifiedPushSenderReturnsStaleError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	sender := NewUnifiedPushSender()
+	sender.client = ts.Client()
+
+	err := sender.Send(context.Background(), state.NativeDevice{PushToken: ts.URL + "/topic"}, NativePushMessage{Title: "Title", Body: "Body"})
+	if !errors.Is(err, ErrNativeDeviceStale) {
+		t.Fatalf("Send() error = %v, want ErrNativeDeviceStale", err)
+	}
+}
+
+// Dispatcher must route by Transport field (explicit > platform-derived).
+func TestDispatcherSelectSenderByTransport(t *testing.T) {
+	fcm := &RelaySender{}
+	apns := &RelaySender{}
+	up := &UnifiedPushSender{}
+	d := &NativePushDispatcher{fcmSender: fcm, apnsSender: apns, unifiedPushSender: up}
+
+	cases := []struct {
+		name      string
+		device    state.NativeDevice
+		wantType  string
+		wantError bool
+	}{
+		// Explicit transport wins.
+		{"unifiedpush explicit", state.NativeDevice{Transport: "unifiedpush", Platform: "android"}, "UnifiedPushSender", false},
+		{"fcm explicit", state.NativeDevice{Transport: "fcm", Platform: "ios"}, "RelaySender", false},
+		{"apns explicit", state.NativeDevice{Transport: "apns", Platform: "android"}, "RelaySender", false},
+
+		// Platform-derived when transport is empty.
+		{"ios derived apns", state.NativeDevice{Transport: "", Platform: "ios"}, "RelaySender", false},
+		{"android derived fcm", state.NativeDevice{Transport: "", Platform: "android"}, "RelaySender", false},
+		{"macos derived apns", state.NativeDevice{Transport: "", Platform: "macos"}, "RelaySender", false},
+
+		// Unknown platform defaults to FCM.
+		{"unknown platform", state.NativeDevice{Transport: "", Platform: "windows"}, "RelaySender", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sender, err := d.selectSender(c.device)
+			if (err != nil) != c.wantError {
+				t.Fatalf("selectSender() error = %v, wantError %v", err, c.wantError)
+			}
+			if sender == nil && !c.wantError {
+				t.Fatal("selectSender() returned nil sender")
+			}
+		})
+	}
+}
+
+// Dispatcher Send method must dispatch to the correct sender type.
+func TestDispatcherSendRoutesCorrectly(t *testing.T) {
+	upTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upTS.Close()
+
+	d := &NativePushDispatcher{
+		fcmSender:         nil, // Not configured; will error if used
+		apnsSender:        nil,
+		unifiedPushSender: NewUnifiedPushSender(),
+	}
+	d.unifiedPushSender.client = upTS.Client()
+
+	// UnifiedPush device should route to the UP sender (which succeeds).
+	err := d.Send(context.Background(), state.NativeDevice{Transport: "unifiedpush", PushToken: upTS.URL}, NativePushMessage{Title: "Test"})
+	if err != nil {
+		t.Fatalf("Send() with unifiedpush transport error = %v", err)
+	}
+
+	// FCM device with no FCM relay configured should error.
+	err = d.Send(context.Background(), state.NativeDevice{Transport: "fcm"}, NativePushMessage{Title: "Test"})
+	if err == nil {
+		t.Fatal("Send() with fcm transport but no relay should error")
 	}
 }

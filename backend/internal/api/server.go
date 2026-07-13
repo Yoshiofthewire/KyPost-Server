@@ -1217,6 +1217,7 @@ type nativeRegisterRequest struct {
 	DeviceToken    string `json:"deviceToken"`
 	DeviceID       string `json:"deviceId,omitempty"`
 	Platform       string `json:"platform,omitempty"`
+	Transport      string `json:"transport,omitempty"`
 	DeviceName     string `json:"deviceName,omitempty"`
 	AppVersion     string `json:"appVersion,omitempty"`
 }
@@ -1241,6 +1242,16 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		http.Error(w, "subscriberId, pairingToken, and deviceToken are required", http.StatusBadRequest)
 		return
 	}
+
+	platform := normalizeNativePlatform(req.Platform)
+	transport := normalizeNativeTransport(req.Transport, req.Platform)
+
+	// For UnifiedPush, the deviceToken is an HTTPS endpoint URL, not an opaque token.
+	if transport == "unifiedpush" && !strings.HasPrefix(strings.TrimSpace(deviceToken), "https://") {
+		http.Error(w, "for unifiedpush transport, deviceToken must be an https:// URL", http.StatusBadRequest)
+		return
+	}
+
 	if err := s.validatePairingToken(subscriberID, pairingToken, time.Now().UTC()); err != nil {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
 		return
@@ -1268,7 +1279,8 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 
 	device := state.NativeDevice{
 		DeviceID:    strings.TrimSpace(req.DeviceID),
-		Platform:    normalizeNativePlatform(req.Platform),
+		Platform:    platform,
+		Transport:   transport,
 		PushToken:   deviceToken,
 		DeviceName:  strings.TrimSpace(req.DeviceName),
 		AppVersion:  strings.TrimSpace(req.AppVersion),
@@ -1349,6 +1361,24 @@ func normalizeNativePlatform(platform string) string {
 		return clean
 	default:
 		return "android"
+	}
+}
+
+func normalizeNativeTransport(transport, platform string) string {
+	clean := strings.ToLower(strings.TrimSpace(transport))
+	switch clean {
+	case "fcm", "apns", "unifiedpush":
+		return clean
+	case "":
+		// Derive from platform if transport not specified (legacy behavior).
+		switch strings.ToLower(strings.TrimSpace(platform)) {
+		case "ios", "macos":
+			return "apns"
+		default:
+			return "fcm"
+		}
+	default:
+		return "fcm"
 	}
 }
 

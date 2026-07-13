@@ -117,6 +117,10 @@ func (s *Server) handleNativeDeviceMFA(w http.ResponseWriter, r *http.Request) {
 // cleanup, and health recording every other native push in this app gets —
 // scoped to the approver-filtered device list rather than every paired device.
 // The data payload is the contract a future llama-mobile build must recognize.
+//
+// UnifiedPush devices are excluded from MFA challenges pending end-to-end encryption
+// support; MFA metadata is sensitive and should not traverse unencrypted public
+// UnifiedPush brokers (e.g., ntfy.sh). Devices remain usable for mail notifications.
 func (s *Server) dispatchPushChallenge(userID, challengeID string) {
 	store, err := s.userStore(userID)
 	if err != nil {
@@ -127,6 +131,20 @@ func (s *Server) dispatchPushChallenge(userID, challengeID string) {
 	if len(devices) == 0 {
 		return
 	}
+
+	// Filter out unifiedpush devices: MFA challenges contain sensitive metadata
+	// and should not traverse unencrypted public brokers until encryption is added.
+	filteredDevices := make([]state.NativeDevice, 0, len(devices))
+	for _, d := range devices {
+		if strings.ToLower(strings.TrimSpace(d.Transport)) == "unifiedpush" {
+			continue
+		}
+		filteredDevices = append(filteredDevices, d)
+	}
+	if len(filteredDevices) == 0 {
+		return
+	}
+
 	message := processor.NativePushMessage{
 		Title: "Approve sign-in",
 		Body:  "Tap to approve or deny a sign-in to your account.",
@@ -135,7 +153,7 @@ func (s *Server) dispatchPushChallenge(userID, challengeID string) {
 			"challengeId": challengeID,
 		},
 	}
-	_, err = processor.SendNativePushToDevices(context.Background(), s.nativePushDispatcher, s.health, store, devices, message,
+	_, err = processor.SendNativePushToDevices(context.Background(), s.nativePushDispatcher, s.health, store, filteredDevices, message,
 		func(device state.NativeDevice, platform string, sendErr error) {
 			s.logger.Error("push mfa: dispatch failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", platform, "error", sendErr.Error())
 		})

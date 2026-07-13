@@ -171,43 +171,135 @@ func registerWithRelay(relayURL string, client *http.Client) (string, error) {
 	return key, nil
 }
 
-// NativePushDispatcher routes native push notifications to the appropriate relay
-// (FCM for Android, direct APNs for iOS) based on device.Platform.
-type NativePushDispatcher struct {
-	fcmSender  *RelaySender
-	apnsSender *RelaySender
+// UnifiedPushSender directly POSTs to UnifiedPush endpoints (e.g., ntfy.sh topics).
+// Unlike FCM/APNs relays, there is no shared credential—the endpoint URL itself
+// is public, and anyone who knows it can POST. See: https://unifiedpush.org/
+type UnifiedPushSender struct {
+	client *http.Client
 }
 
-// NewNativePushDispatcher constructs a dispatcher with both FCM (PUSH_RELAY_*)
-// and APNs (APNS_RELAY_*) senders. Either or both may be nil if not configured.
+// NewUnifiedPushSender constructs a direct HTTPS client for UnifiedPush endpoints.
+func NewUnifiedPushSender() *UnifiedPushSender {
+	return &UnifiedPushSender{
+		client: &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// Send POSTs a JSON payload to the UnifiedPush endpoint. The endpoint URL
+// (stored in device.PushToken) is a public URL like https://ntfy.sh/<topic>.
+func (s *UnifiedPushSender) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
+	endpointURL := strings.TrimSpace(device.PushToken)
+	if endpointURL == "" {
+		return errors.New("missing UnifiedPush endpoint URL")
+	}
+
+	// Mirror the shape of pull-mode payloads for consistency on the client side.
+	payload := map[string]any{
+		"title": message.Title,
+		"body":  message.Body,
+	}
+	if len(message.Data) > 0 {
+		payload["data"] = message.Data
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	trimmed := strings.TrimSpace(string(respBody))
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	// Treat 404/410 as stale: the endpoint is no longer valid.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)
+	}
+
+	return fmt.Errorf("UnifiedPush endpoint failed: status=%d response=%s", resp.StatusCode, trimmed)
+}
+
+// NativePushDispatcher routes native push notifications to the appropriate transport:
+// UnifiedPush (direct HTTPS POST), FCM relay, or APNs relay.
+type NativePushDispatcher struct {
+	fcmSender         *RelaySender
+	apnsSender        *RelaySender
+	unifiedPushSender *UnifiedPushSender
+}
+
+// NewNativePushDispatcher constructs a dispatcher with FCM (PUSH_RELAY_*),
+// APNs (APNS_RELAY_*), and UnifiedPush senders. Relay senders may be nil if not configured.
 func NewNativePushDispatcher(log *logging.Logger) *NativePushDispatcher {
 	return &NativePushDispatcher{
-		fcmSender:  newRelaySenderFromEnvWithPrefix(log, "PUSH_RELAY"),
-		apnsSender: newRelaySenderFromEnvWithPrefix(log, "APNS_RELAY"),
+		fcmSender:         newRelaySenderFromEnvWithPrefix(log, "PUSH_RELAY"),
+		apnsSender:        newRelaySenderFromEnvWithPrefix(log, "APNS_RELAY"),
+		unifiedPushSender: NewUnifiedPushSender(),
 	}
 }
 
-// senderFor returns the appropriate sender for a given platform. Apple
-// platforms (iOS and macOS) share the APNs relay; everything else goes to FCM.
-func (d *NativePushDispatcher) senderFor(platform string) *RelaySender {
-	switch strings.ToLower(strings.TrimSpace(platform)) {
-	case "ios", "macos":
-		return d.apnsSender
-	}
-	return d.fcmSender
-}
+// selectSender returns the appropriate sender for a device based on its Transport
+// and Platform, or an error if no sender is available.
+func (d *NativePushDispatcher) selectSender(device state.NativeDevice) (interface{}, error) {
+	transport := strings.ToLower(strings.TrimSpace(device.Transport))
 
-// Send dispatches a native push to the appropriate relay based on device.Platform.
-func (d *NativePushDispatcher) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
-	sender := d.senderFor(device.Platform)
-	if sender == nil {
-		platform := strings.TrimSpace(device.Platform)
-		if platform == "" {
-			platform = "unknown"
+	// If transport is explicit, use it; otherwise derive from platform (legacy).
+	if transport == "" {
+		switch strings.ToLower(strings.TrimSpace(device.Platform)) {
+		case "ios", "macos":
+			transport = "apns"
+		default:
+			transport = "fcm"
 		}
-		return fmt.Errorf("native push relay not configured for platform %q", platform)
 	}
-	return sender.Send(ctx, device, message)
+
+	switch transport {
+	case "unifiedpush":
+		return d.unifiedPushSender, nil
+	case "apns":
+		if d.apnsSender != nil {
+			return d.apnsSender, nil
+		}
+		return nil, fmt.Errorf("APNs relay not configured")
+	case "fcm":
+		if d.fcmSender != nil {
+			return d.fcmSender, nil
+		}
+		return nil, fmt.Errorf("FCM relay not configured")
+	default:
+		return nil, fmt.Errorf("unknown transport %q", transport)
+	}
+}
+
+// Send dispatches a native push to the appropriate sender based on device.Transport/Platform.
+func (d *NativePushDispatcher) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
+	sender, err := d.selectSender(device)
+	if err != nil {
+		return err
+	}
+
+	switch s := sender.(type) {
+	case *UnifiedPushSender:
+		return s.Send(ctx, device, message)
+	case *RelaySender:
+		return s.Send(ctx, device, message)
+	default:
+		return fmt.Errorf("unknown sender type")
+	}
 }
 
 func (s *RelaySender) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {
