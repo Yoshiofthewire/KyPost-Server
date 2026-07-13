@@ -1009,8 +1009,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               flex: 1,
               padding: "6px 8px",
               borderRadius: "4px",
-              border: "1px solid var(--border-color)",
-              backgroundColor: "var(--bg-color)",
+              border: "1px solid var(--line)",
+              backgroundColor: "var(--panel)",
+              color: "var(--ink-strong)",
               fontSize: "0.9rem"
             }}
           />
@@ -1020,8 +1021,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             style={{
               padding: "6px 8px",
               borderRadius: "4px",
-              border: "1px solid var(--border-color)",
-              backgroundColor: "var(--bg-color)",
+              border: "1px solid var(--line)",
+              backgroundColor: "var(--panel)",
+              color: "var(--ink-strong)",
               fontSize: "0.9rem"
             }}
           >
