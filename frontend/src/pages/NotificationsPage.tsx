@@ -51,6 +51,7 @@ type NativeDevice = {
   userAgent?: string;
   registeredAt?: string;
   updatedAt?: string;
+  transport?: string;
 };
 
 type NativeDevicesResponse = {
@@ -128,6 +129,18 @@ function summarizeDevice(device: NativeDevice): string {
   // Show exactly what the client reports as its app version, with no derived
   // platform/"v" prefix.
   return (device.appVersion || "").trim();
+}
+
+// Mirrors the backend's normalizeNativeTransport: legacy devices with no
+// explicit transport are derived from platform (ios/macos -> APNs, else Firebase).
+function deviceTransport(device: NativeDevice): { key: string; label: string } {
+  const raw = (device.transport || "").trim().toLowerCase();
+  if (raw === "fcm") return { key: "fcm", label: "Firebase" };
+  if (raw === "apns") return { key: "apns", label: "APNs" };
+  if (raw === "unifiedpush") return { key: "unifiedpush", label: "UnifiedPush" };
+  const platform = (device.platform || "").trim().toLowerCase();
+  if (platform === "ios" || platform === "macos") return { key: "apns", label: "APNs" };
+  return { key: "fcm", label: "Firebase" };
 }
 
 function pairingBarColor(remainingMs: number, ttlMs: number): string {
@@ -735,10 +748,20 @@ export function NotificationsPage() {
                   <p className="notifications-native-empty">No native devices registered yet.</p>
                 ) : (
                   <div className="notifications-native-items">
-                    {nativeDevices.map((device) => (
+                    {nativeDevices.map((device) => {
+                      const transport = deviceTransport(device);
+                      return (
                       <div key={device.deviceId} className="notifications-native-item">
                         <div className="notifications-native-main">
-                          <strong>{device.deviceName?.trim() || device.platform || "device"}</strong>
+                          <div className="notifications-native-name-row">
+                            <strong>{device.deviceName?.trim() || device.platform || "device"}</strong>
+                            <span
+                              className={`notifications-transport-badge notifications-transport-badge-${transport.key}`}
+                              title="Current notification delivery method for this device"
+                            >
+                              {transport.label}
+                            </span>
+                          </div>
                           <span>{maskToken(device.pushToken || "")}</span>
                           {summarizeDevice(device) ? <span className="notifications-native-detail">{summarizeDevice(device)}</span> : null}
                           <span className="notifications-native-detail">Updated: {formatDeviceTime(device.updatedAt || device.registeredAt)}</span>
@@ -753,7 +776,8 @@ export function NotificationsPage() {
                           {nativeRemoveBusyId === device.deviceId ? "Removing..." : "Remove"}
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

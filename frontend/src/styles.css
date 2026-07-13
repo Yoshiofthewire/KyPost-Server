@@ -1054,6 +1054,38 @@ pre {
   color: var(--ink-strong);
 }
 
+.notifications-native-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.notifications-native-name-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notifications-transport-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.68rem;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--panel) 84%, var(--bg));
+  color: color-mix(in srgb, var(--ink) 62%, var(--ink-strong));
+}
+
+.notifications-transport-badge-unifiedpush {
+  border-color: color-mix(in srgb, #7bbf7b 55%, var(--line));
+  background: color-mix(in srgb, #7bbf7b 16%, transparent);
+  color: color-mix(in srgb, #a5dca5 82%, var(--ink-strong));
+}
+
 .notifications-native-main span {
   font-size: 0.78rem;
   color: color-mix(in srgb, var(--ink) 78%, var(--ink-strong));
