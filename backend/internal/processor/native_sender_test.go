@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,7 +215,7 @@ func TestNewRelaySenderFromEnvExplicitKeyWins(t *testing.T) {
 // UnifiedPushSender must POST to the endpoint URL with JSON payload.
 func TestUnifiedPushSenderSendSuccess(t *testing.T) {
 	var seenBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &seenBody)
 		w.WriteHeader(http.StatusOK)
@@ -239,7 +240,7 @@ func TestUnifiedPushSenderSendSuccess(t *testing.T) {
 
 // UnifiedPushSender must treat 404/410 as stale.
 func TestUnifiedPushSenderReturnsStaleError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer ts.Close()
@@ -295,7 +296,7 @@ func TestDispatcherSelectSenderByTransport(t *testing.T) {
 
 // Dispatcher Send method must dispatch to the correct sender type.
 func TestDispatcherSendRoutesCorrectly(t *testing.T) {
-	upTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upTS := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upTS.Close()
@@ -317,5 +318,102 @@ func TestDispatcherSendRoutesCorrectly(t *testing.T) {
 	err = d.Send(context.Background(), state.NativeDevice{Transport: "fcm"}, NativePushMessage{Title: "Test"})
 	if err == nil {
 		t.Fatal("Send() with fcm transport but no relay should error")
+	}
+}
+
+// isPrivateOrReservedIP must flag every address class that must never be
+// reached via a client-supplied UnifiedPush endpoint (SSRF defense), and
+// leave ordinary public addresses alone.
+func TestIsPrivateOrReservedIP(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", true},               // loopback
+		{"::1", true},                      // IPv6 loopback
+		{"10.0.0.5", true},                 // RFC1918 private
+		{"172.16.0.1", true},               // RFC1918 private
+		{"192.168.1.1", true},              // RFC1918 private
+		{"169.254.169.254", true},          // link-local / cloud metadata
+		{"169.254.0.1", true},              // link-local
+		{"fc00::1", true},                  // RFC4193 unique local (IPv6 private)
+		{"fe80::1", true},                  // IPv6 link-local
+		{"0.0.0.0", true},                  // unspecified
+		{"224.0.0.1", true},                // multicast
+		{"8.8.8.8", false},                 // public
+		{"1.1.1.1", false},                 // public
+		{"2606:4700:4700::1111", false},    // public IPv6 (Cloudflare)
+	}
+	for _, c := range cases {
+		ip := net.ParseIP(c.ip)
+		if ip == nil {
+			t.Fatalf("net.ParseIP(%q) returned nil", c.ip)
+		}
+		if got := isPrivateOrReservedIP(ip); got != c.want {
+			t.Errorf("isPrivateOrReservedIP(%q) = %v, want %v", c.ip, got, c.want)
+		}
+	}
+}
+
+// ValidateUnifiedPushEndpointURL must reject non-https schemes and IP-literal
+// hosts in private/reserved ranges (including the cloud metadata address),
+// and accept public IP-literal hosts. IP literals avoid any DNS dependency
+// in this test.
+func TestValidateUnifiedPushEndpointURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"http scheme rejected", "http://8.8.8.8/topic", true},
+		{"no scheme rejected", "8.8.8.8/topic", true},
+		{"public IPv4 literal accepted", "https://8.8.8.8/topic", false},
+		{"loopback rejected", "https://127.0.0.1/topic", true},
+		{"cloud metadata rejected", "https://169.254.169.254/latest/meta-data", true},
+		{"rfc1918 rejected", "https://10.0.0.5/topic", true},
+		{"rfc1918 192.168 rejected", "https://192.168.1.1/topic", true},
+		{"ipv6 loopback rejected", "https://[::1]/topic", true},
+		{"invalid url rejected", "https://%zz", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateUnifiedPushEndpointURL(c.url)
+			if (err != nil) != c.wantErr {
+				t.Errorf("ValidateUnifiedPushEndpointURL(%q) error = %v, wantErr %v", c.url, err, c.wantErr)
+			}
+		})
+	}
+}
+
+// Send must reject non-https endpoints even if a device record somehow ended
+// up with one (defense in depth alongside registration-time validation).
+func TestUnifiedPushSenderSendRejectsNonHTTPS(t *testing.T) {
+	sender := NewUnifiedPushSender()
+	err := sender.Send(context.Background(), state.NativeDevice{PushToken: "http://example.com/topic"}, NativePushMessage{Title: "Test"})
+	if err == nil {
+		t.Fatal("Send() with http:// endpoint should error")
+	}
+}
+
+// The dispatcher's UnifiedPush sender must refuse to dial private/loopback
+// addresses even when not overridden with a test client, proving the
+// production dial path (safeDialContext) is actually wired in and not just
+// bypassed by tests that swap in ts.Client().
+func TestUnifiedPushSenderRefusesPrivateAddressAtDialTime(t *testing.T) {
+	sender := NewUnifiedPushSender()
+	// A loopback listener the sender must refuse to connect to via its real
+	// (non-test-overridden) transport, proving safeDialContext is active.
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	// Use the sender's real transport (not ts.Client()) so safeDialContext runs;
+	// only borrow the test server's TLS trust so the handshake itself would
+	// otherwise succeed if the dial were allowed through.
+	sender.client.Transport.(*http.Transport).TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig
+
+	err := sender.Send(context.Background(), state.NativeDevice{PushToken: ts.URL + "/topic"}, NativePushMessage{Title: "Test"})
+	if err == nil {
+		t.Fatal("Send() to a loopback address should be refused by safeDialContext")
 	}
 }

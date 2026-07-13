@@ -1246,10 +1246,15 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	platform := normalizeNativePlatform(req.Platform)
 	transport := normalizeNativeTransport(req.Transport, req.Platform)
 
-	// For UnifiedPush, the deviceToken is an HTTPS endpoint URL, not an opaque token.
-	if transport == "unifiedpush" && !strings.HasPrefix(strings.TrimSpace(deviceToken), "https://") {
-		http.Error(w, "for unifiedpush transport, deviceToken must be an https:// URL", http.StatusBadRequest)
-		return
+	// For UnifiedPush, the deviceToken is an HTTPS endpoint URL the client
+	// fully controls, not an opaque token — reject anything that could be used
+	// for SSRF against internal services (private/loopback/link-local hosts).
+	// The sender re-checks at send time too, against DNS rebinding.
+	if transport == "unifiedpush" {
+		if err := processor.ValidateUnifiedPushEndpointURL(deviceToken); err != nil {
+			http.Error(w, "invalid unifiedpush deviceToken: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	if err := s.validatePairingToken(subscriberID, pairingToken, time.Now().UTC()); err != nil {

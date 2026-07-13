@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,14 +176,106 @@ func registerWithRelay(relayURL string, client *http.Client) (string, error) {
 // UnifiedPushSender directly POSTs to UnifiedPush endpoints (e.g., ntfy.sh topics).
 // Unlike FCM/APNs relays, there is no shared credential—the endpoint URL itself
 // is public, and anyone who knows it can POST. See: https://unifiedpush.org/
+//
+// Because the endpoint is fully client-supplied at registration time, this is a
+// classic SSRF surface: without validation, a malicious/compromised client could
+// register an "endpoint" pointing at internal services (cloud metadata IPs,
+// admin panels on the server's own network) and have this server dutifully POST
+// to it on every notification. Defense is two-layered: ValidateUnifiedPushEndpointURL
+// rejects obviously-unsafe endpoints at registration time, and the sender's own
+// dial hook re-resolves and re-checks the IP immediately before every connection
+// (registration-time DNS can be rebound to a private address afterward).
 type UnifiedPushSender struct {
 	client *http.Client
 }
 
-// NewUnifiedPushSender constructs a direct HTTPS client for UnifiedPush endpoints.
+// isPrivateOrReservedIP reports whether ip must never be reached via a
+// server-supplied UnifiedPush endpoint: loopback, RFC1918/RFC4193 private,
+// link-local (this also covers the 169.254.169.254 cloud metadata address),
+// multicast, or unspecified.
+func isPrivateOrReservedIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
+}
+
+// ValidateUnifiedPushEndpointURL rejects UnifiedPush endpoint URLs that are
+// not safe to POST to from the server: non-https schemes, and hosts that
+// resolve (or are given as IP literals) to a private/loopback/link-local
+// address. Used at registration time so bad endpoints are rejected up front;
+// see UnifiedPushSender for the send-time recheck against DNS rebinding.
+func ValidateUnifiedPushEndpointURL(rawURL string) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return errors.New("endpoint must use https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("endpoint missing host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateOrReservedIP(ip) {
+			return errors.New("endpoint resolves to a private or reserved address")
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("failed to resolve endpoint host: %w", err)
+	}
+	for _, ip := range ips {
+		if isPrivateOrReservedIP(ip) {
+			return fmt.Errorf("endpoint host resolves to a private or reserved address (%s)", ip)
+		}
+	}
+	return nil
+}
+
+// safeDialContext re-resolves the target host and refuses to connect if every
+// candidate address is private/reserved. Run at actual dial time (not just
+// registration time) so a hostname that was public at registration but has
+// since been rebound to an internal address (DNS rebinding) is still blocked.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	var chosen net.IP
+	for _, ip := range ips {
+		if !isPrivateOrReservedIP(ip) {
+			chosen = ip
+			break
+		}
+	}
+	if chosen == nil {
+		return nil, fmt.Errorf("refusing to dial %q: no public address available", host)
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
+}
+
+// NewUnifiedPushSender constructs a direct HTTPS client for UnifiedPush endpoints,
+// with dial-time SSRF protection (see safeDialContext) and redirects disabled
+// (a redirect target bypasses the pre-dial check otherwise).
 func NewUnifiedPushSender() *UnifiedPushSender {
 	return &UnifiedPushSender{
-		client: &http.Client{Timeout: 15 * time.Second},
+		client: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: &http.Transport{DialContext: safeDialContext},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return errors.New("redirects are not followed for UnifiedPush endpoints")
+			},
+		},
 	}
 }
 
@@ -191,6 +285,9 @@ func (s *UnifiedPushSender) Send(ctx context.Context, device state.NativeDevice,
 	endpointURL := strings.TrimSpace(device.PushToken)
 	if endpointURL == "" {
 		return errors.New("missing UnifiedPush endpoint URL")
+	}
+	if !strings.HasPrefix(endpointURL, "https://") {
+		return errors.New("UnifiedPush endpoint must use https")
 	}
 
 	// Mirror the shape of pull-mode payloads for consistency on the client side.

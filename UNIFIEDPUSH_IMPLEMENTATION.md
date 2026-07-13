@@ -13,6 +13,8 @@ This implementation adds support for NTFY (UnifiedPush) as an alternative push n
 
 4. **Backward compatibility**: Devices with no explicit `Transport` derive it from `Platform` (legacy behavior): iOS/macOS → APNs, everything else → FCM. Existing devices need no migration.
 
+5. **SSRF hardening**: The UnifiedPush endpoint is a URL fully controlled by the registering client, which is a classic SSRF surface — without validation, a malicious/compromised client could register an endpoint pointing at internal services (cloud metadata IPs, admin panels reachable from the server's network) and have this server POST to it on every notification. Two layers of defense: `processor.ValidateUnifiedPushEndpointURL` rejects non-https and private/loopback/link-local/reserved hosts at registration time, and `UnifiedPushSender`'s dial hook (`safeDialContext`) re-resolves and re-checks the IP immediately before every connection — closing the DNS-rebinding gap where a hostname is public at registration but repointed at an internal address later. Redirects are also disabled, since a redirect target would otherwise bypass the pre-dial check.
+
 ## Backend Changes
 
 ### Core Modules
