@@ -14,6 +14,7 @@ import (
 	"llama-lab/backend/internal/config"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
+	"llama-lab/backend/internal/pgpmail"
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/users"
 )
@@ -114,6 +115,11 @@ func newTestServer(t *testing.T) *Server {
 	srv.configDir = configDir
 	srv.totpSecretKeyPath = filepath.Join(configDir, "totp-secret.key")
 	srv.pgpPrivateKeyPath = filepath.Join(configDir, "pgp-private-key.key")
+	// NewServer wires pickupStore to the process-default /llama_lab/...
+	// paths at construction time, before stateDir above gets overridden, so
+	// it must be rebuilt here against the temp dirs or pickup tests would
+	// try to write outside the sandbox.
+	srv.pickupStore = pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), filepath.Join(configDir, "pickup-store.key"))
 	return srv
 }
 

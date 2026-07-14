@@ -141,6 +141,7 @@ func runDaemon(d runDeps) error {
 
 func runServer(d runDeps) error {
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil)
+	go srv.StartPickupSweeper(context.Background())
 	return srv.Run()
 }
 
