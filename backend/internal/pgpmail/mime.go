@@ -226,7 +226,12 @@ func SignMIME(plaintext []byte, signer *Identity) ([]byte, error) {
 // the signed part's bytes (content already carries its own embedded
 // Content-Type header line) — the signed part's bytes on the wire must be
 // byte-identical to what was passed to Sign, or verification on the
-// receiving end fails.
+// receiving end fails. Per RFC 2046, the CRLF immediately before a boundary
+// delimiter belongs to the delimiter, not the part body — it must always be
+// written after content, unconditionally, even when content already ends in
+// its own "\r\n" (e.g. a multipart/mixed inner structure with attachments):
+// that trailing CRLF is signed data, and a compliant parser will strip
+// exactly one additional CRLF as the delimiter separator, not two.
 func buildSignedEnvelope(envelope textproto.MIMEHeader, content []byte, armoredSignature string) []byte {
 	boundary := randomBoundary()
 
@@ -238,9 +243,7 @@ func buildSignedEnvelope(envelope textproto.MIMEHeader, content []byte, armoredS
 
 	msg.WriteString("--" + boundary + "\r\n")
 	msg.Write(content)
-	if !bytes.HasSuffix(content, []byte("\r\n")) {
-		msg.WriteString("\r\n")
-	}
+	msg.WriteString("\r\n")
 
 	msg.WriteString("--" + boundary + "\r\n")
 	msg.WriteString("Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n")
