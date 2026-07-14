@@ -11,6 +11,7 @@ import (
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/contacts"
+	"llama-lab/backend/internal/groups"
 	"llama-lab/backend/internal/mailcache"
 	"llama-lab/backend/internal/state"
 )
@@ -109,6 +110,62 @@ func (s *Server) contactsFor(r *http.Request) (*contacts.Store, error) {
 		return nil, errors.New("no auth context on request")
 	}
 	return s.userContactsStore(ac.UserID)
+}
+
+func (s *Server) userGroupsStore(userID string) (*groups.Store, error) {
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	if st, ok := s.userGroups[userID]; ok {
+		return st, nil
+	}
+	st, err := groups.New(s.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	s.userGroups[userID] = st
+	return st, nil
+}
+
+// groupsFor resolves the calling user's groups store from the request's
+// AuthContext (requires the handler to be wrapped in withAuth).
+func (s *Server) groupsFor(r *http.Request) (*groups.Store, error) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		return nil, errors.New("no auth context on request")
+	}
+	return s.userGroupsStore(ac.UserID)
+}
+
+// sanitizeGroupIDsForUser drops any group ID that isn't a real group owned
+// by userID, so a stale or forged ID from a client can't create a dangling
+// Contact.GroupIDs reference.
+func (s *Server) sanitizeGroupIDsForUser(userID string, ids []string) []string {
+	if len(ids) == 0 {
+		return ids
+	}
+	gs, err := s.userGroupsStore(userID)
+	if err != nil {
+		return nil
+	}
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := gs.Get(id); ok {
+			kept = append(kept, id)
+		}
+	}
+	return kept
+}
+
+// userContactPhotosDir is where a user's contact photo files live, one
+// content-hashed file per uploaded photo.
+func (s *Server) userContactPhotosDir(userID string) string {
+	return filepath.Join(s.userStateDir(userID), "contact-photos")
+}
+
+// userContactPhotoPath resolves a photoRef to its on-disk path.
+// filepath.Base guards against path traversal from a hostile ref.
+func (s *Server) userContactPhotoPath(userID, ref string) string {
+	return filepath.Join(s.userContactPhotosDir(userID), filepath.Base(ref))
 }
 
 func (s *Server) userMailCacheStore(userID string) (*mailcache.Store, error) {

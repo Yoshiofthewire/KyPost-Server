@@ -2029,6 +2029,15 @@ pre {
   width: 100%;
 }
 
+.contacts-form-card label.contacts-group-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  padding: 2px 0;
+  background: none;
+}
+
 .contacts-form-actions {
   display: flex;
   gap: 8px;
@@ -2198,6 +2207,7 @@ pre {
   color: var(--accent-contrast);
   background: linear-gradient(180deg, var(--new-email-start), var(--new-email-end));
   border: 1px solid var(--new-email-border);
+  object-fit: cover;
 }
 
 .contacts-identity-text {
@@ -2333,18 +2343,87 @@ pre {
   margin-top: 12px;
 }
 
-.contacts-extra-details {
-  border: 1px dashed color-mix(in srgb, var(--accent) 55%, var(--line));
+.contacts-multivalue {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px;
-  display: grid;
-  gap: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--bg));
 }
 
-.contacts-extra-details h4 {
-  margin: 0;
-  font-size: 0.84rem;
+.contacts-multivalue-label {
   color: var(--ink-strong);
+  font-size: 0.84rem;
+}
+
+.contacts-multivalue-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.contacts-multivalue-row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.contacts-multivalue-remove {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  line-height: 1;
+}
+
+.contacts-multivalue-add {
+  justify-self: start;
+}
+
+.contacts-address-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.contacts-address-row > input:first-child {
+  grid-column: span 2;
+}
+
+.contacts-pronoun-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.contacts-pronoun-chip.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.contacts-photo-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.contacts-photo-preview {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+.contacts-pgp-fingerprint {
+  font-size: 0.82rem;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+
+.contacts-pgp-error {
+  font-size: 0.82rem;
+  color: #c0392b;
 }
 
 .contact-details-backdrop {

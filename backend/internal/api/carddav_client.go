@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"llama-lab/backend/internal/contacts"
+	"llama-lab/backend/internal/groups"
 
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
@@ -185,10 +186,16 @@ func (s *Server) handleContactsCardDAVClientSync(w http.ResponseWriter, r *http.
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
 		return
 	}
+	groupsStore, err := s.userGroupsStore(ac.UserID)
+	if err != nil {
+		http.Error(w, "failed to open groups store", http.StatusInternalServerError)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
-	imported, updated, addressBookPath, discovered, syncErr := syncCardDAVClient(ctx, payload, store)
+	storePhoto := func(data []byte) (string, error) { return s.storeContactPhoto(ac.UserID, data) }
+	imported, updated, addressBookPath, discovered, syncErr := syncCardDAVClient(ctx, payload, store, groupsStore, storePhoto)
 
 	payload.LastSyncedAt = time.Now().UTC().Format(time.RFC3339)
 	if discovered != nil {
@@ -460,7 +467,7 @@ func discoverAddressBooksFrom(ctx context.Context, httpClient webdav.HTTPClient,
 // reports every collection found (with its contact count) so the caller can
 // see what was found and pin a specific path if the auto-pick is still
 // wrong.
-func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store) (imported, updated int, addressBookPath string, discovered []discoveredAddressBook, err error) {
+func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store, groupsStore *groups.Store, storePhoto func([]byte) (string, error)) (imported, updated int, addressBookPath string, discovered []discoveredAddressBook, err error) {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	authed := webdav.HTTPClientWithBasicAuth(httpClient, cfg.Username, cfg.Password)
 	hostRoot, err := cardDAVHostRoot(cfg.ServerURL)
@@ -526,7 +533,17 @@ func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, stor
 	for _, c := range cards {
 		uid := remoteContactUID(c)
 		_, existed := store.Get(uid)
-		if _, err := store.Upsert(contactFromVCard(uid, c.Card)); err != nil {
+		parsed := contactFromVCard(uid, c.Card)
+		newContact := parsed.contact
+		if len(parsed.categoryNames) > 0 && groupsStore != nil {
+			newContact.GroupIDs = resolveGroupIDsByName(groupsStore, parsed.categoryNames)
+		}
+		if len(parsed.photoData) > 0 && storePhoto != nil {
+			if ref, err := storePhoto(parsed.photoData); err == nil {
+				newContact.PhotoRef = ref
+			}
+		}
+		if _, err := store.Upsert(newContact); err != nil {
 			return imported, updated, addressBookPath, discovered, fmt.Errorf("save contact %s: %w", uid, err)
 		}
 		if existed {

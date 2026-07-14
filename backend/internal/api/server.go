@@ -35,6 +35,7 @@ import (
 	"llama-lab/backend/internal/contacts"
 	"llama-lab/backend/internal/cryptutil"
 	"llama-lab/backend/internal/fsutil"
+	"llama-lab/backend/internal/groups"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/mailcache"
@@ -89,6 +90,7 @@ type Server struct {
 	userMu         sync.Mutex
 	userStores     map[string]*state.Store
 	userContacts   map[string]*contacts.Store
+	userGroups     map[string]*groups.Store
 	userMailCache  map[string]*mailcache.Store
 	userMail       map[string]*serverMailEntry
 	subIndex       map[string]string
@@ -121,6 +123,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		nativePushDispatcher: processor.NewNativePushDispatcher(logger),
 		userStores:           map[string]*state.Store{},
 		userContacts:         map[string]*contacts.Store{},
+		userGroups:           map[string]*groups.Store{},
 		userMailCache:        map[string]*mailcache.Store{},
 		userMail:             map[string]*serverMailEntry{},
 		subIndex:             map[string]string{},
@@ -212,6 +215,13 @@ func (s *Server) Run() error {
 	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("GET /api/contacts/sync", s.handleContactsSync)
 	mux.HandleFunc("POST /api/contacts/sync", s.handleContactsSync)
+	mux.HandleFunc("POST /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
+	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
+	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
+	mux.HandleFunc("GET /api/groups", s.withAuth(s.handleGroups))
+	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
+	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.HandleFunc("DELETE /api/groups/{id}", s.withAuth(s.handleGroupByID))
 	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.HandleFunc("GET /api/setup", s.handleSetup)

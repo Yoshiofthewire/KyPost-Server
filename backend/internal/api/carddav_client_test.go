@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"llama-lab/backend/internal/contacts"
+	"llama-lab/backend/internal/groups"
 
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
@@ -139,6 +140,10 @@ func TestSyncCardDAVClientProbesEveryDiscoveredBook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("contacts.New: %v", err)
 	}
+	groupsStore, err := groups.New(dir)
+	if err != nil {
+		t.Fatalf("groups.New: %v", err)
+	}
 
 	cfg := carddavClientConfigPayload{
 		ServerURL: srv.URL + "/carddav/" + fakeUsername,
@@ -146,7 +151,7 @@ func TestSyncCardDAVClientProbesEveryDiscoveredBook(t *testing.T) {
 		Password:  "irrelevant",
 	}
 
-	imported, updated, addressBookPath, discovered, err := syncCardDAVClient(context.Background(), cfg, store)
+	imported, updated, addressBookPath, discovered, err := syncCardDAVClient(context.Background(), cfg, store, groupsStore, nil)
 	if err != nil {
 		t.Fatalf("syncCardDAVClient returned error: %v", err)
 	}

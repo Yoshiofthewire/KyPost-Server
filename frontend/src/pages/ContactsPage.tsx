@@ -2,107 +2,225 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toErrorMessage } from "../api/client";
 import {
   bulkDeleteContacts,
+  contactPhotoUrl,
   createContact,
   dedupeContacts,
   deleteContact,
+  deleteContactPhoto,
   exportContactsUrl,
   importContacts,
   listContacts,
   updateContact,
+  uploadContactPhoto,
+  IM_SERVICES,
   type Contact,
-  type ContactInput
+  type ContactAddress,
+  type ContactCustomField,
+  type ContactEvent,
+  type ContactIM,
+  type ContactInput,
+  type ContactRelation,
+  type ContactURL,
+  type ContactValue,
+  type IMService
 } from "../api/contacts";
+import { createGroup, listGroups, type Group } from "../api/groups";
 import { usePagination } from "../hooks/usePagination";
 import { PageTabs } from "../components/PageTabs";
+import { MultiValueField } from "../components/MultiValueField";
 
 type FormState = {
   fn: string;
   givenName: string;
   familyName: string;
+  middleName: string;
+  prefix: string;
+  suffix: string;
+  nickname: string;
   org: string;
-  email: string;
-  phone: string;
+  title: string;
+  department: string;
+  phoneticGivenName: string;
+  phoneticFamilyName: string;
+  birthday: string;
   notes: string;
+  pronouns: string;
+  pgpKey: string;
+  photoRef?: string;
+  groupIDs: string[];
+  emails: ContactValue[];
+  phones: ContactValue[];
+  addresses: ContactAddress[];
+  ims: ContactIM[];
+  websites: ContactURL[];
+  relations: ContactRelation[];
+  events: ContactEvent[];
+  customFields: ContactCustomField[];
 };
 
 const emptyFormState: FormState = {
   fn: "",
   givenName: "",
   familyName: "",
+  middleName: "",
+  prefix: "",
+  suffix: "",
+  nickname: "",
   org: "",
-  email: "",
-  phone: "",
-  notes: ""
+  title: "",
+  department: "",
+  phoneticGivenName: "",
+  phoneticFamilyName: "",
+  birthday: "",
+  notes: "",
+  pronouns: "",
+  pgpKey: "",
+  photoRef: undefined,
+  groupIDs: [],
+  emails: [],
+  phones: [],
+  addresses: [],
+  ims: [],
+  websites: [],
+  relations: [],
+  events: [],
+  customFields: []
 };
 
 const CONTACTS_PER_PAGE = 20;
+
+const RELATION_LABELS = ["spouse", "child", "parent", "partner", "manager", "assistant", "friend", "relative", "other"];
 
 function contactToFormState(contact: Contact): FormState {
   return {
     fn: contact.fn,
     givenName: contact.givenName ?? "",
     familyName: contact.familyName ?? "",
+    middleName: contact.middleName ?? "",
+    prefix: contact.prefix ?? "",
+    suffix: contact.suffix ?? "",
+    nickname: contact.nickname ?? "",
     org: contact.org ?? "",
-    email: contact.emails?.[0]?.value ?? "",
-    phone: contact.phones?.[0]?.value ?? "",
-    notes: contact.notes ?? ""
+    title: contact.title ?? "",
+    department: contact.department ?? "",
+    phoneticGivenName: contact.phoneticGivenName ?? "",
+    phoneticFamilyName: contact.phoneticFamilyName ?? "",
+    birthday: contact.birthday ?? "",
+    notes: contact.notes ?? "",
+    pronouns: contact.pronouns ?? "",
+    pgpKey: contact.pgpKey ?? "",
+    photoRef: contact.photoRef,
+    groupIDs: contact.groupIDs ?? [],
+    emails: contact.emails ?? [],
+    phones: contact.phones ?? [],
+    addresses: contact.addresses ?? [],
+    ims: contact.ims ?? [],
+    websites: contact.websites ?? [],
+    relations: contact.relations ?? [],
+    events: contact.events ?? [],
+    customFields: contact.customFields ?? []
   };
 }
 
-function formStateToInput(form: FormState, original?: Contact | null): ContactInput {
-  const input: ContactInput = {
+function keepNonEmpty<T>(rows: T[], keep: (row: T) => boolean): T[] | undefined {
+  const filtered = rows.filter(keep);
+  return filtered.length ? filtered : undefined;
+}
+
+function formStateToInput(form: FormState): ContactInput {
+  return {
     fn: form.fn.trim(),
     givenName: form.givenName.trim() || undefined,
     familyName: form.familyName.trim() || undefined,
+    middleName: form.middleName.trim() || undefined,
+    prefix: form.prefix.trim() || undefined,
+    suffix: form.suffix.trim() || undefined,
+    nickname: form.nickname.trim() || undefined,
     org: form.org.trim() || undefined,
+    title: form.title.trim() || undefined,
+    department: form.department.trim() || undefined,
+    phoneticGivenName: form.phoneticGivenName.trim() || undefined,
+    phoneticFamilyName: form.phoneticFamilyName.trim() || undefined,
+    birthday: form.birthday.trim() || undefined,
     notes: form.notes.trim() || undefined,
-    middleName: original?.middleName,
-    prefix: original?.prefix,
-    suffix: original?.suffix,
-    nickname: original?.nickname,
-    title: original?.title,
-    birthday: original?.birthday,
-    addresses: original?.addresses?.length ? original.addresses : undefined
+    pronouns: form.pronouns.trim() || undefined,
+    pgpKey: form.pgpKey.trim() || undefined,
+    photoRef: form.photoRef,
+    groupIDs: form.groupIDs.length ? form.groupIDs : undefined,
+    emails: keepNonEmpty(form.emails, (r) => r.value.trim() !== ""),
+    phones: keepNonEmpty(form.phones, (r) => r.value.trim() !== ""),
+    addresses: keepNonEmpty(form.addresses, (a) => Boolean(a.street || a.city || a.region || a.postalCode || a.country)),
+    ims: keepNonEmpty(form.ims, (r) => r.value.trim() !== ""),
+    websites: keepNonEmpty(form.websites, (r) => r.value.trim() !== ""),
+    relations: keepNonEmpty(form.relations, (r) => r.name.trim() !== ""),
+    events: keepNonEmpty(form.events, (r) => r.date.trim() !== ""),
+    customFields: keepNonEmpty(form.customFields, (r) => r.label.trim() !== "" && r.value.trim() !== "")
   };
-
-  // Preserve any emails/phones beyond the first — the form only edits index 0.
-  const extraEmails = original?.emails?.slice(1) ?? [];
-  if (form.email.trim()) {
-    input.emails = [{ value: form.email.trim(), label: original?.emails?.[0]?.label }, ...extraEmails];
-  } else if (extraEmails.length) {
-    input.emails = extraEmails;
-  }
-
-  const extraPhones = original?.phones?.slice(1) ?? [];
-  if (form.phone.trim()) {
-    input.phones = [{ value: form.phone.trim(), label: original?.phones?.[0]?.label }, ...extraPhones];
-  } else if (extraPhones.length) {
-    input.phones = extraPhones;
-  }
-
-  return input;
-}
-
-function hasExtraDetails(contact: Contact): boolean {
-  return Boolean(
-    contact.middleName ||
-      contact.prefix ||
-      contact.suffix ||
-      contact.nickname ||
-      contact.title ||
-      contact.birthday ||
-      (contact.emails && contact.emails.length > 1) ||
-      (contact.phones && contact.phones.length > 1) ||
-      (contact.addresses && contact.addresses.length > 0)
-  );
 }
 
 function contactDisplayLine(contact: Contact): string {
   return contact.emails?.[0]?.value ?? contact.phones?.[0]?.value ?? "";
 }
 
+type PGPKeyResult = { fingerprint: string; keyId: string; expires?: string } | { error: string };
+
+async function validatePGPKey(armored: string): Promise<PGPKeyResult | null> {
+  const trimmed = armored.trim();
+  if (!trimmed) return null;
+  try {
+    const openpgp = await import("openpgp");
+    const key = await openpgp.readKey({ armoredKey: trimmed });
+    const expirationTime = await key.getExpirationTime();
+    const expires = expirationTime instanceof Date ? expirationTime.toISOString().slice(0, 10) : undefined;
+    return { fingerprint: key.getFingerprint(), keyId: key.getKeyID().toHex(), expires };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "invalid key" };
+  }
+}
+
+function PGPKeyInfo({ armoredKey }: { armoredKey: string }) {
+  const [info, setInfo] = useState<PGPKeyResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void validatePGPKey(armoredKey).then((result) => {
+      if (!cancelled) setInfo(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [armoredKey]);
+
+  if (!info) return null;
+  if ("error" in info) {
+    return <p className="contacts-pgp-error">Could not parse key: {info.error}</p>;
+  }
+  return (
+    <p className="contacts-pgp-fingerprint">
+      Fingerprint: {info.fingerprint}
+      {info.expires ? ` · Expires ${info.expires}` : ""}
+    </p>
+  );
+}
+
+function ContactAvatar({ contact, className }: { contact: Contact; className?: string }) {
+  const classes = ["contacts-avatar", className].filter(Boolean).join(" ");
+  if (contact.photoRef) {
+    return <img src={contactPhotoUrl(contact.uid)} alt="" className={classes} />;
+  }
+  return (
+    <span className={classes} aria-hidden="true">
+      {contact.fn.slice(0, 1).toUpperCase() || "?"}
+    </span>
+  );
+}
+
 export function ContactsPage() {
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [photoUploading, setPhotoUploading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
   const [busyId, setBusyId] = useState("");
@@ -124,7 +242,8 @@ export function ContactsPage() {
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
-  const editingContact = editingUid ? contacts.find((c) => c.uid === editingUid) ?? null : null;
+
+  const groupName = (id: string) => groups.find((g) => g.id === id)?.name ?? id;
 
   const filteredContacts = useMemo(() => {
     if (!search.trim()) {
@@ -175,6 +294,9 @@ export function ContactsPage() {
 
   useEffect(() => {
     void refresh();
+    void listGroups()
+      .then(setGroups)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -231,7 +353,7 @@ export function ContactsPage() {
     setSaving(true);
     setStatus("");
     try {
-      const input = formStateToInput(form, editingContact);
+      const input = formStateToInput(form);
       if (editingUid) {
         await updateContact(editingUid, input);
         setStatus(`${input.fn} updated.`);
@@ -334,6 +456,67 @@ export function ContactsPage() {
     } finally {
       setImporting(false);
     }
+  }
+
+  async function handleCreateGroup() {
+    const name = newGroupName.trim();
+    if (!name) return;
+    setCreatingGroup(true);
+    try {
+      const group = await createGroup(name);
+      setGroups((prev) => [...prev, group].sort((a, b) => a.name.localeCompare(b.name)));
+      setForm((f) => ({ ...f, groupIDs: [...f.groupIDs, group.id] }));
+      setNewGroupName("");
+    } catch (error: unknown) {
+      setStatus(`Failed to create group: ${toErrorMessage(error, "unknown error")}`);
+    } finally {
+      setCreatingGroup(false);
+    }
+  }
+
+  async function handlePhotoUpload(file: File | undefined) {
+    if (!file || !editingUid) return;
+    setPhotoUploading(true);
+    setStatus("");
+    try {
+      const result = await uploadContactPhoto(editingUid, file);
+      setForm((f) => ({ ...f, photoRef: result.photoRef }));
+      await refresh();
+    } catch (error: unknown) {
+      setStatus(`Failed to upload photo: ${toErrorMessage(error, "unknown error")}`);
+    } finally {
+      setPhotoUploading(false);
+    }
+  }
+
+  async function handlePhotoDelete() {
+    if (!editingUid) return;
+    setPhotoUploading(true);
+    setStatus("");
+    try {
+      await deleteContactPhoto(editingUid);
+      setForm((f) => ({ ...f, photoRef: undefined }));
+      await refresh();
+    } catch (error: unknown) {
+      setStatus(`Failed to remove photo: ${toErrorMessage(error, "unknown error")}`);
+    } finally {
+      setPhotoUploading(false);
+    }
+  }
+
+  function updateAddress(index: number, patch: Partial<ContactAddress>) {
+    setForm({ ...form, addresses: form.addresses.map((a, i) => (i === index ? { ...a, ...patch } : a)) });
+  }
+
+  function removeAddress(index: number) {
+    setForm({ ...form, addresses: form.addresses.filter((_, i) => i !== index) });
+  }
+
+  function addAddress() {
+    setForm({
+      ...form,
+      addresses: [...form.addresses, { label: "", street: "", city: "", region: "", postalCode: "", country: "" }]
+    });
   }
 
   const allPageSelected = pageContacts.length > 0 && pageContacts.every((c) => selectedUids.includes(c.uid));
@@ -474,7 +657,9 @@ export function ContactsPage() {
                         <input
                           type="checkbox"
                           checked={allPageSelected}
-                          indeterminate={somePageSelected && !allPageSelected}
+                          ref={(el) => {
+                            if (el) el.indeterminate = somePageSelected && !allPageSelected;
+                          }}
                           onChange={() => toggleAllOnPage()}
                           aria-label="Select all on page"
                         />
@@ -508,9 +693,7 @@ export function ContactsPage() {
                               className="contacts-identity contacts-row-open"
                               onClick={() => setSelectedContact(contact)}
                             >
-                              <span className="contacts-avatar" aria-hidden="true">
-                                {contact.fn.slice(0, 1).toUpperCase() || "?"}
-                              </span>
+                              <ContactAvatar contact={contact} />
                               <div className="contacts-identity-text">
                                 <span className="contacts-name">{contact.fn}</span>
                                 {contact.org ? <span className="contacts-sub">{contact.org}</span> : null}
@@ -570,15 +753,58 @@ export function ContactsPage() {
         <div className="contact-form-window" onClick={(e) => e.stopPropagation()}>
           <form onSubmit={submitForm} className="contacts-form-card">
             <h3>{editingUid ? "Edit Contact" : "Add Contact"}</h3>
+
+            <div className="contacts-multivalue">
+              <div className="contacts-multivalue-label">Photo</div>
+              <div className="contacts-photo-row">
+                {editingUid && form.photoRef ? (
+                  <img src={contactPhotoUrl(editingUid)} alt="" className="contacts-avatar contacts-photo-preview" />
+                ) : (
+                  <span className="contacts-avatar contacts-photo-preview" aria-hidden="true">
+                    {form.fn.slice(0, 1).toUpperCase() || "?"}
+                  </span>
+                )}
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={!editingUid || photoUploading}
+                  onChange={(e) => void handlePhotoUpload(e.target.files?.[0])}
+                />
+                {form.photoRef ? (
+                  <button
+                    type="button"
+                    className="contacts-action"
+                    onClick={() => void handlePhotoDelete()}
+                    disabled={photoUploading}
+                  >
+                    Remove
+                  </button>
+                ) : null}
+              </div>
+              {!editingUid ? <p className="contacts-muted">Save the contact first to add a photo.</p> : null}
+            </div>
+
             <label>
               <div>Full Name</div>
               <input value={form.fn} onChange={(e) => setForm({ ...form, fn: e.target.value })} autoComplete="off" />
+            </label>
+            <label>
+              <div>Prefix</div>
+              <input value={form.prefix} onChange={(e) => setForm({ ...form, prefix: e.target.value })} autoComplete="off" />
             </label>
             <label>
               <div>Given Name</div>
               <input
                 value={form.givenName}
                 onChange={(e) => setForm({ ...form, givenName: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Middle Name</div>
+              <input
+                value={form.middleName}
+                onChange={(e) => setForm({ ...form, middleName: e.target.value })}
                 autoComplete="off"
               />
             </label>
@@ -591,79 +817,353 @@ export function ContactsPage() {
               />
             </label>
             <label>
+              <div>Suffix</div>
+              <input value={form.suffix} onChange={(e) => setForm({ ...form, suffix: e.target.value })} autoComplete="off" />
+            </label>
+            <label>
+              <div>Nickname</div>
+              <input value={form.nickname} onChange={(e) => setForm({ ...form, nickname: e.target.value })} autoComplete="off" />
+            </label>
+            <label>
+              <div>Phonetic Given Name</div>
+              <input
+                value={form.phoneticGivenName}
+                onChange={(e) => setForm({ ...form, phoneticGivenName: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Phonetic Family Name</div>
+              <input
+                value={form.phoneticFamilyName}
+                onChange={(e) => setForm({ ...form, phoneticFamilyName: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <div>Pronouns</div>
+              <div className="contacts-pronoun-chips">
+                {["He/Him", "She/Her", "They/Them"].map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className={`contacts-action contacts-pronoun-chip ${form.pronouns === p ? "active" : ""}`}
+                    onClick={() => setForm({ ...form, pronouns: form.pronouns === p ? "" : p })}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="text"
+                placeholder="Custom pronouns"
+                value={form.pronouns}
+                onChange={(e) => setForm({ ...form, pronouns: e.target.value })}
+                autoComplete="off"
+              />
+            </label>
+            <label>
               <div>Organization</div>
               <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} autoComplete="off" />
             </label>
             <label>
-              <div>Email</div>
-              <input
-                type="email"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-                autoComplete="off"
-              />
+              <div>Title</div>
+              <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} autoComplete="off" />
             </label>
             <label>
-              <div>Phone</div>
-              <input
-                value={form.phone}
-                onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                autoComplete="off"
+              <div>Department</div>
+              <input value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} autoComplete="off" />
+            </label>
+            <label>
+              <div>Birthday</div>
+              <input type="date" value={form.birthday} onChange={(e) => setForm({ ...form, birthday: e.target.value })} />
+            </label>
+
+            <MultiValueField
+              label="Emails"
+              rows={form.emails}
+              onChange={(emails) => setForm({ ...form, emails })}
+              emptyRow={{ label: "", value: "" }}
+              addLabel="+ Add email"
+              renderRow={(row, update) => (
+                <>
+                  <select value={row.label ?? ""} onChange={(e) => update({ label: e.target.value })}>
+                    <option value="">Other</option>
+                    <option value="home">Home</option>
+                    <option value="work">Work</option>
+                  </select>
+                  <input
+                    type="email"
+                    placeholder="email@example.com"
+                    value={row.value}
+                    onChange={(e) => update({ value: e.target.value })}
+                    autoComplete="off"
+                  />
+                </>
+              )}
+            />
+
+            <MultiValueField
+              label="Phones"
+              rows={form.phones}
+              onChange={(phones) => setForm({ ...form, phones })}
+              emptyRow={{ label: "", value: "" }}
+              addLabel="+ Add phone"
+              renderRow={(row, update) => (
+                <>
+                  <select value={row.label ?? ""} onChange={(e) => update({ label: e.target.value })}>
+                    <option value="">Other</option>
+                    <option value="home">Home</option>
+                    <option value="work">Work</option>
+                    <option value="mobile">Mobile</option>
+                    <option value="fax">Fax</option>
+                  </select>
+                  <input
+                    type="text"
+                    placeholder="Phone number"
+                    value={row.value}
+                    onChange={(e) => update({ value: e.target.value })}
+                    autoComplete="off"
+                  />
+                </>
+              )}
+            />
+
+            <div className="contacts-multivalue">
+              <div className="contacts-multivalue-label">Addresses</div>
+              {form.addresses.map((addr, i) => (
+                <div className="contacts-multivalue-row" key={i}>
+                  <div className="contacts-address-row">
+                    <input
+                      type="text"
+                      placeholder="Street"
+                      value={addr.street ?? ""}
+                      onChange={(e) => updateAddress(i, { street: e.target.value })}
+                    />
+                    <select value={addr.label ?? ""} onChange={(e) => updateAddress(i, { label: e.target.value })}>
+                      <option value="">Other</option>
+                      <option value="home">Home</option>
+                      <option value="work">Work</option>
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="City"
+                      value={addr.city ?? ""}
+                      onChange={(e) => updateAddress(i, { city: e.target.value })}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Region/State"
+                      value={addr.region ?? ""}
+                      onChange={(e) => updateAddress(i, { region: e.target.value })}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Postal code"
+                      value={addr.postalCode ?? ""}
+                      onChange={(e) => updateAddress(i, { postalCode: e.target.value })}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Country"
+                      value={addr.country ?? ""}
+                      onChange={(e) => updateAddress(i, { country: e.target.value })}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="contacts-multivalue-remove"
+                    onClick={() => removeAddress(i)}
+                    aria-label="Remove address"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="contacts-multivalue-add" onClick={addAddress}>
+                + Add address
+              </button>
+            </div>
+
+            <MultiValueField
+              label="IM / Social"
+              rows={form.ims}
+              onChange={(ims) => setForm({ ...form, ims })}
+              emptyRow={{ service: "whatsapp", label: "", value: "" }}
+              addLabel="+ Add IM / social link"
+              renderRow={(row, update) => (
+                <>
+                  <select value={row.service ?? ""} onChange={(e) => update({ service: e.target.value as IMService })}>
+                    {IM_SERVICES.map((s) => (
+                      <option key={s.value} value={s.value}>
+                        {s.label}
+                      </option>
+                    ))}
+                  </select>
+                  {row.service === "" ? (
+                    <input
+                      type="text"
+                      placeholder="Service name"
+                      value={row.label ?? ""}
+                      onChange={(e) => update({ label: e.target.value })}
+                    />
+                  ) : null}
+                  <input
+                    type="text"
+                    placeholder="Handle / number / URL"
+                    value={row.value}
+                    onChange={(e) => update({ value: e.target.value })}
+                    autoComplete="off"
+                  />
+                </>
+              )}
+            />
+
+            <MultiValueField
+              label="Websites"
+              rows={form.websites}
+              onChange={(websites) => setForm({ ...form, websites })}
+              emptyRow={{ label: "", value: "" }}
+              addLabel="+ Add website"
+              renderRow={(row, update) => (
+                <>
+                  <input
+                    type="text"
+                    placeholder="Label (e.g. homepage)"
+                    value={row.label ?? ""}
+                    onChange={(e) => update({ label: e.target.value })}
+                  />
+                  <input
+                    type="url"
+                    placeholder="https://..."
+                    value={row.value}
+                    onChange={(e) => update({ value: e.target.value })}
+                    autoComplete="off"
+                  />
+                </>
+              )}
+            />
+
+            <MultiValueField
+              label="Relations"
+              rows={form.relations}
+              onChange={(relations) => setForm({ ...form, relations })}
+              emptyRow={{ label: "spouse", name: "" }}
+              addLabel="+ Add relation"
+              renderRow={(row, update) => (
+                <>
+                  <select value={row.label ?? ""} onChange={(e) => update({ label: e.target.value })}>
+                    {RELATION_LABELS.map((l) => (
+                      <option key={l} value={l}>
+                        {l}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    placeholder="Name"
+                    value={row.name}
+                    onChange={(e) => update({ name: e.target.value })}
+                    autoComplete="off"
+                  />
+                </>
+              )}
+            />
+
+            <MultiValueField
+              label="Other dates"
+              rows={form.events}
+              onChange={(events) => setForm({ ...form, events })}
+              emptyRow={{ label: "anniversary", date: "" }}
+              addLabel="+ Add date"
+              renderRow={(row, update) => (
+                <>
+                  <select value={row.label ?? ""} onChange={(e) => update({ label: e.target.value })}>
+                    <option value="anniversary">Anniversary</option>
+                    <option value="other">Other</option>
+                  </select>
+                  <input type="date" value={row.date} onChange={(e) => update({ date: e.target.value })} />
+                </>
+              )}
+            />
+
+            <MultiValueField
+              label="Custom fields"
+              rows={form.customFields}
+              onChange={(customFields) => setForm({ ...form, customFields })}
+              emptyRow={{ label: "", value: "" }}
+              addLabel="+ Add custom field"
+              renderRow={(row, update) => (
+                <>
+                  <input
+                    type="text"
+                    placeholder="Label"
+                    value={row.label}
+                    onChange={(e) => update({ label: e.target.value })}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Value"
+                    value={row.value}
+                    onChange={(e) => update({ value: e.target.value })}
+                  />
+                </>
+              )}
+            />
+
+            <div className="contacts-multivalue">
+              <div className="contacts-multivalue-label">Groups</div>
+              {groups.map((g) => (
+                <label key={g.id} className="contacts-group-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={form.groupIDs.includes(g.id)}
+                    onChange={() =>
+                      setForm({
+                        ...form,
+                        groupIDs: form.groupIDs.includes(g.id)
+                          ? form.groupIDs.filter((id) => id !== g.id)
+                          : [...form.groupIDs, g.id]
+                      })
+                    }
+                  />
+                  {g.name}
+                </label>
+              ))}
+              <div className="contacts-multivalue-row">
+                <input
+                  type="text"
+                  placeholder="New group name"
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  autoComplete="off"
+                />
+                <button
+                  type="button"
+                  className="contacts-action"
+                  onClick={() => void handleCreateGroup()}
+                  disabled={creatingGroup || !newGroupName.trim()}
+                >
+                  + New group
+                </button>
+              </div>
+            </div>
+
+            <label>
+              <div>PGP Public Key</div>
+              <textarea
+                value={form.pgpKey}
+                onChange={(e) => setForm({ ...form, pgpKey: e.target.value })}
+                rows={4}
+                placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"
               />
             </label>
+            <PGPKeyInfo armoredKey={form.pgpKey} />
+
             <label>
               <div>Notes</div>
               <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={3} />
             </label>
-
-            {editingContact && hasExtraDetails(editingContact) ? (
-              <div className="contacts-extra-details">
-                <h4>Other details on file</h4>
-                <p className="contacts-muted">Not editable here — preserved automatically when you save.</p>
-                {editingContact.title ? (
-                  <div className="contact-details-field">
-                    <span>Title</span>
-                    <span>{editingContact.title}</span>
-                  </div>
-                ) : null}
-                {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname].some(
-                  Boolean
-                ) ? (
-                  <div className="contact-details-field">
-                    <span>Name</span>
-                    <span>
-                      {[editingContact.prefix, editingContact.middleName, editingContact.suffix, editingContact.nickname]
-                        .filter(Boolean)
-                        .join(" · ")}
-                    </span>
-                  </div>
-                ) : null}
-                {editingContact.emails && editingContact.emails.length > 1 ? (
-                  <div className="contact-details-field">
-                    <span>Extra emails</span>
-                    <span>{editingContact.emails.slice(1).map((e) => e.value).join(", ")}</span>
-                  </div>
-                ) : null}
-                {editingContact.phones && editingContact.phones.length > 1 ? (
-                  <div className="contact-details-field">
-                    <span>Extra phones</span>
-                    <span>{editingContact.phones.slice(1).map((p) => p.value).join(", ")}</span>
-                  </div>
-                ) : null}
-                {editingContact.addresses?.length ? (
-                  <div className="contact-details-field">
-                    <span>Address{editingContact.addresses.length > 1 ? "es" : ""}</span>
-                    <span>{editingContact.addresses.length} on file</span>
-                  </div>
-                ) : null}
-                {editingContact.birthday ? (
-                  <div className="contact-details-field">
-                    <span>Birthday</span>
-                    <span>{editingContact.birthday}</span>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
 
             <div className="contacts-form-actions">
               <button type="submit" className="contacts-create-submit" disabled={saving}>
@@ -694,14 +1194,17 @@ export function ContactsPage() {
           <div className="contact-details-window" onClick={(e) => e.stopPropagation()}>
             <div className="contact-details-head">
               <div className="contact-details-heading">
-                <span className="contacts-avatar contact-details-avatar-lg" aria-hidden="true">
-                  {selectedContact.fn.slice(0, 1).toUpperCase() || "?"}
-                </span>
+                <ContactAvatar contact={selectedContact} className="contact-details-avatar-lg" />
                 <div>
                   <h3 style={{ margin: 0 }}>{selectedContact.fn}</h3>
+                  {selectedContact.pronouns ? (
+                    <p className="contacts-sub" style={{ margin: "2px 0 0" }}>
+                      {selectedContact.pronouns}
+                    </p>
+                  ) : null}
                   {selectedContact.org || selectedContact.title ? (
                     <p className="contacts-sub" style={{ margin: "2px 0 0" }}>
-                      {[selectedContact.title, selectedContact.org].filter(Boolean).join(" · ")}
+                      {[selectedContact.title, selectedContact.org, selectedContact.department].filter(Boolean).join(" · ")}
                     </p>
                   ) : null}
                 </div>
@@ -736,7 +1239,9 @@ export function ContactsPage() {
                 selectedContact.middleName,
                 selectedContact.familyName,
                 selectedContact.suffix,
-                selectedContact.nickname
+                selectedContact.nickname,
+                selectedContact.phoneticGivenName,
+                selectedContact.phoneticFamilyName
               ].some(Boolean) ? (
                 <div className="contact-details-section">
                   <h4 className="contact-details-section-title">Name</h4>
@@ -774,6 +1279,14 @@ export function ContactsPage() {
                     <div className="contact-details-field">
                       <span>Nickname</span>
                       <span>{selectedContact.nickname}</span>
+                    </div>
+                  ) : null}
+                  {selectedContact.phoneticGivenName || selectedContact.phoneticFamilyName ? (
+                    <div className="contact-details-field">
+                      <span>Phonetic</span>
+                      <span>
+                        {[selectedContact.phoneticGivenName, selectedContact.phoneticFamilyName].filter(Boolean).join(" ")}
+                      </span>
                     </div>
                   ) : null}
                 </div>
@@ -821,10 +1334,90 @@ export function ContactsPage() {
                 </div>
               ) : null}
 
+              {selectedContact.ims?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">IM / Social</h4>
+                  {selectedContact.ims.map((im, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{im.service ? IM_SERVICES.find((s) => s.value === im.service)?.label ?? im.service : im.label || "Other"}</span>
+                      <span>{im.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.websites?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">Websites</h4>
+                  {selectedContact.websites.map((w, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{w.label || "Website"}</span>
+                      <a href={w.value} target="_blank" rel="noreferrer">
+                        {w.value}
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.relations?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">Relations</h4>
+                  {selectedContact.relations.map((r, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{r.label || "Relation"}</span>
+                      <span>{r.name}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.groupIDs?.length ? (
+                <div className="contact-details-field">
+                  <span>Groups</span>
+                  <span>{selectedContact.groupIDs.map(groupName).join(", ")}</span>
+                </div>
+              ) : null}
+
               {selectedContact.birthday ? (
                 <div className="contact-details-field">
                   <span>Birthday</span>
                   <span>{selectedContact.birthday}</span>
+                </div>
+              ) : null}
+
+              {selectedContact.events?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">Other dates</h4>
+                  {selectedContact.events.map((ev, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{ev.label || "Date"}</span>
+                      <span>{ev.date}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.customFields?.length ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">Custom fields</h4>
+                  {selectedContact.customFields.map((cf, i) => (
+                    <div className="contact-details-field" key={i}>
+                      <span>{cf.label}</span>
+                      <span>{cf.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {selectedContact.pgpKey ? (
+                <div className="contact-details-section">
+                  <h4 className="contact-details-section-title">PGP Public Key</h4>
+                  <PGPKeyInfo armoredKey={selectedContact.pgpKey} />
+                  <details>
+                    <summary className="contacts-muted">Show raw key</summary>
+                    <pre className="contact-details-notes">{selectedContact.pgpKey}</pre>
+                  </details>
                 </div>
               ) : null}
 
@@ -842,6 +1435,11 @@ export function ContactsPage() {
               !selectedContact.addresses?.length &&
               !selectedContact.birthday &&
               !selectedContact.notes &&
+              !selectedContact.ims?.length &&
+              !selectedContact.websites?.length &&
+              !selectedContact.relations?.length &&
+              !selectedContact.groupIDs?.length &&
+              !selectedContact.pgpKey &&
               ![
                 selectedContact.givenName,
                 selectedContact.familyName,

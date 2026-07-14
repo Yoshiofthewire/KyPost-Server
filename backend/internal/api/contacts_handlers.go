@@ -32,25 +32,52 @@ type contactPayload struct {
 	Addresses     []contacts.ContactAddress `json:"addresses,omitempty"`
 	Notes         string                    `json:"notes,omitempty"`
 	Birthday      string                    `json:"birthday,omitempty"`
+
+	// PhotoRef is read-only in practice — set via POST /api/contacts/{id}/photo
+	// — but accepted/echoed here so it round-trips through GET/PUT unchanged.
+	PhotoRef           string                       `json:"photoRef,omitempty"`
+	GroupIDs           []string                     `json:"groupIDs,omitempty"`
+	PGPKey             string                       `json:"pgpKey,omitempty"`
+	IMs                []contacts.ContactIM         `json:"ims,omitempty"`
+	Websites           []contacts.ContactURL        `json:"websites,omitempty"`
+	Relations          []contacts.ContactRelation   `json:"relations,omitempty"`
+	Events             []contacts.ContactEvent      `json:"events,omitempty"`
+	PhoneticGivenName  string                       `json:"phoneticGivenName,omitempty"`
+	PhoneticFamilyName string                       `json:"phoneticFamilyName,omitempty"`
+	Department         string                       `json:"department,omitempty"`
+	CustomFields       []contacts.ContactCustomField `json:"customFields,omitempty"`
+	Pronouns           string                       `json:"pronouns,omitempty"`
 }
 
 func (p contactPayload) toContact(uid string) contacts.Contact {
 	return contacts.Contact{
-		UID:           uid,
-		FormattedName: strings.TrimSpace(p.FormattedName),
-		GivenName:     p.GivenName,
-		FamilyName:    p.FamilyName,
-		MiddleName:    p.MiddleName,
-		Prefix:        p.Prefix,
-		Suffix:        p.Suffix,
-		Nickname:      p.Nickname,
-		Org:           p.Org,
-		Title:         p.Title,
-		Emails:        p.Emails,
-		Phones:        p.Phones,
-		Addresses:     p.Addresses,
-		Notes:         p.Notes,
-		Birthday:      p.Birthday,
+		UID:                uid,
+		FormattedName:      strings.TrimSpace(p.FormattedName),
+		GivenName:          p.GivenName,
+		FamilyName:         p.FamilyName,
+		MiddleName:         p.MiddleName,
+		Prefix:             p.Prefix,
+		Suffix:             p.Suffix,
+		Nickname:           p.Nickname,
+		Org:                p.Org,
+		Title:              p.Title,
+		Emails:             p.Emails,
+		Phones:             p.Phones,
+		Addresses:          p.Addresses,
+		Notes:              p.Notes,
+		Birthday:           p.Birthday,
+		PhotoRef:           p.PhotoRef,
+		GroupIDs:           p.GroupIDs,
+		PGPKey:             p.PGPKey,
+		IMs:                p.IMs,
+		Websites:           p.Websites,
+		Relations:          p.Relations,
+		Events:             p.Events,
+		PhoneticGivenName:  p.PhoneticGivenName,
+		PhoneticFamilyName: p.PhoneticFamilyName,
+		Department:         p.Department,
+		CustomFields:       p.CustomFields,
+		Pronouns:           p.Pronouns,
 	}
 }
 
@@ -78,6 +105,9 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(payload.FormattedName) == "" {
 			http.Error(w, "fn is required", http.StatusBadRequest)
 			return
+		}
+		if ac, ok := authFromContext(r); ok {
+			payload.GroupIDs = s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
 		}
 		created, err := store.Upsert(payload.toContact(""))
 		if err != nil {
@@ -142,6 +172,9 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(payload.FormattedName) == "" {
 			http.Error(w, "fn is required", http.StatusBadRequest)
 			return
+		}
+		if ac, ok := authFromContext(r); ok {
+			payload.GroupIDs = s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
 		}
 		updated, err := store.Upsert(payload.toContact(uid))
 		if err != nil {
@@ -370,6 +403,7 @@ func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(change.FormattedName) == "" {
 				continue
 			}
+			change.GroupIDs = s.sanitizeGroupIDsForUser(ownerID, change.GroupIDs)
 			if _, err := store.Upsert(change.toContact(uid)); err != nil {
 				http.Error(w, "failed to apply change", http.StatusInternalServerError)
 				return

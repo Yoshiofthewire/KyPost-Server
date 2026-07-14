@@ -166,10 +166,22 @@ func mergeGroup(members []Contact) (survivor Contact, absorbed []string) {
 	survivor.Title = firstNonEmpty(byNewest, func(c Contact) string { return c.Title })
 	survivor.Notes = firstNonEmpty(byNewest, func(c Contact) string { return c.Notes })
 	survivor.Birthday = firstNonEmpty(byNewest, func(c Contact) string { return c.Birthday })
+	survivor.PhotoRef = firstNonEmpty(byNewest, func(c Contact) string { return c.PhotoRef })
+	survivor.PGPKey = firstNonEmpty(byNewest, func(c Contact) string { return c.PGPKey })
+	survivor.PhoneticGivenName = firstNonEmpty(byNewest, func(c Contact) string { return c.PhoneticGivenName })
+	survivor.PhoneticFamilyName = firstNonEmpty(byNewest, func(c Contact) string { return c.PhoneticFamilyName })
+	survivor.Department = firstNonEmpty(byNewest, func(c Contact) string { return c.Department })
+	survivor.Pronouns = firstNonEmpty(byNewest, func(c Contact) string { return c.Pronouns })
 
 	survivor.Emails = unionValues(members, func(c Contact) []ContactValue { return c.Emails }, normalizeEmail)
 	survivor.Phones = unionValues(members, func(c Contact) []ContactValue { return c.Phones }, normalizePhone)
 	survivor.Addresses = unionAddresses(members)
+	survivor.GroupIDs = unionStrings(members, func(c Contact) []string { return c.GroupIDs })
+	survivor.IMs = unionComparable(members, func(c Contact) []ContactIM { return c.IMs })
+	survivor.Websites = unionComparable(members, func(c Contact) []ContactURL { return c.Websites })
+	survivor.Relations = unionComparable(members, func(c Contact) []ContactRelation { return c.Relations })
+	survivor.Events = unionComparable(members, func(c Contact) []ContactEvent { return c.Events })
+	survivor.CustomFields = unionComparable(members, func(c Contact) []ContactCustomField { return c.CustomFields })
 
 	survivor.MergedUIDs = mergedUIDs(survivor, members, absorbed)
 	survivor.MergedInto = ""
@@ -195,6 +207,39 @@ func unionValues(members []Contact, get func(Contact) []ContactValue, norm func(
 				continue
 			}
 			seen[key] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func unionStrings(members []Contact, get func(Contact) []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range members {
+		for _, v := range get(c) {
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// unionComparable de-dupes and unions any slice-of-comparable-struct field
+// (ContactIM, ContactURL, ContactRelation, ContactEvent, ContactCustomField
+// all have only string fields, so equality is a plain value comparison).
+func unionComparable[T comparable](members []Contact, get func(Contact) []T) []T {
+	seen := map[T]bool{}
+	var out []T
+	for _, c := range members {
+		for _, v := range get(c) {
+			if seen[v] {
+				continue
+			}
+			seen[v] = true
 			out = append(out, v)
 		}
 	}

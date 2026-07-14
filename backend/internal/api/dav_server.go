@@ -2,18 +2,46 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"path"
 	"strings"
 	"time"
 
 	"llama-lab/backend/internal/contacts"
+	"llama-lab/backend/internal/groups"
 
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/carddav"
 )
+
+// imServiceCatalog maps our fixed IM/social service codes to the
+// X-SERVICE-TYPE param value Apple's own vCard export uses for the same
+// service, so importing into iOS/macOS Contacts (and reading its exports)
+// round-trips recognizably. Unlisted/"other" codes fall back to
+// X-SOCIALPROFILE.
+var imServiceCatalog = map[string]string{
+	"whatsapp":  "WhatsApp",
+	"signal":    "Signal",
+	"telegram":  "Telegram",
+	"instagram": "Instagram",
+	"x":         "Twitter",
+	"linkedin":  "LinkedIn",
+	"facebook":  "Facebook",
+	"mastodon":  "Mastodon",
+	"matrix":    "Matrix",
+}
+
+var imServiceCatalogReverse = func() map[string]string {
+	m := make(map[string]string, len(imServiceCatalog))
+	for code, label := range imServiceCatalog {
+		m[strings.ToLower(label)] = code
+	}
+	return m
+}()
 
 // davPrefix is the fixed mount point for the CardDAV surface. Address book
 // discovery paths (principal, home set, address book, address objects) are
@@ -130,7 +158,7 @@ func (b *contactsDAVBackend) DeleteAddressBook(ctx context.Context, _ string) er
 }
 
 func (b *contactsDAVBackend) GetAddressObject(ctx context.Context, p string, _ *carddav.AddressDataRequest) (*carddav.AddressObject, error) {
-	_, store, err := b.userAndStore(ctx)
+	ac, store, err := b.userAndStore(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +170,7 @@ func (b *contactsDAVBackend) GetAddressObject(ctx context.Context, p string, _ *
 		Path:    p,
 		ETag:    c.ETag(),
 		ModTime: parseContactTime(c.UpdatedAt),
-		Card:    contactToVCard(c),
+		Card:    b.toVCard(ac.UserID, c),
 	}, nil
 }
 
@@ -158,10 +186,59 @@ func (b *contactsDAVBackend) ListAddressObjects(ctx context.Context, p string, _
 			Path:    b.objectPath(ac, c.UID),
 			ETag:    c.ETag(),
 			ModTime: parseContactTime(c.UpdatedAt),
-			Card:    contactToVCard(c),
+			Card:    b.toVCard(ac.UserID, c),
 		})
 	}
 	return out, nil
+}
+
+// toVCard resolves the per-user side data contactToVCard needs (group names,
+// photo bytes) that Contact itself only holds by reference (GroupIDs,
+// PhotoRef), then renders the vCard.
+func (b *contactsDAVBackend) toVCard(userID string, c contacts.Contact) vcard.Card {
+	return b.server.contactToVCardForUser(userID, c)
+}
+
+// contactToVCardForUser resolves a Contact's GroupIDs/PhotoRef references
+// against the given user's groups/photo storage and renders the vCard.
+// Shared by the CardDAV surface and vCard export.
+func (s *Server) contactToVCardForUser(userID string, c contacts.Contact) vcard.Card {
+	var groupNames []string
+	if len(c.GroupIDs) > 0 {
+		if gs, err := s.userGroupsStore(userID); err == nil {
+			for _, id := range c.GroupIDs {
+				if g, ok := gs.Get(id); ok {
+					groupNames = append(groupNames, g.Name)
+				}
+			}
+		}
+	}
+	var photoData []byte
+	var photoContentType string
+	if c.PhotoRef != "" {
+		photoData, photoContentType, _ = s.loadContactPhoto(userID, c.PhotoRef)
+	}
+	return contactToVCard(c, groupNames, photoData, photoContentType)
+}
+
+// contactFromVCardForUser parses an inbound vCard into a Contact, resolving
+// CATEGORIES names to GroupIDs (creating groups as needed) and storing an
+// inline PHOTO to disk as a PhotoRef, against the given user's storage.
+// Shared by the CardDAV surface and vCard import.
+func (s *Server) contactFromVCardForUser(userID, uid string, card vcard.Card) contacts.Contact {
+	parsed := contactFromVCard(uid, card)
+	c := parsed.contact
+	if len(parsed.categoryNames) > 0 {
+		if gs, err := s.userGroupsStore(userID); err == nil {
+			c.GroupIDs = resolveGroupIDsByName(gs, parsed.categoryNames)
+		}
+	}
+	if len(parsed.photoData) > 0 {
+		if ref, err := s.storeContactPhoto(userID, parsed.photoData); err == nil {
+			c.PhotoRef = ref
+		}
+	}
+	return c
 }
 
 // QueryAddressObjects implements the addressbook-query REPORT. v1 does not
@@ -194,7 +271,7 @@ func (b *contactsDAVBackend) PutAddressObject(ctx context.Context, p string, car
 		}
 	}
 
-	updated, err := store.Upsert(contactFromVCard(uid, card))
+	updated, err := store.Upsert(b.server.contactFromVCardForUser(ac.UserID, uid, card))
 	if err != nil {
 		return nil, err
 	}
@@ -230,8 +307,10 @@ func parseContactTime(v string) time.Time {
 }
 
 // contactToVCard renders a Contact as a vCard 4.0 card for CardDAV GET/REPORT
-// responses.
-func contactToVCard(c contacts.Contact) vcard.Card {
+// responses. groupNames/photoData/photoContentType are resolved by the
+// caller (toVCard) since Contact itself only holds references (GroupIDs,
+// PhotoRef), not the group names or photo bytes.
+func contactToVCard(c contacts.Contact, groupNames []string, photoData []byte, photoContentType string) vcard.Card {
 	card := make(vcard.Card)
 	card.SetValue(vcard.FieldVersion, "4.0")
 	card.SetValue(vcard.FieldUID, c.UID)
@@ -254,8 +333,12 @@ func contactToVCard(c contacts.Contact) vcard.Card {
 	if c.Nickname != "" {
 		card.SetValue(vcard.FieldNickname, c.Nickname)
 	}
-	if c.Org != "" {
-		card.SetValue(vcard.FieldOrganization, c.Org)
+	if c.Org != "" || c.Department != "" {
+		orgValue := c.Org
+		if c.Department != "" {
+			orgValue += ";" + c.Department
+		}
+		card.SetValue(vcard.FieldOrganization, orgValue)
 	}
 	if c.Title != "" {
 		card.SetValue(vcard.FieldTitle, c.Title)
@@ -294,13 +377,83 @@ func contactToVCard(c contacts.Contact) vcard.Card {
 		}
 		card.AddAddress(addr)
 	}
+	if len(groupNames) > 0 {
+		card.SetCategories(groupNames)
+	}
+	if len(photoData) > 0 {
+		card.SetValue(vcard.FieldPhoto, "data:"+photoContentType+";base64,"+base64.StdEncoding.EncodeToString(photoData))
+	}
+	if c.PGPKey != "" {
+		card.SetValue(vcard.FieldKey, "data:application/pgp-keys;base64,"+base64.StdEncoding.EncodeToString([]byte(c.PGPKey)))
+	}
+	for _, im := range c.IMs {
+		if serviceLabel, ok := imServiceCatalog[im.Service]; ok {
+			card.Add(vcard.FieldIMPP, &vcard.Field{Value: im.Value, Params: vcard.Params{"X-SERVICE-TYPE": []string{serviceLabel}}})
+			continue
+		}
+		label := im.Label
+		if label == "" {
+			label = "Other"
+		}
+		card.Add("X-SOCIALPROFILE", &vcard.Field{Value: im.Value, Params: vcard.Params{vcard.ParamType: []string{label}}})
+	}
+	for _, u := range c.Websites {
+		f := &vcard.Field{Value: u.Value}
+		if u.Label != "" {
+			f.Params = vcard.Params{vcard.ParamType: []string{u.Label}}
+		}
+		card.Add(vcard.FieldURL, f)
+	}
+	for _, rel := range c.Relations {
+		f := &vcard.Field{Value: rel.Name}
+		if rel.Label != "" {
+			f.Params = vcard.Params{vcard.ParamType: []string{rel.Label}}
+		}
+		card.Add(vcard.FieldRelated, f)
+	}
+	for _, ev := range c.Events {
+		if ev.Label == "anniversary" {
+			card.SetValue(vcard.FieldAnniversary, ev.Date)
+			continue
+		}
+		label := ev.Label
+		if label == "" {
+			label = "other"
+		}
+		card.Add("X-ABDATE", &vcard.Field{Value: ev.Date, Params: vcard.Params{vcard.ParamType: []string{label}}})
+	}
+	if c.PhoneticGivenName != "" {
+		card.SetValue("X-PHONETIC-FIRST-NAME", c.PhoneticGivenName)
+	}
+	if c.PhoneticFamilyName != "" {
+		card.SetValue("X-PHONETIC-LAST-NAME", c.PhoneticFamilyName)
+	}
+	if c.Pronouns != "" {
+		card.SetValue("X-ABPRONOUNS", c.Pronouns)
+	}
+	for i, cf := range c.CustomFields {
+		card.Add(fmt.Sprintf("X-CUSTOM-%d", i+1), &vcard.Field{Value: cf.Value, Params: vcard.Params{vcard.ParamType: []string{cf.Label}}})
+	}
 	return card
+}
+
+// parsedVCardContact is contactFromVCard's result: the Contact fields it can
+// populate directly, plus the pieces that need external resolution before
+// they can be written onto a Contact — CATEGORIES names need a groups.Store
+// lookup to become GroupIDs, and an inline PHOTO data: URI needs to go
+// through the same on-disk photo storage as a JSON upload before becoming a
+// PhotoRef.
+type parsedVCardContact struct {
+	contact          contacts.Contact
+	categoryNames    []string
+	photoData        []byte
+	photoContentType string
 }
 
 // contactFromVCard maps an incoming vCard (from a CardDAV PUT) onto a
 // Contact, assigning uid as the identity regardless of what the card's own
 // UID property says — the DAV resource path is authoritative.
-func contactFromVCard(uid string, card vcard.Card) contacts.Contact {
+func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 	c := contacts.Contact{UID: uid}
 	c.FormattedName = strings.TrimSpace(card.Value(vcard.FieldFormattedName))
 	if n := card.Name(); n != nil {
@@ -311,7 +464,13 @@ func contactFromVCard(uid string, card vcard.Card) contacts.Contact {
 		c.Suffix = n.HonorificSuffix
 	}
 	c.Nickname = card.Value(vcard.FieldNickname)
-	c.Org = card.Value(vcard.FieldOrganization)
+	if org := card.Value(vcard.FieldOrganization); org != "" {
+		parts := strings.SplitN(org, ";", 2)
+		c.Org = parts[0]
+		if len(parts) > 1 {
+			c.Department = parts[1]
+		}
+	}
 	c.Title = card.Value(vcard.FieldTitle)
 	c.Notes = card.Value(vcard.FieldNote)
 	c.Birthday = card.Value(vcard.FieldBirthday)
@@ -336,9 +495,120 @@ func contactFromVCard(uid string, card vcard.Card) contacts.Contact {
 			Country:    a.Country,
 		})
 	}
+	for _, f := range card[vcard.FieldIMPP] {
+		service := ""
+		if st := f.Params.Get("X-SERVICE-TYPE"); st != "" {
+			service = imServiceCatalogReverse[strings.ToLower(st)]
+		}
+		label := ""
+		if service == "" {
+			label = f.Params.Get("X-SERVICE-TYPE")
+			if label == "" {
+				label = f.Params.Get(vcard.ParamType)
+			}
+		}
+		c.IMs = append(c.IMs, contacts.ContactIM{Service: service, Label: label, Value: f.Value})
+	}
+	for _, f := range card["X-SOCIALPROFILE"] {
+		c.IMs = append(c.IMs, contacts.ContactIM{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+	}
+	for _, f := range card[vcard.FieldURL] {
+		c.Websites = append(c.Websites, contacts.ContactURL{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+	}
+	for _, f := range card[vcard.FieldRelated] {
+		c.Relations = append(c.Relations, contacts.ContactRelation{Label: f.Params.Get(vcard.ParamType), Name: f.Value})
+	}
+	if anniv := card.Value(vcard.FieldAnniversary); anniv != "" {
+		c.Events = append(c.Events, contacts.ContactEvent{Label: "anniversary", Date: anniv})
+	}
+	for _, f := range card["X-ABDATE"] {
+		label := f.Params.Get(vcard.ParamType)
+		if label == "" {
+			label = "other"
+		}
+		c.Events = append(c.Events, contacts.ContactEvent{Label: label, Date: f.Value})
+	}
+	c.PhoneticGivenName = card.Value("X-PHONETIC-FIRST-NAME")
+	c.PhoneticFamilyName = card.Value("X-PHONETIC-LAST-NAME")
+	c.Pronouns = card.Value("X-ABPRONOUNS")
+	for k, fields := range card {
+		if !strings.HasPrefix(k, "X-CUSTOM-") {
+			continue
+		}
+		for _, f := range fields {
+			c.CustomFields = append(c.CustomFields, contacts.ContactCustomField{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+		}
+	}
+	if pgp := card.Value(vcard.FieldKey); pgp != "" {
+		if data, _ := decodeDataURI(pgp); data != nil {
+			c.PGPKey = string(data)
+		} else {
+			c.PGPKey = pgp
+		}
+	}
+
+	var photoData []byte
+	var photoContentType string
+	if photo := card.Value(vcard.FieldPhoto); photo != "" {
+		photoData, photoContentType = decodeDataURI(photo)
+	}
 
 	if c.FormattedName == "" {
 		c.FormattedName = strings.TrimSpace(c.GivenName + " " + c.FamilyName)
 	}
-	return c
+	return parsedVCardContact{
+		contact:          c,
+		categoryNames:    card.Categories(),
+		photoData:        photoData,
+		photoContentType: photoContentType,
+	}
+}
+
+// decodeDataURI parses a minimal "data:<contentType>;base64,<payload>" URI —
+// the only shape this package ever emits for PHOTO/KEY — returning nil if v
+// isn't in that exact form.
+func decodeDataURI(v string) (data []byte, contentType string) {
+	rest, ok := strings.CutPrefix(v, "data:")
+	if !ok {
+		return nil, ""
+	}
+	meta, b64, ok := strings.Cut(rest, ",")
+	if !ok {
+		return nil, ""
+	}
+	contentType, _, _ = strings.Cut(meta, ";")
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, ""
+	}
+	return decoded, contentType
+}
+
+// resolveGroupIDsByName maps CATEGORIES names from an inbound vCard to group
+// IDs, creating a group for any name that doesn't already exist so nothing
+// from an imported card is silently dropped.
+func resolveGroupIDsByName(store *groups.Store, names []string) []string {
+	existing := store.List()
+	byName := make(map[string]string, len(existing))
+	for _, g := range existing {
+		byName[strings.ToLower(g.Name)] = g.ID
+	}
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if id, ok := byName[strings.ToLower(name)]; ok {
+			ids = append(ids, id)
+			continue
+		}
+		g, err := store.Upsert(groups.Group{Name: name})
+		if err != nil {
+			continue
+		}
+		byName[strings.ToLower(name)] = g.ID
+		ids = append(ids, g.ID)
+	}
+	return ids
 }

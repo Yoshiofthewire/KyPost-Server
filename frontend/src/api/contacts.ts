@@ -14,6 +14,64 @@ export type ContactAddress = {
   country?: string;
 };
 
+// Fixed IM/social-media service catalog. "" (empty service) means "Other",
+// with the user-supplied service name carried in label.
+export type IMService = "whatsapp" | "signal" | "telegram" | "instagram" | "x" | "linkedin" | "facebook" | "mastodon" | "matrix" | "";
+
+export const IM_SERVICES: { value: IMService; label: string }[] = [
+  { value: "whatsapp", label: "WhatsApp" },
+  { value: "signal", label: "Signal" },
+  { value: "telegram", label: "Telegram" },
+  { value: "instagram", label: "Instagram" },
+  { value: "x", label: "X (Twitter)" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "facebook", label: "Facebook" },
+  { value: "mastodon", label: "Mastodon" },
+  { value: "matrix", label: "Matrix" },
+  { value: "", label: "Other" }
+];
+
+export type ContactIM = {
+  service?: IMService;
+  label?: string;
+  value: string;
+};
+
+export type ContactURL = {
+  label?: string;
+  value: string;
+};
+
+export type ContactRelation = {
+  label?: string;
+  name: string;
+};
+
+export type ContactEvent = {
+  label?: string;
+  date: string;
+};
+
+export type ContactCustomField = {
+  label: string;
+  value: string;
+};
+
+type ContactExtendedFields = {
+  photoRef?: string;
+  groupIDs?: string[];
+  pgpKey?: string;
+  ims?: ContactIM[];
+  websites?: ContactURL[];
+  relations?: ContactRelation[];
+  events?: ContactEvent[];
+  phoneticGivenName?: string;
+  phoneticFamilyName?: string;
+  department?: string;
+  customFields?: ContactCustomField[];
+  pronouns?: string;
+};
+
 export type Contact = {
   uid: string;
   rev: number;
@@ -36,7 +94,7 @@ export type Contact = {
   birthday?: string;
   mergedUIDs?: string[];
   mergedInto?: string;
-};
+} & ContactExtendedFields;
 
 export type ContactInput = {
   fn: string;
@@ -53,7 +111,7 @@ export type ContactInput = {
   addresses?: ContactAddress[];
   notes?: string;
   birthday?: string;
-};
+} & ContactExtendedFields;
 
 type ContactsListResponse = {
   contacts: Contact[];
@@ -203,4 +261,28 @@ export async function importContacts(file: File): Promise<ImportResult> {
   }
 
   return response.json() as Promise<ImportResult>;
+}
+
+export function contactPhotoUrl(uid: string): string {
+  return `/api/contacts/${encodeURIComponent(uid)}/photo`;
+}
+
+export async function uploadContactPhoto(uid: string, file: File): Promise<{ photoRef: string; photoUrl: string }> {
+  const formData = new FormData();
+  formData.append("photo", file);
+
+  const response = await fetch(`/api/contacts/${encodeURIComponent(uid)}/photo`, {
+    method: "POST",
+    body: formData
+  });
+
+  if (!response.ok) {
+    throw new Error(`Photo upload failed: ${response.statusText}`);
+  }
+
+  return response.json() as Promise<{ photoRef: string; photoUrl: string }>;
+}
+
+export function deleteContactPhoto(uid: string): Promise<{ ok: boolean }> {
+  return deleteJSON<{ ok: boolean }>(`/api/contacts/${encodeURIComponent(uid)}/photo`);
 }

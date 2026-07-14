@@ -30,6 +30,11 @@ func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
 		return
 	}
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
 
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
@@ -47,7 +52,7 @@ func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
 			if contact.Deleted {
 				continue
 			}
-			card := contactToVCard(contact)
+			card := s.contactToVCardForUser(ac.UserID, contact)
 			if err := encoder.Encode(card); err != nil {
 				http.Error(w, "failed to encode vcard", http.StatusInternalServerError)
 				return
@@ -109,6 +114,11 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
 		return
 	}
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
 
 	// Limit to 10 MB for import file
 	limitedBody := io.LimitReader(r.Body, 10<<20)
@@ -141,7 +151,7 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 		}
 		cardCount++
 
-		contact := contactFromVCard("", card)
+		contact := s.contactFromVCardForUser(ac.UserID, "", card)
 		if contact.FormattedName == "" {
 			result.Skipped++
 			continue
