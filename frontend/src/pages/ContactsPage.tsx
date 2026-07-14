@@ -162,6 +162,17 @@ function contactDisplayLine(contact: Contact): string {
   return contact.emails?.[0]?.value ?? contact.phones?.[0]?.value ?? "";
 }
 
+// Websites are freeform user input rendered as a clickable <a href>. Restrict
+// to http/https so a value like "javascript:..." can't execute when clicked.
+function safeWebsiteHref(url: string): string | undefined {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 type PGPKeyResult = { fingerprint: string; keyId: string; expires?: string } | { error: string };
 
 async function validatePGPKey(armored: string): Promise<PGPKeyResult | null> {
@@ -1349,14 +1360,21 @@ export function ContactsPage() {
               {selectedContact.websites?.length ? (
                 <div className="contact-details-section">
                   <h4 className="contact-details-section-title">Websites</h4>
-                  {selectedContact.websites.map((w, i) => (
-                    <div className="contact-details-field" key={i}>
-                      <span>{w.label || "Website"}</span>
-                      <a href={w.value} target="_blank" rel="noreferrer">
-                        {w.value}
-                      </a>
-                    </div>
-                  ))}
+                  {selectedContact.websites.map((w, i) => {
+                    const href = safeWebsiteHref(w.value);
+                    return (
+                      <div className="contact-details-field" key={i}>
+                        <span>{w.label || "Website"}</span>
+                        {href ? (
+                          <a href={href} target="_blank" rel="noreferrer">
+                            {w.value}
+                          </a>
+                        ) : (
+                          <span>{w.value}</span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : null}
 
