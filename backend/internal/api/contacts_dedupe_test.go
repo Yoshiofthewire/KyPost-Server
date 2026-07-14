@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"llama-lab/backend/internal/contacts"
@@ -53,6 +54,29 @@ func TestContactsDedupeEndpoint(t *testing.T) {
 	}
 	if len(live[0].Phones) != 1 {
 		t.Errorf("survivor should have absorbed the phone: %+v", live[0])
+	}
+}
+
+// TestContactsDedupeAcceptsSubscriberHash drives the endpoint through the
+// server's real route table (not a hand-wired middleware call) so it fails
+// if /api/contacts/dedupe is ever wired to withAuth instead of withMailAuth.
+// Mobile clients only have subscriberId/subscriberHash pairing, never a
+// session cookie — see Mobile_Contacts_DEDupe.md Part 0.
+func TestContactsDedupeAcceptsSubscriberHash(t *testing.T) {
+	srv := newTestServer(t)
+	store := testUserStore(t, srv)
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	hash := srv.pairingSubscriberHash(subscriberID)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/contacts/dedupe?sub="+subscriberID+"&hash="+hash, nil)
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (pairing auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 

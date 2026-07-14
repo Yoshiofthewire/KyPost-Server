@@ -139,7 +139,10 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	}
 }
 
-func (s *Server) Run() error {
+// routes builds the API's route table. Split out from Run so tests can
+// dispatch through the exact same registration (middleware included)
+// instead of calling handlers directly and assuming the wiring matches.
+func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
@@ -207,7 +210,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
 	mux.HandleFunc("GET /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts", s.withAuth(s.handleContacts))
-	mux.HandleFunc("POST /api/contacts/dedupe", s.withAuth(s.handleContactsDedupe))
+	mux.HandleFunc("POST /api/contacts/dedupe", s.withMailAuth(s.handleContactsDedupe))
 	mux.HandleFunc("POST /api/contacts/bulk-delete", s.withAuth(s.handleContactsBulkDelete))
 	mux.HandleFunc("GET /api/contacts/export", s.withAuth(s.handleContactsExport))
 	mux.HandleFunc("POST /api/contacts/import", s.withAuth(s.handleContactsImport))
@@ -244,9 +247,13 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
 	mux.HandleFunc("/", s.handleFrontend)
 
+	return mux
+}
+
+func (s *Server) Run() error {
 	port := envInt("WEB_PORT", 5866)
 	s.logger.Info("api server starting", "port", strconv.Itoa(port))
-	return http.ListenAndServe(":"+strconv.Itoa(port), mux)
+	return http.ListenAndServe(":"+strconv.Itoa(port), s.routes())
 }
 
 // StartPickupSweeper runs PickupStore.Sweep on an interval for the process
