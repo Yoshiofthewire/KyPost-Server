@@ -1861,6 +1861,14 @@ type inboxEmail struct {
 	// HasAttachments is a warm-path hint for the inbox paperclip badge; see
 	// mailcache.Entry.HasAttachments. Absent when false.
 	HasAttachments bool `json:"hasAttachments,omitempty"`
+	// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint/
+	// PGPDecryptError mirror imapadapter.MessageContent's PGP fields once
+	// decryptPGPMessageContent/decryptPGPUnreadMessage has run.
+	PGPEncrypted         bool   `json:"pgpEncrypted,omitempty"`
+	PGPSigned            bool   `json:"pgpSigned,omitempty"`
+	PGPVerified          bool   `json:"pgpVerified,omitempty"`
+	PGPSignerFingerprint string `json:"pgpSignerFingerprint,omitempty"`
+	PGPDecryptError      string `json:"pgpDecryptError,omitempty"`
 	// ChangeType is only ever set on a delta (since=) response: "new" (Body
 	// populated, client should insert) or "updated" (flags/label changed,
 	// Body intentionally empty — the client already has it cached). Absent
@@ -2000,18 +2008,22 @@ func mailCacheEntryFromOverview(ov imapadapter.Overview) mailcache.Overview {
 func mailCacheEntryFromUnreadMessage(msg imapadapter.UnreadMessage, status string) mailcache.Entry {
 	uid, _ := strconv.Atoi(strings.TrimSpace(msg.MessageID))
 	return mailcache.Entry{
-		UID:            uid,
-		MessageID:      msg.MessageID,
-		Subject:        msg.Subject,
-		Sender:         msg.Sender,
-		SentTo:         msg.SentTo,
-		CC:             msg.CC,
-		BCC:            msg.BCC,
-		Keywords:       msg.Keywords,
-		Status:         status,
-		AtUTC:          msg.AtUTC,
-		Body:           msg.Body,
-		HasAttachments: msg.HasAttachments,
+		UID:                  uid,
+		MessageID:            msg.MessageID,
+		Subject:              msg.Subject,
+		Sender:               msg.Sender,
+		SentTo:               msg.SentTo,
+		CC:                   msg.CC,
+		BCC:                  msg.BCC,
+		Keywords:             msg.Keywords,
+		Status:               status,
+		AtUTC:                msg.AtUTC,
+		Body:                 msg.Body,
+		HasAttachments:       msg.HasAttachments,
+		PGPEncrypted:         msg.PGPEncrypted,
+		PGPSigned:            msg.PGPSigned,
+		PGPVerified:          msg.PGPVerified,
+		PGPSignerFingerprint: msg.PGPSignerFingerprint,
 	}
 }
 
@@ -2060,6 +2072,12 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg
 	s.mu.RUnlock()
 
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
 	mailClient, err := s.mailFor(r)
 	if err != nil {
 		// No mailbox configured yet — show the empty tab scaffold rather
@@ -2076,14 +2094,14 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.serveInbox(w, r.Context(), mailClient, cache, cfg, mailbox, limit, since, useDelta)
+	s.serveInbox(w, r.Context(), ac.UserID, mailClient, cache, cfg, mailbox, limit, since, useDelta)
 }
 
 // serveInbox contains handleInbox's core logic once a mail client and cache
 // store are resolved — split out from handleInbox (which only does
 // param/auth/store resolution) so it can be exercised directly in tests
 // against a fake imapadapter.Client, without a real IMAP connection.
-func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, useDelta bool) {
+func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID string, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, useDelta bool) {
 	allowedKeywords := collectAllowedKeywords(cfg)
 	tabs, byTab := buildInboxTabScaffold(allowedKeywords)
 
@@ -2116,16 +2134,20 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClie
 		if entries, warmed := cache.Snapshot(cacheKey, limit); warmed {
 			for _, e := range entries {
 				bucket(e.Keywords, inboxEmail{
-					MessageID:      e.MessageID,
-					Sender:         e.Sender,
-					SentTo:         e.SentTo,
-					CC:             e.CC,
-					BCC:            e.BCC,
-					Subject:        e.Subject,
-					Body:           e.Body,
-					Status:         e.Status,
-					AtUTC:          e.AtUTC,
-					HasAttachments: e.HasAttachments,
+					MessageID:            e.MessageID,
+					Sender:               e.Sender,
+					SentTo:               e.SentTo,
+					CC:                   e.CC,
+					BCC:                  e.BCC,
+					Subject:              e.Subject,
+					Body:                 e.Body,
+					Status:               e.Status,
+					AtUTC:                e.AtUTC,
+					HasAttachments:       e.HasAttachments,
+					PGPEncrypted:         e.PGPEncrypted,
+					PGPSigned:            e.PGPSigned,
+					PGPVerified:          e.PGPVerified,
+					PGPSignerFingerprint: e.PGPSignerFingerprint,
 				})
 			}
 			tabs = append(tabs, inboxUncategorizedTab)
@@ -2143,6 +2165,12 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClie
 			return
 		}
 
+		for i, msg := range unread {
+			if msg.PGPEncryptedPayload != "" {
+				unread[i] = s.decryptPGPUnreadMessage(userID, msg)
+			}
+		}
+
 		warmEntries := make([]mailcache.Entry, 0, len(unread))
 		for _, msg := range unread {
 			status := strings.TrimSpace(msg.Status)
@@ -2150,16 +2178,20 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClie
 				status = "unread"
 			}
 			bucket(msg.Keywords, inboxEmail{
-				MessageID:      msg.MessageID,
-				Sender:         msg.Sender,
-				SentTo:         msg.SentTo,
-				CC:             msg.CC,
-				BCC:            msg.BCC,
-				Subject:        msg.Subject,
-				Body:           msg.Body,
-				Status:         status,
-				AtUTC:          msg.AtUTC,
-				HasAttachments: msg.HasAttachments,
+				MessageID:            msg.MessageID,
+				Sender:               msg.Sender,
+				SentTo:               msg.SentTo,
+				CC:                   msg.CC,
+				BCC:                  msg.BCC,
+				Subject:              msg.Subject,
+				Body:                 msg.Body,
+				Status:               status,
+				AtUTC:                msg.AtUTC,
+				HasAttachments:       msg.HasAttachments,
+				PGPEncrypted:         msg.PGPEncrypted,
+				PGPSigned:            msg.PGPSigned,
+				PGPVerified:          msg.PGPVerified,
+				PGPSignerFingerprint: msg.PGPSignerFingerprint,
 			})
 			warmEntries = append(warmEntries, mailCacheEntryFromUnreadMessage(msg, status))
 		}
@@ -2206,6 +2238,11 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClie
 			http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
 			return
 		}
+		for uid, c := range contents {
+			if c.PGPEncryptedPayload != "" {
+				contents[uid] = s.decryptPGPMessageContent(userID, c)
+			}
+		}
 		// Attach the freshly fetched bodies back onto the cache (metadata
 		// is unchanged from what Sync just stored, so this only warms
 		// Body/HasAttachments without bumping Rev) so a subsequent
@@ -2215,6 +2252,10 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClie
 			if c, ok := contents[e.UID]; ok && c.Body != "" {
 				e.Body = c.Body
 				e.HasAttachments = c.HasAttachments
+				e.PGPEncrypted = c.PGPEncrypted
+				e.PGPSigned = c.PGPSigned
+				e.PGPVerified = c.PGPVerified
+				e.PGPSignerFingerprint = c.PGPSignerFingerprint
 				result.New[i] = e
 				warmEntries = append(warmEntries, e)
 			}
@@ -2229,24 +2270,34 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, mailClie
 	for _, e := range result.New {
 		body := e.Body
 		hasAttachments := e.HasAttachments
+		pgpEncrypted, pgpSigned, pgpVerified := e.PGPEncrypted, e.PGPSigned, e.PGPVerified
+		pgpSignerFingerprint := e.PGPSignerFingerprint
 		if body == "" {
 			if c, ok := contents[e.UID]; ok {
 				body = c.Body
 				hasAttachments = c.HasAttachments
+				pgpEncrypted = c.PGPEncrypted
+				pgpSigned = c.PGPSigned
+				pgpVerified = c.PGPVerified
+				pgpSignerFingerprint = c.PGPSignerFingerprint
 			}
 		}
 		bucket(e.Keywords, inboxEmail{
-			MessageID:      e.MessageID,
-			Sender:         e.Sender,
-			SentTo:         e.SentTo,
-			CC:             e.CC,
-			BCC:            e.BCC,
-			Subject:        e.Subject,
-			Body:           body,
-			Status:         e.Status,
-			AtUTC:          e.AtUTC,
-			HasAttachments: hasAttachments,
-			ChangeType:     "new",
+			MessageID:            e.MessageID,
+			Sender:               e.Sender,
+			SentTo:               e.SentTo,
+			CC:                   e.CC,
+			BCC:                  e.BCC,
+			Subject:              e.Subject,
+			Body:                 body,
+			Status:               e.Status,
+			AtUTC:                e.AtUTC,
+			HasAttachments:       hasAttachments,
+			PGPEncrypted:         pgpEncrypted,
+			PGPSigned:            pgpSigned,
+			PGPVerified:          pgpVerified,
+			PGPSignerFingerprint: pgpSignerFingerprint,
+			ChangeType:           "new",
 		})
 	}
 	for _, e := range result.Updated {

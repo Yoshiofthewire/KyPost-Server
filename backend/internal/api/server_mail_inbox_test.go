@@ -152,6 +152,11 @@ func allEmails(resp inboxResponse) []inboxEmail {
 
 func TestServeInbox_ClassicServedFromWarmCache(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
@@ -164,7 +169,7 @@ func TestServeInbox_ClassicServedFromWarmCache(t *testing.T) {
 
 	fake := &fakeMailClient{}
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), fake, cache, cfg, "", 2, 0, false)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 2, 0, false)
 
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
@@ -193,6 +198,11 @@ func TestServeInbox_ClassicServedFromWarmCache(t *testing.T) {
 
 func TestServeInbox_ClassicFallsBackAndSelfWarms(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
@@ -201,7 +211,7 @@ func TestServeInbox_ClassicFallsBackAndSelfWarms(t *testing.T) {
 	}}
 
 	rec1 := httptest.NewRecorder()
-	srv.serveInbox(rec1, context.Background(), fake, cache, cfg, "", 1, 0, false)
+	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", 1, 0, false)
 	if rec1.Code != 200 {
 		t.Fatalf("status = %d, body=%s", rec1.Code, rec1.Body.String())
 	}
@@ -212,7 +222,7 @@ func TestServeInbox_ClassicFallsBackAndSelfWarms(t *testing.T) {
 	// Second call for the same mailbox+limit should now be servable from
 	// the self-warmed cache, with no further live fetch.
 	rec2 := httptest.NewRecorder()
-	srv.serveInbox(rec2, context.Background(), fake, cache, cfg, "", 1, 0, false)
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 1, 0, false)
 	if fake.unreadCalls != 1 {
 		t.Fatalf("expected no additional live fetch after self-warming, got %d total calls", fake.unreadCalls)
 	}
@@ -225,6 +235,11 @@ func TestServeInbox_ClassicFallsBackAndSelfWarms(t *testing.T) {
 
 func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
@@ -236,7 +251,7 @@ func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), fake, cache, cfg, "", 10, 0, true)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
 
 	if fake.overviewCalls != 1 {
 		t.Fatalf("expected exactly one overview fetch, got %d", fake.overviewCalls)
@@ -263,6 +278,11 @@ func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 
 func TestServeInbox_DeltaFlagChangeIsUpdatedWithoutRefetchingBody(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
@@ -273,7 +293,7 @@ func TestServeInbox_DeltaFlagChangeIsUpdatedWithoutRefetchingBody(t *testing.T) 
 		bodies: map[int]string{1: "body-1"},
 	}
 	rec1 := httptest.NewRecorder()
-	srv.serveInbox(rec1, context.Background(), fake, cache, cfg, "", 10, 0, true)
+	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
 	first := decodeInboxResponse(t, rec1)
 
 	// Second poll: the message's status flipped to read. The client's
@@ -282,7 +302,7 @@ func TestServeInbox_DeltaFlagChangeIsUpdatedWithoutRefetchingBody(t *testing.T) 
 		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "read", AtUTC: "2026-01-01T00:00:00Z"},
 	}
 	rec2 := httptest.NewRecorder()
-	srv.serveInbox(rec2, context.Background(), fake, cache, cfg, "", 10, first.Cursor, true)
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 10, first.Cursor, true)
 
 	if fake.bodiesCalls != 1 {
 		t.Fatalf("expected no additional body fetch for an already-known message, got %d total body fetch calls", fake.bodiesCalls)
@@ -299,6 +319,11 @@ func TestServeInbox_DeltaFlagChangeIsUpdatedWithoutRefetchingBody(t *testing.T) 
 
 func TestServeInbox_DeltaSkipsBodyFetchWhenAlreadyWarmed(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
@@ -316,7 +341,7 @@ func TestServeInbox_DeltaSkipsBodyFetchWhenAlreadyWarmed(t *testing.T) {
 		},
 	}
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), fake, cache, cfg, "", 10, 0, true)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
 
 	if fake.bodiesCalls != 0 {
 		t.Fatalf("expected no body fetch when the daemon already warmed the body, got %d calls, uids=%v", fake.bodiesCalls, fake.lastBodyUIDs)
@@ -330,6 +355,11 @@ func TestServeInbox_DeltaSkipsBodyFetchWhenAlreadyWarmed(t *testing.T) {
 
 func TestServeInbox_DeltaWindowFalloutReportedAsRemoved(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
@@ -341,7 +371,7 @@ func TestServeInbox_DeltaWindowFalloutReportedAsRemoved(t *testing.T) {
 		bodies: map[int]string{1: "body-1", 2: "body-2"},
 	}
 	rec1 := httptest.NewRecorder()
-	srv.serveInbox(rec1, context.Background(), fake, cache, cfg, "", 10, 0, true)
+	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
 	first := decodeInboxResponse(t, rec1)
 
 	// uid 1 ages out of the window.
@@ -349,7 +379,7 @@ func TestServeInbox_DeltaWindowFalloutReportedAsRemoved(t *testing.T) {
 		{UID: 2, MessageID: "2", Subject: "b", Sender: "b@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z"},
 	}
 	rec2 := httptest.NewRecorder()
-	srv.serveInbox(rec2, context.Background(), fake, cache, cfg, "", 10, first.Cursor, true)
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 10, first.Cursor, true)
 
 	resp := decodeInboxResponse(t, rec2)
 	if len(resp.Removed) != 1 || resp.Removed[0] != "1" {
@@ -359,6 +389,11 @@ func TestServeInbox_DeltaWindowFalloutReportedAsRemoved(t *testing.T) {
 
 func TestServeInbox_TabBucketingByKeyword(t *testing.T) {
 	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
 	cfg.Labels.Allowlist = []string{"Work"}
@@ -369,7 +404,7 @@ func TestServeInbox_TabBucketingByKeyword(t *testing.T) {
 	}}
 
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), fake, cache, cfg, "", 10, 0, false)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, false)
 	resp := decodeInboxResponse(t, rec)
 
 	if len(resp.ByTab["Work"]) != 1 || resp.ByTab["Work"][0].MessageID != "1" {

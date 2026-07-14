@@ -16,6 +16,7 @@ import (
 	"llama-lab/backend/internal/mailmsg"
 
 	goimap "github.com/BrianLeishman/go-imap"
+	pgpcrypto "github.com/ProtonMail/gopenpgp/v3/crypto"
 )
 
 type Message struct {
@@ -47,6 +48,22 @@ type UnreadMessage struct {
 	Status    string
 	// HasAttachments comes from the same GetEmails parse as Body.
 	HasAttachments bool
+	// PGPEncryptedPayload holds the armored OpenPGP message when the
+	// fetched email's Content-Type was multipart/encrypted (RFC 3156) —
+	// detected by sniffing e.Attachments for an armored PGP message, since
+	// neither e.Text nor e.HTML is populated for content types goimap can't
+	// render as plain text. Empty when the message isn't PGP-encrypted.
+	// Decryption itself happens in internal/api, which holds the reading
+	// user's key — this package only detects and exposes the raw payload.
+	PGPEncryptedPayload string
+	// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint/
+	// PGPDecryptError are populated by internal/api after decryption; they
+	// start zero-valued here.
+	PGPEncrypted         bool
+	PGPSigned            bool
+	PGPVerified          bool
+	PGPSignerFingerprint string
+	PGPDecryptError      string
 }
 
 // MessageContent is the per-UID result of GetMessageBodies: the rendered body
@@ -54,6 +71,39 @@ type UnreadMessage struct {
 type MessageContent struct {
 	Body           string
 	HasAttachments bool
+	// PGPEncryptedPayload holds the armored OpenPGP message when the
+	// fetched email's Content-Type was multipart/encrypted (RFC 3156) —
+	// detected by sniffing e.Attachments for an armored PGP message, since
+	// neither e.Text nor e.HTML is populated for content types goimap can't
+	// render as plain text. Empty when the message isn't PGP-encrypted.
+	// Decryption itself happens in internal/api, which holds the reading
+	// user's key — this package only detects and exposes the raw payload.
+	PGPEncryptedPayload string
+	// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint/
+	// PGPDecryptError are populated by internal/api after decryption; they
+	// start zero-valued here.
+	PGPEncrypted         bool
+	PGPSigned            bool
+	PGPVerified          bool
+	PGPSignerFingerprint string
+	PGPDecryptError      string
+}
+
+// pgpDetectPayload scans attachments for an armored OpenPGP message — the
+// RFC 3156 multipart/encrypted data part, which goimap's underlying enmime
+// parser (see message.go) always classifies as an attachment (its
+// application/octet-stream content type unconditionally matches enmime's
+// attachment rule, regardless of Content-Disposition). Detection is
+// content-based (pgpcrypto.IsPGPMessage sniffs the armor header) rather than
+// MIME-type-based, so it also picks up encrypted mail from any other
+// PGP/MIME sender.
+func pgpDetectPayload(attachments []goimap.Attachment) string {
+	for _, a := range attachments {
+		if pgpcrypto.IsPGPMessage(string(a.Content)) {
+			return string(a.Content)
+		}
+	}
+	return ""
 }
 
 // Overview is UID + envelope + flags for one message, without body content
@@ -447,7 +497,7 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 			body = strings.TrimSpace(e.Text)
 		}
 
-		out = append(out, UnreadMessage{
+		msg := UnreadMessage{
 			MessageID:      ov.MessageID,
 			Subject:        ov.Subject,
 			Sender:         ov.Sender,
@@ -459,7 +509,14 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 			Body:           body,
 			Status:         ov.Status,
 			HasAttachments: len(e.Attachments) > 0,
-		})
+		}
+		if body == "" {
+			if payload := pgpDetectPayload(e.Attachments); payload != "" {
+				msg.PGPEncryptedPayload = payload
+				msg.HasAttachments = false
+			}
+		}
+		out = append(out, msg)
 	}
 
 	return out, nil
@@ -645,7 +702,14 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		if body == "" {
 			body = strings.TrimSpace(e.Text)
 		}
-		out[uid] = MessageContent{Body: body, HasAttachments: len(e.Attachments) > 0}
+		content := MessageContent{Body: body, HasAttachments: len(e.Attachments) > 0}
+		if body == "" {
+			if payload := pgpDetectPayload(e.Attachments); payload != "" {
+				content.PGPEncryptedPayload = payload
+				content.HasAttachments = false
+			}
+		}
+		out[uid] = content
 	}
 	return out, nil
 }

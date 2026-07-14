@@ -62,6 +62,15 @@ type Entry struct {
 	// info). False therefore means "no attachments, or not warmed yet" — a
 	// client that needs certainty calls GET /api/mail/attachments.
 	HasAttachments bool `json:"hasAttachments,omitempty"`
+
+	// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint follow the
+	// same warm-path-only rule as Body/HasAttachments: set by
+	// internal/api's decrypt step when it warms the cache, absent
+	// otherwise.
+	PGPEncrypted         bool   `json:"pgpEncrypted,omitempty"`
+	PGPSigned            bool   `json:"pgpSigned,omitempty"`
+	PGPVerified          bool   `json:"pgpVerified,omitempty"`
+	PGPSignerFingerprint string `json:"pgpSignerFingerprint,omitempty"`
 }
 
 // Overview is the caller-supplied live snapshot for one message, sourced
