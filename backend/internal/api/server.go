@@ -486,6 +486,8 @@ type mailRequest struct {
 	CC          []string
 	BCC         []string
 	Attachments []mailmsg.Attachment
+	Encrypt     bool
+	Sign        bool
 }
 
 // Attachment budget for one outgoing message (decoded bytes); the request
@@ -511,6 +513,8 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 			MimeType   string `json:"mimeType"`
 			DataBase64 string `json:"dataBase64"`
 		} `json:"attachments"`
+		Encrypt bool `json:"encrypt"`
+		Sign    bool `json:"sign"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxMailRequestBytes)).Decode(&raw); err != nil {
 		return mailRequest{}, "invalid request", err
@@ -559,6 +563,8 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		CC:          ccList,
 		BCC:         bccList,
 		Attachments: attachments,
+		Encrypt:     raw.Encrypt,
+		Sign:        raw.Sign,
 	}, "", nil
 }
 
@@ -646,6 +652,43 @@ func smtpSendWithImplicitTLS(host string, port int, username, password, from str
 	return nil
 }
 
+// findContactPGPKey looks up email among the store's contacts (case-
+// insensitive) and returns its armored PGP public key, if the matching
+// contact has one on file.
+func findContactPGPKey(store *contacts.Store, email string) (string, bool) {
+	target := strings.ToLower(strings.TrimSpace(email))
+	if target == "" {
+		return "", false
+	}
+	for _, c := range store.List() {
+		if c.PGPKey == "" {
+			continue
+		}
+		for _, e := range c.Emails {
+			if strings.ToLower(strings.TrimSpace(e.Value)) == target {
+				return c.PGPKey, true
+			}
+		}
+	}
+	return "", false
+}
+
+// intersect returns the elements of addrs that case-insensitively appear in
+// allowed, preserving addrs' order.
+func intersect(addrs, allowed []string) []string {
+	allowedSet := map[string]bool{}
+	for _, a := range allowed {
+		allowedSet[strings.ToLower(strings.TrimSpace(a))] = true
+	}
+	var out []string
+	for _, a := range addrs {
+		if allowedSet[strings.ToLower(strings.TrimSpace(a))] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	req, errMsg, err := decodeMailRequest(r)
 	if err != nil {
@@ -695,8 +738,6 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No BCC header on the transmitted message — BCC recipients only appear
-	// in the SMTP envelope below.
 	msg := mailmsg.Message{
 		From:        from,
 		To:          toList,
@@ -707,27 +748,106 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		Attachments: req.Attachments,
 	}.Build()
 
-	recipients := append([]string{}, toList...)
-	recipients = append(recipients, ccList...)
-	recipients = append(recipients, bccList...)
+	var signer *pgpmail.Identity
+	if req.Sign || req.Encrypt {
+		u, uerr := s.users.Get(ac.UserID)
+		if uerr == nil && u.PGPPrivateKeyEnc != "" {
+			signer, err = pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
+			if err != nil {
+				http.Error(w, "failed to load pgp identity", http.StatusInternalServerError)
+				return
+			}
+		} else if req.Sign {
+			http.Error(w, "signing requires a pgp identity — generate or import one first", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if !req.Encrypt {
+		if req.Sign {
+			signed, serr := pgpmail.SignMIME(msg, signer)
+			if serr != nil {
+				http.Error(w, "failed to sign message", http.StatusInternalServerError)
+				return
+			}
+			msg = signed
+		}
+		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
+		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, from, toList, ccList, bccList, recipients, msg, req)
+		return
+	}
+
+	contactsStore, cerr := s.userContactsStore(ac.UserID)
+	if cerr != nil {
+		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
+		return
+	}
+	allRecipients := append(append(append([]string{}, toList...), ccList...), bccList...)
+	seen := map[string]bool{}
+	var withKeyEmails, withoutKeyEmails, recipientKeys []string
+	for _, recipient := range allRecipients {
+		lower := strings.ToLower(strings.TrimSpace(recipient))
+		if lower == "" || seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		if key, ok := findContactPGPKey(contactsStore, recipient); ok {
+			withKeyEmails = append(withKeyEmails, recipient)
+			recipientKeys = append(recipientKeys, key)
+		} else {
+			withoutKeyEmails = append(withoutKeyEmails, recipient)
+		}
+	}
+	if len(withKeyEmails) == 0 {
+		http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
+		return
+	}
+
+	encrypted, eerr := pgpmail.EncryptMIME(msg, recipientKeys, signer)
+	if eerr != nil {
+		http.Error(w, "failed to encrypt message", http.StatusInternalServerError)
+		return
+	}
+	encTo := intersect(toList, withKeyEmails)
+	encCC := intersect(ccList, withKeyEmails)
+	encBCC := intersect(bccList, withKeyEmails)
+	encRecipients := append(append(append([]string{}, encTo...), encCC...), encBCC...)
+
+	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, from, encTo, encCC, encBCC, encRecipients, encrypted, req) {
+		return
+	}
+
+	for _, recipient := range withoutKeyEmails {
+		if err := s.sendPickupNotification(ac.UserID, from, recipient, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password); err != nil {
+			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
+		}
+	}
+}
+
+// finishMailSend sends msg over SMTP to recipients and best-effort saves it
+// to the Sent folder (as plaintext — see the plan's Global Constraints on
+// why the Sent copy isn't PGP-wrapped), writing the JSON response. Returns
+// false if the send itself failed (response already written), so callers
+// with follow-up work (e.g. pickup notifications) know not to proceed.
+func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest) bool {
 	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
 
 	var sendErr error
 	if smtpPort == 465 {
-		sendErr = smtpSendWithImplicitTLS(smtpHost, smtpPort, payload.Username, payload.Password, from, recipients, msg, 45*time.Second)
+		sendErr = smtpSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, msg, 45*time.Second)
 	} else {
-		auth := smtp.PlainAuth("", payload.Username, payload.Password, smtpHost)
+		auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
 		sendErr = smtpSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
 	}
 	if sendErr != nil {
 		s.logger.Error("mail send failed", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "error", sendErr.Error())
 		http.Error(w, fmt.Sprintf("failed to send email: %s", sendErr.Error()), http.StatusBadGateway)
-		return
+		return false
 	}
 
 	warning := ""
 	sentSaved := true
-	if mailClient, mailErr := s.userMailClient(ac.UserID); mailErr == nil {
+	if mailClient, mailErr := s.userMailClient(userID); mailErr == nil {
 		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{
 			To:          toList,
 			CC:          ccList,
@@ -745,6 +865,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("mail send completed", "sentSaved", strconv.FormatBool(sentSaved))
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentSaved": sentSaved, "warning": warning})
+	return true
 }
 
 func (s *Server) handleMailDraft(w http.ResponseWriter, r *http.Request) {
