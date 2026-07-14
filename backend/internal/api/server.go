@@ -2192,6 +2192,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 				PGPSigned:            msg.PGPSigned,
 				PGPVerified:          msg.PGPVerified,
 				PGPSignerFingerprint: msg.PGPSignerFingerprint,
+				PGPDecryptError:      msg.PGPDecryptError,
 			})
 			warmEntries = append(warmEntries, mailCacheEntryFromUnreadMessage(msg, status))
 		}
@@ -2272,6 +2273,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 		hasAttachments := e.HasAttachments
 		pgpEncrypted, pgpSigned, pgpVerified := e.PGPEncrypted, e.PGPSigned, e.PGPVerified
 		pgpSignerFingerprint := e.PGPSignerFingerprint
+		var pgpDecryptError string
 		if body == "" {
 			if c, ok := contents[e.UID]; ok {
 				body = c.Body
@@ -2280,6 +2282,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 				pgpSigned = c.PGPSigned
 				pgpVerified = c.PGPVerified
 				pgpSignerFingerprint = c.PGPSignerFingerprint
+				pgpDecryptError = c.PGPDecryptError
 			}
 		}
 		bucket(e.Keywords, inboxEmail{
@@ -2297,21 +2300,26 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			PGPSigned:            pgpSigned,
 			PGPVerified:          pgpVerified,
 			PGPSignerFingerprint: pgpSignerFingerprint,
+			PGPDecryptError:      pgpDecryptError,
 			ChangeType:           "new",
 		})
 	}
 	for _, e := range result.Updated {
 		bucket(e.Keywords, inboxEmail{
-			MessageID:      e.MessageID,
-			Sender:         e.Sender,
-			SentTo:         e.SentTo,
-			CC:             e.CC,
-			BCC:            e.BCC,
-			Subject:        e.Subject,
-			Status:         e.Status,
-			AtUTC:          e.AtUTC,
-			HasAttachments: e.HasAttachments,
-			ChangeType:     "updated",
+			MessageID:            e.MessageID,
+			Sender:               e.Sender,
+			SentTo:               e.SentTo,
+			CC:                   e.CC,
+			BCC:                  e.BCC,
+			Subject:              e.Subject,
+			Status:               e.Status,
+			AtUTC:                e.AtUTC,
+			HasAttachments:       e.HasAttachments,
+			PGPEncrypted:         e.PGPEncrypted,
+			PGPSigned:            e.PGPSigned,
+			PGPVerified:          e.PGPVerified,
+			PGPSignerFingerprint: e.PGPSignerFingerprint,
+			ChangeType:           "updated",
 		})
 	}
 

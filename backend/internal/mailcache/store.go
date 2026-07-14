@@ -202,6 +202,15 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 			// flag across a metadata-only change (same rule as Body) — else
 			// the paperclip badge would flicker off on every flag change.
 			e.HasAttachments = prev.HasAttachments
+			// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint follow
+			// the same warm-path-only rule as Body/HasAttachments (see
+			// Entry's doc comment) — overviews carry no PGP info either, so
+			// preserve them across a metadata-only change or the PGP badge
+			// would reset to zero-values on every read/label flip.
+			e.PGPEncrypted = prev.PGPEncrypted
+			e.PGPSigned = prev.PGPSigned
+			e.PGPVerified = prev.PGPVerified
+			e.PGPSignerFingerprint = prev.PGPSignerFingerprint
 			next = append(next, e)
 		default:
 			next = append(next, prev)
@@ -293,6 +302,15 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 		updated.Keywords, updated.Status, updated.AtUTC = in.Keywords, in.Status, in.AtUTC
 		if in.Body != "" {
 			updated.Body = in.Body
+			// PGP fields are only ever known alongside a freshly fetched
+			// body (see decryptPGPMessageContent/decryptPGPUnreadMessage in
+			// internal/api — a failed decrypt leaves Body empty and is
+			// deliberately never warmed into the cache), so gate them on
+			// the same sentinel as Body.
+			updated.PGPEncrypted = in.PGPEncrypted
+			updated.PGPSigned = in.PGPSigned
+			updated.PGPVerified = in.PGPVerified
+			updated.PGPSignerFingerprint = in.PGPSignerFingerprint
 		}
 		// Only the warm path (poller) calls Upsert, and it always carries an
 		// authoritative attachment flag from the same GetEmails parse — so

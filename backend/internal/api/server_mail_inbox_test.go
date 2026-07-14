@@ -27,6 +27,7 @@ type fakeMailClient struct {
 
 	bodies             map[int]string
 	bodyHasAttachments map[int]bool
+	bodyPGPEncrypted   map[int]bool
 	bodiesErr          error
 	bodiesCalls        int
 	lastBodyUIDs       []int
@@ -62,7 +63,7 @@ func (f *fakeMailClient) GetMessageBodies(_ context.Context, _ string, uids []in
 	out := map[int]imapadapter.MessageContent{}
 	for _, uid := range uids {
 		if b, ok := f.bodies[uid]; ok {
-			out[uid] = imapadapter.MessageContent{Body: b, HasAttachments: f.bodyHasAttachments[uid]}
+			out[uid] = imapadapter.MessageContent{Body: b, HasAttachments: f.bodyHasAttachments[uid], PGPEncrypted: f.bodyPGPEncrypted[uid]}
 		}
 	}
 	return out, nil
@@ -233,6 +234,55 @@ func TestServeInbox_ClassicFallsBackAndSelfWarms(t *testing.T) {
 	}
 }
 
+// TestServeInbox_ClassicLiveFallbackReportsDecryptError guards against a
+// regression where a failed PGP decrypt (no identity configured, in this
+// case) never reached the response JSON: the message would render with
+// PGPEncrypted=true, an empty body, and no error indication at all,
+// indistinguishable from "still loading". The live-fallback path must copy
+// decryptPGPUnreadMessage's PGPDecryptError onto the bucketed inboxEmail.
+func TestServeInbox_ClassicLiveFallbackReportsDecryptError(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	cache := testInboxCache(t)
+	cfg := config.Default()
+
+	// The test user has no PGP identity configured, so
+	// decryptPGPUnreadMessage takes the "no pgp identity configured"
+	// failure branch and sets PGPDecryptError.
+	fake := &fakeMailClient{unread: []imapadapter.UnreadMessage{
+		{
+			MessageID:           "1",
+			Subject:             "a",
+			Sender:              "a@example.com",
+			Status:              "unread",
+			AtUTC:               "2026-01-01T00:00:00Z",
+			PGPEncryptedPayload: "-----BEGIN PGP MESSAGE-----\nfake\n-----END PGP MESSAGE-----",
+		},
+	}}
+
+	rec := httptest.NewRecorder()
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, false)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	resp := decodeInboxResponse(t, rec)
+	emails := allEmails(resp)
+	if len(emails) != 1 {
+		t.Fatalf("expected one entry, got %+v", emails)
+	}
+	if emails[0].PGPDecryptError == "" {
+		t.Fatalf("expected PGPDecryptError to be populated for a failed decrypt, got %+v", emails[0])
+	}
+	if emails[0].Body != "" {
+		t.Fatalf("expected empty body for a failed decrypt, got %q", emails[0].Body)
+	}
+}
+
 func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 	srv := newTestServer(t)
 	all, err := srv.users.List()
@@ -314,6 +364,55 @@ func TestServeInbox_DeltaFlagChangeIsUpdatedWithoutRefetchingBody(t *testing.T) 
 	}
 	if emails[0].Body != "" {
 		t.Fatalf("expected no body on an updated entry (client already has it), got %q", emails[0].Body)
+	}
+}
+
+// TestServeInbox_DeltaUpdatedCarriesPGPFields guards against a regression
+// where a flag-only delta update (read/unread, label change) reset a
+// message's PGP badge state to zero-values on the client: PGPEncrypted is
+// warm-path metadata like HasAttachments, not body content, so it must
+// survive an "updated" bucket entry the same way HasAttachments does.
+func TestServeInbox_DeltaUpdatedCarriesPGPFields(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	cache := testInboxCache(t)
+	cfg := config.Default()
+
+	fake := &fakeMailClient{
+		overviews: []imapadapter.Overview{
+			{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z"},
+		},
+		bodies:           map[int]string{1: "body-1"},
+		bodyPGPEncrypted: map[int]bool{1: true},
+	}
+	rec1 := httptest.NewRecorder()
+	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
+	first := decodeInboxResponse(t, rec1)
+	firstEmails := allEmails(first)
+	if len(firstEmails) != 1 || !firstEmails[0].PGPEncrypted {
+		t.Fatalf("expected first sync's new entry to carry PGPEncrypted=true, got %+v", firstEmails)
+	}
+
+	// Second poll: the message's status flipped to read, nothing PGP-related
+	// changed. The delta response should still report PGPEncrypted=true for
+	// the "updated" entry, not reset it to false.
+	fake.overviews = []imapadapter.Overview{
+		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "read", AtUTC: "2026-01-01T00:00:00Z"},
+	}
+	rec2 := httptest.NewRecorder()
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 10, first.Cursor, true)
+
+	resp := decodeInboxResponse(t, rec2)
+	emails := allEmails(resp)
+	if len(emails) != 1 || emails[0].ChangeType != "updated" {
+		t.Fatalf("expected one updated entry, got %+v", emails)
+	}
+	if !emails[0].PGPEncrypted {
+		t.Fatalf("expected PGPEncrypted=true to survive a flag-only delta update, got %+v", emails[0])
 	}
 }
 
