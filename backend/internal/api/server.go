@@ -78,6 +78,7 @@ type Server struct {
 	logPath              string
 	imapConfigKeyPath    string
 	totpSecretKeyPath    string
+	pgpPrivateKeyPath    string
 	sessions             map[string]Session
 	mfaChallenges        *mfa.Store
 	pairingSecret        string
@@ -103,6 +104,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	logPath := filepath.Join(config.EnvOrDefault("LOG_DIR", "/llama_lab/logs"), "app.log")
 	imapConfigKeyPath := config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key")
 	totpSecretKeyPath := config.EnvOrDefault("TOTP_SECRET_KEY_FILE", "/llama_lab/private/totp-secret.key")
+	pgpPrivateKeyPath := config.EnvOrDefault("PGP_PRIVATE_KEY_KEY_FILE", "/llama_lab/private/pgp-private-key.key")
 	pairingSecret := strings.TrimSpace(os.Getenv("PAIRING_SECRET"))
 	return &Server{
 		cfg:                  cfg,
@@ -116,6 +118,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		logPath:              logPath,
 		imapConfigKeyPath:    imapConfigKeyPath,
 		totpSecretKeyPath:    totpSecretKeyPath,
+		pgpPrivateKeyPath:    pgpPrivateKeyPath,
 		sessions:             map[string]Session{},
 		mfaChallenges:        mfa.NewStore(),
 		pairingSecret:        pairingSecret,
@@ -218,6 +221,10 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
+	mux.HandleFunc("POST /api/pgp/identity/generate", s.withAuth(s.handlePGPIdentityGenerate))
+	mux.HandleFunc("POST /api/pgp/identity/import", s.withAuth(s.handlePGPIdentityImport))
+	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
+	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/groups", s.withAuth(s.handleGroups))
 	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
 	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))

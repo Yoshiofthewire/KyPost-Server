@@ -113,6 +113,7 @@ func newTestServer(t *testing.T) *Server {
 	srv.stateDir = stateDir
 	srv.configDir = configDir
 	srv.totpSecretKeyPath = filepath.Join(configDir, "totp-secret.key")
+	srv.pgpPrivateKeyPath = filepath.Join(configDir, "pgp-private-key.key")
 	return srv
 }
 

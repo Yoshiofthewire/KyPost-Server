@@ -52,6 +52,16 @@ type User struct {
 	// PushMFAEnabled is reserved for a later push-2FA milestone; nothing in
 	// Milestone 1 sets or reads it.
 	PushMFAEnabled bool `json:"pushMfaEnabled,omitempty"`
+
+	// PGP identity (backend-only encryption/signing — see internal/pgpmail).
+	// PGPPrivateKeyEnc is a cryptutil envelope JSON string sealed with the
+	// dedicated PGP private key master key; it is never exposed via Public().
+	PGPFingerprint   string `json:"pgpFingerprint,omitempty"`
+	PGPKeyID         string `json:"pgpKeyId,omitempty"`
+	PGPPublicKey     string `json:"pgpPublicKey,omitempty"`
+	PGPPrivateKeyEnc string `json:"pgpPrivateKeyEnc,omitempty"`
+	PGPKeySource     string `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt  string `json:"pgpKeyCreatedAt,omitempty"`
 }
 
 // Public is the JSON-safe view returned to API clients (no password hash).
@@ -65,6 +75,10 @@ type Public struct {
 	UpdatedAt          string `json:"updatedAt"`
 	DeactivatedAt      string `json:"deactivatedAt,omitempty"`
 	TOTPEnabled        bool   `json:"totpEnabled,omitempty"`
+	PGPFingerprint     string `json:"pgpFingerprint,omitempty"`
+	PGPKeyID           string `json:"pgpKeyId,omitempty"`
+	PGPKeySource       string `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt    string `json:"pgpKeyCreatedAt,omitempty"`
 }
 
 func (u User) Public() Public {
@@ -78,6 +92,10 @@ func (u User) Public() Public {
 		UpdatedAt:          u.UpdatedAt,
 		DeactivatedAt:      u.DeactivatedAt,
 		TOTPEnabled:        u.TOTPEnabled,
+		PGPFingerprint:     u.PGPFingerprint,
+		PGPKeyID:           u.PGPKeyID,
+		PGPKeySource:       u.PGPKeySource,
+		PGPKeyCreatedAt:    u.PGPKeyCreatedAt,
 	}
 }
 
@@ -504,6 +522,34 @@ func (s *Store) DisableTOTP(id string) (User, error) {
 func (s *Store) SetPushMFAEnabled(id string, enabled bool) (User, error) {
 	return s.mutate(id, func(u *User) error {
 		u.PushMFAEnabled = enabled
+		return nil
+	})
+}
+
+// SetPGPIdentity stores a user's own PGP identity: the armored public key
+// (not sensitive) and the sealed private key envelope (from
+// pgpmail.Identity.SealPrivateKey), replacing any existing identity.
+func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
+	return s.mutate(id, func(u *User) error {
+		u.PGPFingerprint = fingerprint
+		u.PGPKeyID = keyID
+		u.PGPPublicKey = armoredPublicKey
+		u.PGPPrivateKeyEnc = privateKeyEnc
+		u.PGPKeySource = source
+		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// ClearPGPIdentity removes a user's PGP identity entirely.
+func (s *Store) ClearPGPIdentity(id string) (User, error) {
+	return s.mutate(id, func(u *User) error {
+		u.PGPFingerprint = ""
+		u.PGPKeyID = ""
+		u.PGPPublicKey = ""
+		u.PGPPrivateKeyEnc = ""
+		u.PGPKeySource = ""
+		u.PGPKeyCreatedAt = ""
 		return nil
 	})
 }
