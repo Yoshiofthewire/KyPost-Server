@@ -231,6 +231,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
 	mux.HandleFunc("POST /api/pgp/recipients/check", s.withAuth(s.handlePGPRecipientsCheck))
+	mux.HandleFunc("GET /api/pgp/qr/token", s.withAuth(s.handlePGPQRToken))
+	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
 	mux.HandleFunc("GET /api/groups", s.withAuth(s.handleGroups))
 	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
 	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
@@ -1812,6 +1814,44 @@ func (s *Server) validatePairingToken(subscriberID, token string, now time.Time)
 	}
 
 	return nil
+}
+
+// parsePairingTokenUserID decodes and HMAC-verifies token (in the same
+// shape as createPairingToken/validatePairingToken) without requiring the
+// caller to already know the expected subject, returning the subject the
+// token was minted for. Used by the QR key-fetch endpoint, which must learn
+// which user a token belongs to rather than confirm a known one — unlike
+// validatePairingToken (used for pickup links, where the URL path already
+// carries the expected ID to check against).
+func (s *Server) parsePairingTokenUserID(token string, now time.Time) (string, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 2 {
+		return "", errors.New("invalid token format")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", errors.New("invalid token payload")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", errors.New("invalid token signature")
+	}
+
+	mac := hmac.New(sha256.New, []byte(s.pairingSecret))
+	mac.Write(payload)
+	expectedSig := mac.Sum(nil)
+	if subtle.ConstantTimeCompare(sig, expectedSig) != 1 {
+		return "", errors.New("signature mismatch")
+	}
+
+	var claims pairingTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", errors.New("invalid token claims")
+	}
+	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
+		return "", errors.New("token expired")
+	}
+	return claims.Sub, nil
 }
 
 func externalBaseURL(r *http.Request) string {
