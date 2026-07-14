@@ -41,6 +41,7 @@ import (
 	"llama-lab/backend/internal/mailcache"
 	"llama-lab/backend/internal/mailmsg"
 	"llama-lab/backend/internal/mfa"
+	"llama-lab/backend/internal/pgpmail"
 	"llama-lab/backend/internal/processor"
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/totp"
@@ -84,6 +85,7 @@ type Server struct {
 	pairingSecret        string
 	serverBaseURL        string
 	nativePushDispatcher *processor.NativePushDispatcher
+	pickupStore          *pgpmail.PickupStore
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
@@ -105,6 +107,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	imapConfigKeyPath := config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/llama_lab/private/imap-config.key")
 	totpSecretKeyPath := config.EnvOrDefault("TOTP_SECRET_KEY_FILE", "/llama_lab/private/totp-secret.key")
 	pgpPrivateKeyPath := config.EnvOrDefault("PGP_PRIVATE_KEY_KEY_FILE", "/llama_lab/private/pgp-private-key.key")
+	pickupStoreKeyPath := config.EnvOrDefault("PICKUP_STORE_KEY_FILE", "/llama_lab/private/pickup-store.key")
 	pairingSecret := strings.TrimSpace(os.Getenv("PAIRING_SECRET"))
 	return &Server{
 		cfg:                  cfg,
@@ -124,6 +127,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		pairingSecret:        pairingSecret,
 		serverBaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
 		nativePushDispatcher: processor.NewNativePushDispatcher(logger),
+		pickupStore:          pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
 		userStores:           map[string]*state.Store{},
 		userContacts:         map[string]*contacts.Store{},
 		userGroups:           map[string]*groups.Store{},
@@ -232,11 +236,32 @@ func (s *Server) Run() error {
 	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.HandleFunc("GET /api/setup", s.handleSetup)
+	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
 	mux.HandleFunc("/", s.handleFrontend)
 
 	port := envInt("WEB_PORT", 5866)
 	s.logger.Info("api server starting", "port", strconv.Itoa(port))
 	return http.ListenAndServe(":"+strconv.Itoa(port), mux)
+}
+
+// StartPickupSweeper runs PickupStore.Sweep on an interval for the process
+// lifetime, mirroring processor.Poller's ticker/cancel pattern
+// (backend/internal/processor/poller.go). Call once after NewServer, e.g.
+// `go srv.StartPickupSweeper(context.Background())` alongside wherever the
+// existing background poller is started.
+func (s *Server) StartPickupSweeper(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.pickupStore.Sweep(30 * 24 * time.Hour); err != nil {
+				s.logger.Error("pickup sweep failed", "error", err.Error())
+			}
+		}
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

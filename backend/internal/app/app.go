@@ -163,6 +163,7 @@ func runAll(d runDeps) error {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go poller.Run()
 	d.logger.Info("poller goroutine started")
+	go srv.StartPickupSweeper(context.Background())
 	go monitorHealth(d.logger, d.health)
 	go func() {
 		if err := srv.Run(); err != nil {
