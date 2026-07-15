@@ -61,49 +61,63 @@ func TestFindContactPGPKey(t *testing.T) {
 	}
 }
 
-// TestBuildEncryptedSendArgsKeepsFullRecipientsInSentFolder guards against a
-// regression where the encrypted-send branch passed the with-key-only
-// filtered lists to finishMailSend's Sent-folder parameters, silently
-// dropping pickup-notified (no-key) recipients from the sender's own Sent
-// record even though they received a plaintext notification. The Sent
-// record must list every original recipient; only the SMTP envelope should
-// be restricted to the with-key subset.
-func TestBuildEncryptedSendArgsKeepsFullRecipientsInSentFolder(t *testing.T) {
-	toList := []string{"alice@example.com", "bob@example.com"}
-	ccList := []string{"carol@example.com"}
-	bccList := []string{"dave@example.com"}
-	withKeyEmails := []string{"alice@example.com", "carol@example.com"} // bob and dave have no key
+// TestMailSendBlocksSigningWithRevokedIdentity proves the own-identity
+// enforcement added in this task: Sign=true must be rejected before any
+// network I/O when the sender's own PGP identity is revoked. IMAP/SMTP
+// config is written directly (bypassing the network) so the handler gets
+// past its precondition checks and reaches the signer-status check; a 400
+// response (rather than a 502 from a real send attempt) proves the request
+// never reached the network.
+func TestMailSendBlocksSigningWithRevokedIdentity(t *testing.T) {
+	srv := newTestServer(t)
+	all, _ := srv.users.List()
+	userID := all[0].ID
 
-	draftTo, draftCC, draftBCC, smtpRecipients := buildEncryptedSendArgs(toList, ccList, bccList, withKeyEmails)
-
-	// Sent-folder record: must retain every original recipient, including
-	// the no-key ones who only got a pickup notification.
-	if len(draftTo) != 2 || draftTo[0] != "alice@example.com" || draftTo[1] != "bob@example.com" {
-		t.Fatalf("draftTo should equal original toList unfiltered, got %v", draftTo)
-	}
-	if len(draftCC) != 1 || draftCC[0] != "carol@example.com" {
-		t.Fatalf("draftCC should equal original ccList unfiltered, got %v", draftCC)
-	}
-	if len(draftBCC) != 1 || draftBCC[0] != "dave@example.com" {
-		t.Fatalf("draftBCC should equal original bccList unfiltered, got %v", draftBCC)
+	if err := writeIMAPConfigPayload(srv.userIMAPConfigPath(userID), srv.imapConfigKeyPath, imapConfigPayload{
+		Host:     "imap.example.com",
+		Port:     993,
+		Username: "alice@example.com",
+		Password: "pw",
+		Mailbox:  "INBOX",
+		SMTPHost: "smtp.example.com",
+		SMTPPort: 587,
+	}); err != nil {
+		t.Fatalf("writeIMAPConfigPayload: %v", err)
 	}
 
-	// SMTP envelope: must be restricted to the with-key subset only — the
-	// encrypted bytes must never be sent to a recipient without a key.
-	wantSMTP := []string{"alice@example.com", "carol@example.com"}
-	if len(smtpRecipients) != len(wantSMTP) {
-		t.Fatalf("smtpRecipients length mismatch: got %v want %v", smtpRecipients, wantSMTP)
+	key, err := crypto.PGP().KeyGeneration().AddUserId("Alice", "alice@example.com").New().GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
 	}
-	for i := range wantSMTP {
-		if smtpRecipients[i] != wantSMTP[i] {
-			t.Fatalf("smtpRecipients mismatch at %d: got %v want %v", i, smtpRecipients, wantSMTP)
-		}
+	if err := key.GetEntity().Revoke(packet.NoReason, "test revocation", &packet.Config{}); err != nil {
+		t.Fatalf("Revoke: %v", err)
 	}
-	// bob and dave (no key) must not appear in the SMTP envelope.
-	for _, r := range smtpRecipients {
-		if r == "bob@example.com" || r == "dave@example.com" {
-			t.Fatalf("smtpRecipients must not include no-key recipient %q, got %v", r, smtpRecipients)
-		}
+	armored, err := key.Armor()
+	if err != nil {
+		t.Fatalf("Armor: %v", err)
+	}
+	importBody, _ := json.Marshal(map[string]string{"armoredPrivateKey": armored})
+	importReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/import", bytes.NewReader(importBody))
+	authRequest(srv, importReq)
+	importRec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPIdentityImport)(importRec, importReq)
+	if importRec.Code != http.StatusOK {
+		t.Fatalf("import: expected 200, got %d: %s", importRec.Code, importRec.Body.String())
+	}
+
+	sendBody, _ := json.Marshal(map[string]any{
+		"to":      "bob@example.com",
+		"subject": "hi",
+		"body":    "hello",
+		"sign":    true,
+	})
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/mail/send", bytes.NewReader(sendBody))
+	authRequest(srv, sendReq)
+	sendRec := httptest.NewRecorder()
+	srv.withAuth(srv.handleMailSend)(sendRec, sendReq)
+
+	if sendRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for signing with a revoked identity, got %d: %s", sendRec.Code, sendRec.Body.String())
 	}
 }
 
@@ -131,22 +145,6 @@ func TestEncryptSignerOnlyPassesIdentityWhenSignRequested(t *testing.T) {
 	}
 	if got := encryptSigner(nil, false); got != nil {
 		t.Fatalf("expected nil to stay nil when no identity was loaded, got %+v", got)
-	}
-}
-
-func TestIntersectPreservesOrderAndIsCaseInsensitive(t *testing.T) {
-	got := intersect(
-		[]string{"Alice@Example.com", "bob@example.com", "carol@example.com"},
-		[]string{"bob@example.com", "ALICE@EXAMPLE.COM"},
-	)
-	want := []string{"Alice@Example.com", "bob@example.com"}
-	if len(got) != len(want) {
-		t.Fatalf("length mismatch: got %v want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("mismatch at %d: got %v want %v", i, got, want)
-		}
 	}
 }
 
