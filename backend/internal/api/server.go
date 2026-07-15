@@ -906,13 +906,17 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var mainRecipients []string
-	var mainCiphertext []byte
-	bccDeliveries := deliveries
-	if len(plan.toCCEmails) > 0 {
-		mainRecipients, mainCiphertext = deliveries[0].Recipients, deliveries[0].Ciphertext
-		bccDeliveries = deliveries[1:]
-	}
+	// deliveries[0] is always the correct hard-error-gated send: buildPGPDeliveries
+	// guarantees the shared To/CC ciphertext (if any) comes first, otherwise the
+	// first BCC recipient's ciphertext is deliveries[0]. deliveries is guaranteed
+	// non-empty here because we already returned a 400 above when both
+	// plan.toCCEmails and plan.bccEmails were empty. Treating index 0 uniformly
+	// (rather than special-casing on len(plan.toCCEmails) > 0) avoids a BCC-only
+	// send picking an empty "main" delivery, which previously let finishMailSend
+	// report ok:true via its empty-recipient-list guard before any of the actual
+	// best-effort BCC sends had even been attempted.
+	mainRecipients, mainCiphertext := deliveries[0].Recipients, deliveries[0].Ciphertext
+	bccDeliveries := deliveries[1:]
 
 	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, from, toList, ccList, bccList, mainRecipients, mainCiphertext, req) {
 		return
