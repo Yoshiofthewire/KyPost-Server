@@ -3,14 +3,20 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"llama-lab/backend/internal/contacts"
+	"llama-lab/backend/internal/mailmsg"
 	"llama-lab/backend/internal/pgpmail"
 )
 
@@ -234,6 +240,156 @@ func TestBuildPGPRecipientPlanSplitsToCCFromBCCAndFiltersUnusableKeys(t *testing
 		if plan.withoutKeyEmails[i] != want {
 			t.Fatalf("withoutKeyEmails[%d]: got %q want %q (full: %v)", i, plan.withoutKeyEmails[i], want, plan.withoutKeyEmails)
 		}
+	}
+}
+
+// extractArmoredPGPData is a test-only MIME walker that extracts the
+// armored PGP data part from an EncryptMIME envelope. Mirrors pgpmail's own
+// (unexported) extractOctetStreamPart test helper — duplicated here since
+// api and pgpmail are separate test packages.
+func extractArmoredPGPData(t *testing.T, raw []byte) string {
+	t.Helper()
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("mail.ReadMessage: %v", err)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		t.Fatalf("expected multipart Content-Type, got %q (err=%v)", mediaType, err)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			t.Fatal("no application/octet-stream part found")
+		}
+		if err != nil {
+			t.Fatalf("NextPart: %v", err)
+		}
+		if strings.HasPrefix(part.Header.Get("Content-Type"), "application/octet-stream") {
+			data, err := io.ReadAll(part)
+			if err != nil {
+				t.Fatalf("ReadAll part: %v", err)
+			}
+			return string(data)
+		}
+	}
+}
+
+// TestBuildPGPDeliveriesIsolatesBCCRecipients is the core regression test
+// for the BCC key-ID leak: before this change, To/CC/BCC keys were all
+// merged into one shared ciphertext, so any recipient could inspect the
+// message's OpenPGP packets and see which BCC'd keys it was also encrypted
+// to. This asserts the stronger guarantee buildPGPDeliveries actually
+// implements — each BCC recipient gets a wholly separate ciphertext that
+// nobody else (not the To/CC recipients, not other BCC recipients) can
+// decrypt at all.
+func TestBuildPGPDeliveriesIsolatesBCCRecipients(t *testing.T) {
+	bob, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity bob: %v", err)
+	}
+	carol, err := pgpmail.GenerateIdentity("Carol", "carol@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity carol: %v", err)
+	}
+	dave, err := pgpmail.GenerateIdentity("Dave", "dave@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity dave: %v", err)
+	}
+	eve, err := pgpmail.GenerateIdentity("Eve", "eve@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity eve: %v", err)
+	}
+
+	plan := pgpRecipientPlan{
+		toCCEmails: []string{"bob@example.com", "carol@example.com"},
+		toCCKeys:   []string{bob.ArmoredPublicKey, carol.ArmoredPublicKey},
+		bccEmails:  []string{"dave@example.com", "eve@example.com"},
+		bccKeys:    []string{dave.ArmoredPublicKey, eve.ArmoredPublicKey},
+	}
+	plaintext := mailmsg.Message{
+		From:    "alice@example.com",
+		To:      []string{"bob@example.com", "carol@example.com"},
+		Subject: "Secret",
+		Body:    "meet at dawn",
+		Mode:    "plain",
+	}.Build()
+
+	deliveries, err := buildPGPDeliveries(plaintext, plan, nil)
+	if err != nil {
+		t.Fatalf("buildPGPDeliveries: %v", err)
+	}
+	if len(deliveries) != 3 {
+		t.Fatalf("expected 3 deliveries (1 shared to/cc + 2 individual bcc), got %d", len(deliveries))
+	}
+
+	shared := deliveries[0]
+	if len(shared.Recipients) != 2 || shared.Recipients[0] != "bob@example.com" || shared.Recipients[1] != "carol@example.com" {
+		t.Fatalf("expected shared delivery to bob+carol, got %v", shared.Recipients)
+	}
+	sharedArmored := extractArmoredPGPData(t, shared.Ciphertext)
+	if _, err := pgpmail.DecryptMIME(sharedArmored, bob, nil); err != nil {
+		t.Fatalf("bob should decrypt the shared to/cc ciphertext: %v", err)
+	}
+	if _, err := pgpmail.DecryptMIME(sharedArmored, carol, nil); err != nil {
+		t.Fatalf("carol should decrypt the shared to/cc ciphertext: %v", err)
+	}
+	if _, err := pgpmail.DecryptMIME(sharedArmored, dave, nil); err == nil {
+		t.Fatal("dave (bcc) must not be able to decrypt the shared to/cc ciphertext")
+	}
+
+	daveDelivery, eveDelivery := deliveries[1], deliveries[2]
+	if len(daveDelivery.Recipients) != 1 || daveDelivery.Recipients[0] != "dave@example.com" {
+		t.Fatalf("expected dave's own delivery, got %v", daveDelivery.Recipients)
+	}
+	if len(eveDelivery.Recipients) != 1 || eveDelivery.Recipients[0] != "eve@example.com" {
+		t.Fatalf("expected eve's own delivery, got %v", eveDelivery.Recipients)
+	}
+
+	daveArmored := extractArmoredPGPData(t, daveDelivery.Ciphertext)
+	if _, err := pgpmail.DecryptMIME(daveArmored, dave, nil); err != nil {
+		t.Fatalf("dave should decrypt his own bcc ciphertext: %v", err)
+	}
+	if _, err := pgpmail.DecryptMIME(daveArmored, eve, nil); err == nil {
+		t.Fatal("eve must not be able to decrypt dave's bcc ciphertext")
+	}
+	if _, err := pgpmail.DecryptMIME(daveArmored, bob, nil); err == nil {
+		t.Fatal("bob (to/cc recipient) must not be able to decrypt dave's bcc ciphertext")
+	}
+
+	eveArmored := extractArmoredPGPData(t, eveDelivery.Ciphertext)
+	if _, err := pgpmail.DecryptMIME(eveArmored, eve, nil); err != nil {
+		t.Fatalf("eve should decrypt her own bcc ciphertext: %v", err)
+	}
+	if _, err := pgpmail.DecryptMIME(eveArmored, dave, nil); err == nil {
+		t.Fatal("dave must not be able to decrypt eve's bcc ciphertext")
+	}
+}
+
+func TestBuildPGPDeliveriesBCCOnlyWhenNoToCCHasUsableKey(t *testing.T) {
+	dave, err := pgpmail.GenerateIdentity("Dave", "dave@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity dave: %v", err)
+	}
+	plan := pgpRecipientPlan{
+		bccEmails: []string{"dave@example.com"},
+		bccKeys:   []string{dave.ArmoredPublicKey},
+	}
+	plaintext := mailmsg.Message{
+		From:    "alice@example.com",
+		To:      []string{"nokey@example.com"},
+		Subject: "Secret",
+		Body:    "meet at dawn",
+		Mode:    "plain",
+	}.Build()
+
+	deliveries, err := buildPGPDeliveries(plaintext, plan, nil)
+	if err != nil {
+		t.Fatalf("buildPGPDeliveries: %v", err)
+	}
+	if len(deliveries) != 1 || len(deliveries[0].Recipients) != 1 || deliveries[0].Recipients[0] != "dave@example.com" {
+		t.Fatalf("expected exactly one bcc-only delivery to dave, got %+v", deliveries)
 	}
 }
 

@@ -752,6 +752,49 @@ func buildPGPRecipientPlan(toList, ccList, bccList []string, contactsStore *cont
 	return plan
 }
 
+// pgpDelivery is one PGP/MIME ciphertext and the SMTP recipient(s) it
+// should be delivered to in a single transaction.
+type pgpDelivery struct {
+	Recipients []string
+	Ciphertext []byte
+}
+
+// buildPGPDeliveries encrypts msg once for plan's shared To/CC recipients
+// (if any) and once individually for each of plan's BCC recipients, so no
+// BCC recipient's key ID ever appears in a ciphertext another recipient can
+// inspect. signer is passed straight through to EncryptMIME for every
+// delivery (nil if the caller didn't request signing).
+func buildPGPDeliveries(msg []byte, plan pgpRecipientPlan, signer *pgpmail.Identity) ([]pgpDelivery, error) {
+	var deliveries []pgpDelivery
+	if len(plan.toCCEmails) > 0 {
+		ciphertext, err := pgpmail.EncryptMIME(msg, plan.toCCKeys, signer)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt to/cc recipients: %w", err)
+		}
+		deliveries = append(deliveries, pgpDelivery{Recipients: plan.toCCEmails, Ciphertext: ciphertext})
+	}
+	for i, recipient := range plan.bccEmails {
+		ciphertext, err := pgpmail.EncryptMIME(msg, []string{plan.bccKeys[i]}, signer)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt bcc recipient %s: %w", recipient, err)
+		}
+		deliveries = append(deliveries, pgpDelivery{Recipients: []string{recipient}, Ciphertext: ciphertext})
+	}
+	return deliveries, nil
+}
+
+// smtpDeliver sends msg over SMTP to recipients, choosing implicit TLS
+// (port 465) or STARTTLS/plain auth otherwise. Extracted from
+// finishMailSend so per-BCC-recipient encrypted sends (handleMailSend) can
+// reuse the same transport logic for their own separate SMTP transactions.
+func smtpDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, recipients []string, msg []byte) error {
+	if smtpPort == 465 {
+		return smtpSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, msg, 45*time.Second)
+	}
+	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
+	return smtpSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
+}
+
 // intersect returns the elements of addrs that case-insensitively appear in
 // allowed, preserving addrs' order.
 func intersect(addrs, allowed []string) []string {
@@ -939,14 +982,7 @@ func buildEncryptedSendArgs(toList, ccList, bccList, withKeyEmails []string) (dr
 func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest) bool {
 	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
 
-	var sendErr error
-	if smtpPort == 465 {
-		sendErr = smtpSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, msg, 45*time.Second)
-	} else {
-		auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
-		sendErr = smtpSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
-	}
-	if sendErr != nil {
+	if sendErr := smtpDeliver(smtpHost, smtpPort, addr, smtpUsername, smtpPassword, from, recipients, msg); sendErr != nil {
 		s.logger.Error("mail send failed", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "error", sendErr.Error())
 		http.Error(w, fmt.Sprintf("failed to send email: %s", sendErr.Error()), http.StatusBadGateway)
 		return false
