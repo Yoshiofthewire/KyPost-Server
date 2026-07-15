@@ -5,8 +5,9 @@ import "quill/dist/quill.snow.css";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
 import { checkPGPRecipients } from "./api/pgp";
 import { AuthContext, type AuthState } from "./auth";
+import { ContactPickerModal } from "./components/ContactPickerModal";
 import { RecipientField } from "./components/RecipientField";
-import { isDuplicateInField, parseRecipientField, serializeRecipientField } from "./lib/recipients";
+import { contactToToken, isDuplicateInField, parseRecipientField, serializeRecipientField } from "./lib/recipients";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
 import { ConfigPage } from "./pages/ConfigPage";
 import { ContactsPage } from "./pages/ContactsPage";
@@ -151,6 +152,7 @@ export function App() {
   const [pwaInstallPrompt, setPwaInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [pwaInstalled, setPwaInstalled] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  const [contactPickerOpen, setContactPickerOpen] = useState(false);
   const [composeTo, setComposeTo] = useState<RecipientFieldState>({ tokens: [], draft: "" });
   const [composeCc, setComposeCc] = useState<RecipientFieldState>({ tokens: [], draft: "" });
   const [composeBcc, setComposeBcc] = useState<RecipientFieldState>({ tokens: [], draft: "" });
@@ -1005,6 +1007,7 @@ export function App() {
                 <button type="button" className="compose-send" onClick={() => void sendComposeEmail()} disabled={composeSending || composeSavingDraft}>{composeSending ? "Sending..." : "Send"}</button>
                 <button type="button" className="compose-save-draft" onClick={() => void saveComposeDraft()} disabled={composeSending || composeSavingDraft}>Save Draft</button>
                 <button type="button" className="compose-attach" onClick={() => attachmentInputRef.current?.click()} disabled={composeSending || composeSavingDraft}>📎 Attach</button>
+                <button type="button" className="compose-attach" onClick={() => setContactPickerOpen(true)} disabled={composeSending || composeSavingDraft}>📇 Contacts</button>
                 <button type="button" className="compose-trash" onClick={trashComposeDraft} disabled={composeSending || composeSavingDraft}>Trash</button>
                 <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.85rem" }}>
                   <input type="checkbox" checked={composeEncrypt} onChange={(e) => setComposeEncrypt(e.target.checked)} />
@@ -1100,6 +1103,17 @@ export function App() {
             />
           </section>
       </dialog>
+      <ContactPickerModal
+        isOpen={contactPickerOpen}
+        onClose={() => setContactPickerOpen(false)}
+        toTokens={composeTo.tokens}
+        ccTokens={composeCc.tokens}
+        bccTokens={composeBcc.tokens}
+        onAdd={(field, contact) => {
+          const token = contactToToken(contact);
+          if (token) addTokenToField(field, token);
+        }}
+      />
     </div>
     </AuthContext.Provider>
   );
