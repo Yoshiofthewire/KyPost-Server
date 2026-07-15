@@ -661,24 +661,21 @@ export function App() {
       cc: setComposeCc,
       bcc: setComposeBcc
     };
-    const currentTokens: Record<"to" | "cc" | "bcc", RecipientToken[]> = {
-      to: composeTo.tokens,
-      cc: composeCc.tokens,
-      bcc: composeBcc.tokens
-    };
     const setField = setters[field];
-    if (isDuplicateInField(currentTokens[field], token.email)) {
-      if (composeNoticeTimeoutRef.current) {
-        clearTimeout(composeNoticeTimeoutRef.current);
+    setField((prev) => {
+      if (isDuplicateInField(prev.tokens, token.email)) {
+        if (composeNoticeTimeoutRef.current) {
+          clearTimeout(composeNoticeTimeoutRef.current);
+        }
+        setComposeNotice(`${token.name ?? token.email} is already in ${field.toUpperCase()}.`);
+        composeNoticeTimeoutRef.current = setTimeout(() => {
+          setComposeNotice("");
+          composeNoticeTimeoutRef.current = null;
+        }, 3000);
+        return prev;
       }
-      setComposeNotice(`${token.name ?? token.email} is already in ${field.toUpperCase()}.`);
-      composeNoticeTimeoutRef.current = setTimeout(() => {
-        setComposeNotice("");
-        composeNoticeTimeoutRef.current = null;
-      }, 3000);
-      return;
-    }
-    setField((prev) => ({ tokens: [...prev.tokens, token], draft: "" }));
+      return { tokens: [...prev.tokens, token], draft: "" };
+    });
   }
 
   if (auth === null) {
