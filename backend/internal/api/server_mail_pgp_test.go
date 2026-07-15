@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"llama-lab/backend/internal/contacts"
 	"llama-lab/backend/internal/pgpmail"
 )
@@ -138,5 +141,129 @@ func TestIntersectPreservesOrderAndIsCaseInsensitive(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("mismatch at %d: got %v want %v", i, got, want)
 		}
+	}
+}
+
+// generateArmoredKeyWithLifetime generates a fresh key with the given
+// generation time and lifetime in seconds, returning its armored public
+// key. A generation time in the past plus a short lifetime yields a key
+// that is already expired as of "now" — used to build expired-key test
+// fixtures without a static testdata file.
+func generateArmoredKeyWithLifetime(t *testing.T, name, email string, generationTime time.Time, lifetimeSeconds int32) string {
+	t.Helper()
+	key, err := crypto.PGP().KeyGeneration().
+		GenerationTime(generationTime.Unix()).
+		Lifetime(lifetimeSeconds).
+		AddUserId(name, email).
+		New().GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	armored, err := key.GetArmoredPublicKey()
+	if err != nil {
+		t.Fatalf("GetArmoredPublicKey: %v", err)
+	}
+	return armored
+}
+
+// generateRevokedArmoredKey generates a fresh key and immediately revokes
+// it, returning its armored public key with the revocation signature
+// attached — as a real revoked key published to a keyserver would have.
+func generateRevokedArmoredKey(t *testing.T, name, email string) string {
+	t.Helper()
+	key, err := crypto.PGP().KeyGeneration().AddUserId(name, email).New().GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	if err := key.GetEntity().Revoke(packet.NoReason, "test revocation", &packet.Config{}); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	armored, err := key.GetArmoredPublicKey()
+	if err != nil {
+		t.Fatalf("GetArmoredPublicKey: %v", err)
+	}
+	return armored
+}
+
+func TestBuildPGPRecipientPlanSplitsToCCFromBCCAndFiltersUnusableKeys(t *testing.T) {
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+
+	bobID, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity bob: %v", err)
+	}
+	daveID, err := pgpmail.GenerateIdentity("Dave", "dave@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity dave: %v", err)
+	}
+	revokedKey := generateRevokedArmoredKey(t, "Revoked", "revoked@example.com")
+	expiredKey := generateArmoredKeyWithLifetime(t, "Expired", "expired@example.com", time.Now().Add(-48*time.Hour), 3600)
+
+	for _, c := range []contacts.Contact{
+		{FormattedName: "Bob", Emails: []contacts.ContactValue{{Value: "bob@example.com"}}, PGPKey: bobID.ArmoredPublicKey},
+		{FormattedName: "Dave", Emails: []contacts.ContactValue{{Value: "dave@example.com"}}, PGPKey: daveID.ArmoredPublicKey},
+		{FormattedName: "Revoked", Emails: []contacts.ContactValue{{Value: "revoked@example.com"}}, PGPKey: revokedKey},
+		{FormattedName: "Expired", Emails: []contacts.ContactValue{{Value: "expired@example.com"}}, PGPKey: expiredKey},
+	} {
+		if _, err := store.Upsert(c); err != nil {
+			t.Fatalf("Upsert %s: %v", c.FormattedName, err)
+		}
+	}
+
+	plan := buildPGPRecipientPlan(
+		[]string{"bob@example.com"},
+		[]string{"revoked@example.com"},
+		[]string{"dave@example.com", "expired@example.com", "nokey@example.com"},
+		store,
+	)
+
+	if len(plan.toCCEmails) != 1 || plan.toCCEmails[0] != "bob@example.com" || len(plan.toCCKeys) != 1 || plan.toCCKeys[0] != bobID.ArmoredPublicKey {
+		t.Fatalf("expected bob alone in toCCEmails with his key, got emails=%v keys=%d", plan.toCCEmails, len(plan.toCCKeys))
+	}
+	if len(plan.bccEmails) != 1 || plan.bccEmails[0] != "dave@example.com" || len(plan.bccKeys) != 1 || plan.bccKeys[0] != daveID.ArmoredPublicKey {
+		t.Fatalf("expected dave alone in bccEmails with his key, got emails=%v keys=%d", plan.bccEmails, len(plan.bccKeys))
+	}
+	wantWithoutKey := []string{"revoked@example.com", "expired@example.com", "nokey@example.com"}
+	if len(plan.withoutKeyEmails) != len(wantWithoutKey) {
+		t.Fatalf("withoutKeyEmails mismatch: got %v want %v", plan.withoutKeyEmails, wantWithoutKey)
+	}
+	for i, want := range wantWithoutKey {
+		if plan.withoutKeyEmails[i] != want {
+			t.Fatalf("withoutKeyEmails[%d]: got %q want %q (full: %v)", i, plan.withoutKeyEmails[i], want, plan.withoutKeyEmails)
+		}
+	}
+}
+
+func TestBuildPGPRecipientPlanDedupesAcrossToCcBccKeepingFirstOccurrence(t *testing.T) {
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	bobID, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		FormattedName: "Bob",
+		Emails:        []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:        bobID.ArmoredPublicKey,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// bob@example.com appears in both To and BCC (different case) — must be
+	// counted once as a To recipient, never duplicated into bccEmails too.
+	plan := buildPGPRecipientPlan(
+		[]string{"bob@example.com"},
+		nil,
+		[]string{"Bob@Example.com"},
+		store,
+	)
+
+	if len(plan.toCCEmails) != 1 || len(plan.bccEmails) != 0 {
+		t.Fatalf("expected bob counted once in toCCEmails and not duplicated into bccEmails, got toCC=%v bcc=%v", plan.toCCEmails, plan.bccEmails)
 	}
 }

@@ -685,6 +685,73 @@ func findContactPGPKey(store *contacts.Store, email string) (string, bool) {
 	return "", false
 }
 
+// pgpRecipientPlan splits an encrypted send's To/CC/BCC recipients by PGP
+// key availability and status. To/CC recipients with a usable key share one
+// ciphertext, matching how a normal email is visible to every To/CC
+// recipient. BCC recipients are kept separate so each can be encrypted
+// individually in buildPGPDeliveries — sharing a ciphertext (and its
+// embedded recipient key IDs) with anyone else would deanonymize them.
+// Recipients with no key on file, or whose key is revoked or expired, land
+// in withoutKeyEmails and fall back to the existing plaintext pickup-link
+// notification.
+type pgpRecipientPlan struct {
+	toCCEmails       []string
+	toCCKeys         []string
+	bccEmails        []string
+	bccKeys          []string
+	withoutKeyEmails []string
+}
+
+// buildPGPRecipientPlan resolves each recipient's contact PGP key and
+// builds a pgpRecipientPlan. Recipients are deduplicated case-insensitively
+// across To+CC+BCC combined, keeping only the first occurrence — an address
+// listed in both To and BCC is treated as a To recipient.
+func buildPGPRecipientPlan(toList, ccList, bccList []string, contactsStore *contacts.Store) pgpRecipientPlan {
+	var plan pgpRecipientPlan
+	seen := map[string]bool{}
+
+	resolve := func(recipient string) (armoredKey string, usable bool) {
+		key, ok := findContactPGPKey(contactsStore, recipient)
+		if !ok {
+			return "", false
+		}
+		status, err := pgpmail.CheckKeyStatus(key)
+		if err != nil || !status.Usable() {
+			return "", false
+		}
+		return key, true
+	}
+
+	toCC := append(append([]string{}, toList...), ccList...)
+	for _, recipient := range toCC {
+		lower := strings.ToLower(strings.TrimSpace(recipient))
+		if lower == "" || seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		if key, ok := resolve(recipient); ok {
+			plan.toCCEmails = append(plan.toCCEmails, recipient)
+			plan.toCCKeys = append(plan.toCCKeys, key)
+		} else {
+			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
+		}
+	}
+	for _, recipient := range bccList {
+		lower := strings.ToLower(strings.TrimSpace(recipient))
+		if lower == "" || seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		if key, ok := resolve(recipient); ok {
+			plan.bccEmails = append(plan.bccEmails, recipient)
+			plan.bccKeys = append(plan.bccKeys, key)
+		} else {
+			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
+		}
+	}
+	return plan
+}
+
 // intersect returns the elements of addrs that case-insensitively appear in
 // allowed, preserving addrs' order.
 func intersect(addrs, allowed []string) []string {
