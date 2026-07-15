@@ -54,6 +54,7 @@ export function RecipientAutocomplete({
               key={contact.uid}
               className={`recipient-autocomplete-row${index === activeIndex ? " active" : ""}`}
               onMouseEnter={() => onHoverIndex(index)}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => onSelect(contact)}
             >
               <span className="recipient-autocomplete-name">{highlightMatch(contact.fn, query)}</span>

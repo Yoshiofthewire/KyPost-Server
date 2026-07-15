@@ -29,6 +29,7 @@ export function RecipientField({ label, state, onDraftChange, onAddToken, onRemo
   }, [results]);
 
   function selectContact(contact: Contact) {
+    justHandledRef.current = true;
     const token = contactToToken(contact);
     if (token) {
       onAddToken(token);
@@ -75,7 +76,6 @@ export function RecipientField({ label, state, onDraftChange, onAddToken, onRemo
         if (event.key === "Enter") {
           event.preventDefault();
         }
-        justHandledRef.current = true;
         selectContact(results[activeIndex]);
       }
       return;
