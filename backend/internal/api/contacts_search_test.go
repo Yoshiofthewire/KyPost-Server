@@ -105,6 +105,46 @@ func TestContactsSearchLimitClamped(t *testing.T) {
 	}
 }
 
+// TestContactsSearchLimitInvalidFallsBackToDefault confirms that limit
+// values which aren't a positive integer (zero, negative, or non-numeric)
+// silently fall back to contactsSearchDefaultLimit rather than being
+// rejected or treated as "no limit". This is the current, intentional
+// behavior of handleContactsSearch's `parsed > 0` guard — documented here
+// so a future change to that guard is a deliberate decision, not a
+// regression.
+func TestContactsSearchLimitInvalidFallsBackToDefault(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+
+	store, err := srv.userContactsStore(userID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := store.Upsert(contacts.Contact{FormattedName: "Match Contact"}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+
+	cases := []string{"0", "-5", "abc"}
+	for _, limit := range cases {
+		rec := doJSONAuth(srv, srv.withAuth(srv.handleContactsSearch), http.MethodGet, "/api/contacts/search?q=match&limit="+limit, nil, userID)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("limit=%q: status = %d, want %d; body=%s", limit, rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var resp struct {
+			Contacts []contacts.Contact `json:"contacts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("limit=%q: unmarshal: %v; body=%s", limit, err, rec.Body.String())
+		}
+		if len(resp.Contacts) != contactsSearchDefaultLimit {
+			t.Fatalf("limit=%q: len(contacts) = %d, want %d (default fallback)", limit, len(resp.Contacts), contactsSearchDefaultLimit)
+		}
+	}
+}
+
 // TestContactsSearchScopedToCaller confirms the handler resolves the store
 // via contactsFor(r) — i.e. per-user scoping — by seeding a second user with
 // a matching contact and confirming the first user's search doesn't see it.
