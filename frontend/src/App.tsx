@@ -5,6 +5,9 @@ import "quill/dist/quill.snow.css";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
 import { checkPGPRecipients } from "./api/pgp";
 import { AuthContext, type AuthState } from "./auth";
+import { RecipientField } from "./components/RecipientField";
+import { isDuplicateInField, parseRecipientField, serializeRecipientField } from "./lib/recipients";
+import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
 import { ConfigPage } from "./pages/ConfigPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { HealthPage } from "./pages/HealthPage";
@@ -148,15 +151,16 @@ export function App() {
   const [pwaInstallPrompt, setPwaInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [pwaInstalled, setPwaInstalled] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
-  const [composeTo, setComposeTo] = useState("");
-  const [composeCc, setComposeCc] = useState("");
-  const [composeBcc, setComposeBcc] = useState("");
+  const [composeTo, setComposeTo] = useState<RecipientFieldState>({ tokens: [], draft: "" });
+  const [composeCc, setComposeCc] = useState<RecipientFieldState>({ tokens: [], draft: "" });
+  const [composeBcc, setComposeBcc] = useState<RecipientFieldState>({ tokens: [], draft: "" });
   const [composeSubject, setComposeSubject] = useState("");
   const [composeHtmlBody, setComposeHtmlBody] = useState("");
   const [composeSending, setComposeSending] = useState(false);
   const [composeSavingDraft, setComposeSavingDraft] = useState(false);
   const [composeError, setComposeError] = useState("");
   const [composeSuccess, setComposeSuccess] = useState("");
+  const [composeNotice, setComposeNotice] = useState("");
   const [composeAttachments, setComposeAttachments] = useState<ComposeAttachment[]>([]);
   const [composeEncrypt, setComposeEncrypt] = useState(false);
   const [composeSign, setComposeSign] = useState(false);
@@ -165,6 +169,7 @@ export function App() {
   const quillInstanceRef = useRef<Quill | null>(null);
   const composeDialogRef = useRef<HTMLDialogElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const composeNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [licenseOpen, setLicenseOpen] = useState(false);
   const licenseDialogRef = useRef<HTMLDialogElement | null>(null);
   const currentMailbox = new URLSearchParams(location.search).get("mailbox")?.trim() ?? "";
@@ -458,14 +463,19 @@ export function App() {
   }, [licenseOpen]);
 
   function resetComposeForm() {
-    setComposeTo("");
-    setComposeCc("");
-    setComposeBcc("");
+    setComposeTo({ tokens: [], draft: "" });
+    setComposeCc({ tokens: [], draft: "" });
+    setComposeBcc({ tokens: [], draft: "" });
     setComposeSubject("");
     setComposeHtmlBody("");
     setComposeSending(false);
     setComposeError("");
     setComposeSuccess("");
+    if (composeNoticeTimeoutRef.current) {
+      clearTimeout(composeNoticeTimeoutRef.current);
+      composeNoticeTimeoutRef.current = null;
+    }
+    setComposeNotice("");
     setComposeAttachments([]);
     setComposeEncrypt(false);
     setComposeSign(false);
@@ -511,9 +521,9 @@ export function App() {
   }
 
   function openDraftInCompose(payload: DraftComposePayload) {
-    setComposeTo(payload.sentTo ?? "");
-    setComposeCc(payload.cc ?? "");
-    setComposeBcc(payload.bcc ?? "");
+    setComposeTo(parseRecipientField(payload.sentTo ?? ""));
+    setComposeCc(parseRecipientField(payload.cc ?? ""));
+    setComposeBcc(parseRecipientField(payload.bcc ?? ""));
     setComposeSubject(payload.subject ?? "");
     setComposeHtmlBody(payload.body ?? "");
     setComposeError("");
@@ -553,8 +563,7 @@ export function App() {
       return;
     }
     const addresses = [composeTo, composeCc, composeBcc]
-      .join(",")
-      .split(",")
+      .flatMap((f) => [...f.tokens.map((t) => t.email), f.draft])
       .map((a) => a.trim())
       .filter(Boolean);
     if (addresses.length === 0) {
@@ -584,7 +593,7 @@ export function App() {
   }, [composeEncrypt, composeTo, composeCc, composeBcc]);
 
   async function sendComposeEmail() {
-    const to = composeTo.trim();
+    const to = serializeRecipientField(composeTo);
     if (!to) {
       setComposeError("TO is required.");
       return;
@@ -596,8 +605,8 @@ export function App() {
     try {
       await postJSON<{ ok: boolean; sentSaved?: boolean; warning?: string }>("/api/mail/send", {
         to,
-        cc: composeCc.trim(),
-        bcc: composeBcc.trim(),
+        cc: serializeRecipientField(composeCc),
+        bcc: serializeRecipientField(composeBcc),
         subject: composeSubject,
         body,
         mode: "html",
@@ -616,7 +625,7 @@ export function App() {
   }
 
   async function saveComposeDraft() {
-    const to = composeTo.trim();
+    const to = serializeRecipientField(composeTo);
     if (!to) {
       setComposeError("TO is required.");
       return;
@@ -628,8 +637,8 @@ export function App() {
     try {
       await postJSON<{ ok: boolean }>("/api/mail/draft", {
         to,
-        cc: composeCc.trim(),
-        bcc: composeBcc.trim(),
+        cc: serializeRecipientField(composeCc),
+        bcc: serializeRecipientField(composeBcc),
         subject: composeSubject,
         body,
         mode: "html",
@@ -642,6 +651,32 @@ export function App() {
     } finally {
       setComposeSavingDraft(false);
     }
+  }
+
+  function addTokenToField(field: "to" | "cc" | "bcc", token: RecipientToken) {
+    const setters: Record<"to" | "cc" | "bcc", typeof setComposeTo> = {
+      to: setComposeTo,
+      cc: setComposeCc,
+      bcc: setComposeBcc
+    };
+    const currentTokens: Record<"to" | "cc" | "bcc", RecipientToken[]> = {
+      to: composeTo.tokens,
+      cc: composeCc.tokens,
+      bcc: composeBcc.tokens
+    };
+    const setField = setters[field];
+    if (isDuplicateInField(currentTokens[field], token.email)) {
+      if (composeNoticeTimeoutRef.current) {
+        clearTimeout(composeNoticeTimeoutRef.current);
+      }
+      setComposeNotice(`${token.name ?? token.email} is already in ${field.toUpperCase()}.`);
+      composeNoticeTimeoutRef.current = setTimeout(() => {
+        setComposeNotice("");
+        composeNoticeTimeoutRef.current = null;
+      }, 3000);
+      return;
+    }
+    setField((prev) => ({ tokens: [...prev.tokens, token], draft: "" }));
   }
 
   if (auth === null) {
@@ -995,19 +1030,38 @@ export function App() {
 
             {composeError ? <p className="notice notice-error" style={{ margin: 0 }}>Send failed: {composeError}</p> : null}
             {composeSuccess ? <p className="notice notice-success" style={{ margin: 0 }}>{composeSuccess}</p> : null}
+            {composeNotice ? <p className="notice notice-warning">{composeNotice}</p> : null}
 
             <div className="compose-form-grid">
               <label className="compose-field-row">
                 <span>TO:</span>
-                <input type="text" value={composeTo} onChange={(event) => setComposeTo(event.target.value)} placeholder="recipient@example.com" disabled={composeSending || composeSavingDraft} />
+                <RecipientField
+                  label="To"
+                  state={composeTo}
+                  onDraftChange={(draft) => setComposeTo((prev) => ({ ...prev, draft }))}
+                  onAddToken={(token) => addTokenToField("to", token)}
+                  onRemoveToken={(index) => setComposeTo((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
+                />
               </label>
               <label className="compose-field-row">
                 <span>CC:</span>
-                <input type="text" value={composeCc} onChange={(event) => setComposeCc(event.target.value)} placeholder="cc@example.com" disabled={composeSending || composeSavingDraft} />
+                <RecipientField
+                  label="Cc"
+                  state={composeCc}
+                  onDraftChange={(draft) => setComposeCc((prev) => ({ ...prev, draft }))}
+                  onAddToken={(token) => addTokenToField("cc", token)}
+                  onRemoveToken={(index) => setComposeCc((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
+                />
               </label>
               <label className="compose-field-row">
                 <span>BCC:</span>
-                <input type="text" value={composeBcc} onChange={(event) => setComposeBcc(event.target.value)} placeholder="bcc@example.com" disabled={composeSending || composeSavingDraft} />
+                <RecipientField
+                  label="Bcc"
+                  state={composeBcc}
+                  onDraftChange={(draft) => setComposeBcc((prev) => ({ ...prev, draft }))}
+                  onAddToken={(token) => addTokenToField("bcc", token)}
+                  onRemoveToken={(index) => setComposeBcc((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
+                />
               </label>
               <label className="compose-field-row">
                 <span>Subject:</span>

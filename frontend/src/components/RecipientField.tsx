@@ -82,6 +82,11 @@ export function RecipientField({ label, state, onDraftChange, onAddToken, onRemo
     }
     if (event.key === "Escape") {
       if (isOpen) {
+        // stopPropagation() alone does not stop the parent <dialog>'s native
+        // Escape-to-cancel behavior (that's tied to preventDefault(), not to
+        // event bubbling) — without this, Escape would close the whole
+        // compose dialog instead of just the dropdown.
+        event.preventDefault();
         event.stopPropagation();
         setDismissed(true);
       }
