@@ -5,6 +5,157 @@ import (
 	"testing"
 )
 
+func TestParseRuleText(t *testing.T) {
+	tests := []struct {
+		name       string
+		script     string
+		wantOp     string
+		wantConds  int
+		wantAction []Action
+	}{
+		{
+			name:       "simple header contains with fileinto",
+			script:     "require [\"fileinto\"];\n\nif allof(header :contains [\"from\"] \"acme\") {\n    fileinto \"Archive/Acme\";\n}\n",
+			wantOp:     "allof",
+			wantConds:  1,
+			wantAction: []Action{{Type: "move", Value: "Archive/Acme"}},
+		},
+		{
+			name:       "anyof with not and hasflag",
+			script:     "require [\"llamalabs\", \"imap4flags\"];\nif anyof(not header :is [\"subject\"] \"spam\", hasflag :is \"VIP\") {\n    archive;\n    stop;\n}\n",
+			wantOp:     "anyof",
+			wantConds:  2,
+			wantAction: []Action{{Type: "archive"}, {Type: "stop"}},
+		},
+		{
+			name:       "keep produces no actions",
+			script:     "if allof(body :contains \"unsubscribe\") {\n    keep;\n}\n",
+			wantOp:     "allof",
+			wantConds:  1,
+			wantAction: nil,
+		},
+		{
+			name:       "comments are stripped",
+			script:     "# a leading comment\nif allof(header :contains [\"from\"] \"acme\") { # inline comment\n    /* block\n       comment */\n    fileinto \"X\";\n}\n",
+			wantOp:     "allof",
+			wantConds:  1,
+			wantAction: []Action{{Type: "move", Value: "X"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseRuleText(tc.script, Rule{ID: "rule-1", Name: "kept"})
+			if err != nil {
+				t.Fatalf("ParseRuleText: %v", err)
+			}
+			if got.ID != "rule-1" || got.Name != "kept" {
+				t.Fatalf("expected non-Match/Actions fields to pass through, got %+v", got)
+			}
+			if got.Match.Op != tc.wantOp {
+				t.Fatalf("Match.Op = %q, want %q", got.Match.Op, tc.wantOp)
+			}
+			if len(got.Match.Conditions) != tc.wantConds {
+				t.Fatalf("len(Match.Conditions) = %d, want %d (%+v)", len(got.Match.Conditions), tc.wantConds, got.Match.Conditions)
+			}
+			if len(got.Actions) != len(tc.wantAction) {
+				t.Fatalf("Actions = %+v, want %+v", got.Actions, tc.wantAction)
+			}
+			for i, want := range tc.wantAction {
+				if got.Actions[i] != want {
+					t.Errorf("Actions[%d] = %+v, want %+v", i, got.Actions[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseRuleText_Errors(t *testing.T) {
+	tests := []struct {
+		name       string
+		script     string
+		wantSubstr string
+	}{
+		{
+			name:       "unknown test",
+			script:     "if bogustest([\"from\"] \"x\") {\n  keep;\n}\n",
+			wantSubstr: "unknown test",
+		},
+		{
+			name:       "unknown action",
+			script:     "if allof(header :contains [\"from\"] \"x\") {\n  bogusaction;\n}\n",
+			wantSubstr: "unknown action",
+		},
+		{
+			name:       "unbalanced braces",
+			script:     "if allof(header :contains [\"from\"] \"x\") {\n  keep;\n",
+			wantSubstr: "unbalanced braces",
+		},
+		{
+			name:       "unsupported require capability",
+			script:     "require [\"nonexistent\"];\nif allof(header :contains [\"from\"] \"x\") {\n  keep;\n}\n",
+			wantSubstr: "unsupported require capability",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseRuleText(tc.script, Rule{})
+			if err == nil {
+				t.Fatalf("expected an error containing %q, got nil", tc.wantSubstr)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestRoundTrip verifies CompileRule(mustParse(CompileRule(r))) is
+// semantically equivalent to CompileRule(r) for every GUI-producible rule
+// shape (flat allof/anyof of leaf conditions, one condition per field).
+func TestRoundTrip(t *testing.T) {
+	fixtures := []Rule{
+		{
+			Match:   MatchGroup{Op: "allof", Conditions: []Condition{{Field: "from", Comparator: "contains", Value: "acme"}}},
+			Actions: []Action{{Type: "move", Value: "Archive/Acme"}},
+		},
+		{
+			Match: MatchGroup{Op: "anyof", Conditions: []Condition{
+				{Field: "subject", Comparator: "is", Value: "spam", Negate: true},
+				{Field: "keyword", Comparator: "contains", Value: "vip"},
+				{Field: "body", Comparator: "matches", Value: "*unsubscribe*"},
+			}},
+			Actions: []Action{{Type: "keyword", Value: "Flagged"}, {Type: "unkeyword", Value: "Unread"}, {Type: "stop"}},
+		},
+		{
+			Match:   MatchGroup{Op: "allof", Conditions: []Condition{{Field: "cc", Comparator: "exists"}}},
+			Actions: []Action{{Type: "read"}, {Type: "archive"}, {Type: "spam"}, {Type: "delete"}},
+		},
+		{
+			Match: MatchGroup{Op: "allof", Conditions: []Condition{{Field: "to", Comparator: "regex", Value: "^a.*z$"}}},
+		},
+	}
+
+	for i, rule := range fixtures {
+		first, err := CompileRule(rule)
+		if err != nil {
+			t.Fatalf("fixture %d: CompileRule: %v", i, err)
+		}
+		parsed, err := ParseRuleText(first, Rule{})
+		if err != nil {
+			t.Fatalf("fixture %d: ParseRuleText(%q): %v", i, first, err)
+		}
+		second, err := CompileRule(parsed)
+		if err != nil {
+			t.Fatalf("fixture %d: CompileRule(parsed): %v", i, err)
+		}
+		if first != second {
+			t.Fatalf("fixture %d: round trip mismatch:\nfirst:\n%s\nsecond:\n%s", i, first, second)
+		}
+	}
+}
+
 func TestCompileRule(t *testing.T) {
 	tests := []struct {
 		name string

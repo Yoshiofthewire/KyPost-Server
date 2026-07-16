@@ -211,3 +211,547 @@ func compileAction(a Action) (string, error) {
 		return "", fmt.Errorf("unsupported action type %q", a.Type)
 	}
 }
+
+// ---- Parser ----
+
+// ParseRuleText hand-parses a Sieve-subset script (see CompileRule for the
+// exact construct set understood) and returns existing with Match/Actions
+// replaced — every other field (Name/Enabled/Order/Scope/ID/Rev/...) passes
+// through untouched. Errors report a 1-based line number.
+func ParseRuleText(text string, existing Rule) (Rule, error) {
+	toks, err := lexSieve(text)
+	if err != nil {
+		return Rule{}, err
+	}
+	p := &sieveParser{toks: toks}
+
+	for p.peek().kind == tokWord && strings.EqualFold(p.peek().text, "require") {
+		reqTok := p.next()
+		caps, err := p.parseStringList()
+		if err != nil {
+			return Rule{}, err
+		}
+		if err := p.expectSemicolon(); err != nil {
+			return Rule{}, err
+		}
+		for _, c := range caps {
+			key := strings.ToLower(strings.TrimSpace(c))
+			if !allowedCapabilities[key] {
+				return Rule{}, fmt.Errorf("line %d: unsupported require capability %q", reqTok.line, c)
+			}
+		}
+	}
+
+	if err := p.expectWord("if"); err != nil {
+		return Rule{}, err
+	}
+	rootCond, err := p.parseTest()
+	if err != nil {
+		return Rule{}, err
+	}
+	if _, err := p.expect(tokLBrace, "{"); err != nil {
+		return Rule{}, err
+	}
+	var actions []Action
+	for p.peek().kind != tokRBrace {
+		if p.peek().kind == tokEOF {
+			return Rule{}, fmt.Errorf("line %d: unbalanced braces, missing }", p.peek().line)
+		}
+		a, err := p.parseAction()
+		if err != nil {
+			return Rule{}, err
+		}
+		if a.Type != "keep" {
+			actions = append(actions, a)
+		}
+	}
+	if _, err := p.expect(tokRBrace, "}"); err != nil {
+		return Rule{}, err
+	}
+	if p.peek().kind != tokEOF {
+		return Rule{}, fmt.Errorf("line %d: unexpected content after rule block", p.peek().line)
+	}
+
+	var match MatchGroup
+	if rootCond.Group != nil {
+		match = *rootCond.Group
+	} else {
+		match = MatchGroup{Op: "allof", Conditions: []Condition{rootCond}}
+	}
+
+	result := existing
+	result.Match = match
+	result.Actions = actions
+	return result, nil
+}
+
+type sieveParser struct {
+	toks []token
+	pos  int
+}
+
+func (p *sieveParser) peek() token { return p.toks[p.pos] }
+
+func (p *sieveParser) next() token {
+	t := p.toks[p.pos]
+	if p.pos < len(p.toks)-1 {
+		p.pos++
+	}
+	return t
+}
+
+func (p *sieveParser) expect(kind tokKind, what string) (token, error) {
+	t := p.peek()
+	if t.kind != kind {
+		return token{}, fmt.Errorf("line %d: expected %s, got %q", t.line, what, tokenDisplay(t))
+	}
+	return p.next(), nil
+}
+
+func (p *sieveParser) expectWord(word string) error {
+	t := p.peek()
+	if t.kind != tokWord || !strings.EqualFold(t.text, word) {
+		return fmt.Errorf("line %d: expected %q, got %q", t.line, word, tokenDisplay(t))
+	}
+	p.next()
+	return nil
+}
+
+func (p *sieveParser) expectSemicolon() error {
+	_, err := p.expect(tokSemicolon, ";")
+	return err
+}
+
+func tokenDisplay(t token) string {
+	if t.kind == tokEOF {
+		return "end of input"
+	}
+	return t.text
+}
+
+func (p *sieveParser) parseStringList() ([]string, error) {
+	if _, err := p.expect(tokLBracket, "["); err != nil {
+		return nil, err
+	}
+	var out []string
+	for {
+		if p.peek().kind == tokRBracket {
+			break
+		}
+		s, err := p.expect(tokString, "string")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s.text)
+		if p.peek().kind == tokComma {
+			p.next()
+			continue
+		}
+		break
+	}
+	if _, err := p.expect(tokRBracket, "]"); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func normalizeField(f string) string {
+	return strings.ToLower(strings.TrimSpace(f))
+}
+
+func (p *sieveParser) parseComparatorTag(defaultComparator string) (string, error) {
+	if p.peek().kind != tokColonTag {
+		return defaultComparator, nil
+	}
+	tag := p.next()
+	switch strings.ToLower(tag.text) {
+	case "contains":
+		return "contains", nil
+	case "is":
+		return "is", nil
+	case "matches":
+		return "matches", nil
+	case "regex":
+		return "regex", nil
+	default:
+		return "", fmt.Errorf("line %d: unsupported comparator tag :%s", tag.line, tag.text)
+	}
+}
+
+func (p *sieveParser) parseTest() (Condition, error) {
+	t := p.peek()
+	if t.kind != tokWord {
+		return Condition{}, fmt.Errorf("line %d: expected a test, got %q", t.line, tokenDisplay(t))
+	}
+	switch {
+	case strings.EqualFold(t.text, "not"):
+		p.next()
+		inner, err := p.parseTest()
+		if err != nil {
+			return Condition{}, err
+		}
+		inner.Negate = !inner.Negate
+		return inner, nil
+
+	case strings.EqualFold(t.text, "allof") || strings.EqualFold(t.text, "anyof"):
+		op := strings.ToLower(t.text)
+		p.next()
+		if _, err := p.expect(tokLParen, "("); err != nil {
+			return Condition{}, err
+		}
+		var conds []Condition
+		for {
+			c, err := p.parseTest()
+			if err != nil {
+				return Condition{}, err
+			}
+			conds = append(conds, c)
+			if p.peek().kind == tokComma {
+				p.next()
+				continue
+			}
+			break
+		}
+		if _, err := p.expect(tokRParen, ")"); err != nil {
+			return Condition{}, err
+		}
+		group := MatchGroup{Op: op, Conditions: conds}
+		return Condition{Group: &group}, nil
+
+	case strings.EqualFold(t.text, "header") || strings.EqualFold(t.text, "address"):
+		p.next()
+		comparator, err := p.parseComparatorTag("is")
+		if err != nil {
+			return Condition{}, err
+		}
+		fields, err := p.parseStringList()
+		if err != nil {
+			return Condition{}, err
+		}
+		valueTok, err := p.expect(tokString, "string value")
+		if err != nil {
+			return Condition{}, err
+		}
+		if len(fields) == 0 {
+			return Condition{}, fmt.Errorf("line %d: header/address test requires at least one field", t.line)
+		}
+		return fieldsToCondition(fields, comparator, valueTok.text), nil
+
+	case strings.EqualFold(t.text, "exists"):
+		p.next()
+		fields, err := p.parseStringList()
+		if err != nil {
+			return Condition{}, err
+		}
+		if len(fields) == 0 {
+			return Condition{}, fmt.Errorf("line %d: exists test requires at least one field", t.line)
+		}
+		return fieldsToCondition(fields, "exists", ""), nil
+
+	case strings.EqualFold(t.text, "body"):
+		p.next()
+		comparator, err := p.parseComparatorTag("contains")
+		if err != nil {
+			return Condition{}, err
+		}
+		valueTok, err := p.expect(tokString, "string value")
+		if err != nil {
+			return Condition{}, err
+		}
+		return Condition{Field: "body", Comparator: comparator, Value: valueTok.text}, nil
+
+	case strings.EqualFold(t.text, "hasflag"):
+		p.next()
+		comparator, err := p.parseComparatorTag("is")
+		if err != nil {
+			return Condition{}, err
+		}
+		valueTok, err := p.expect(tokString, "string value")
+		if err != nil {
+			return Condition{}, err
+		}
+		return Condition{Field: "keyword", Comparator: comparator, Value: valueTok.text}, nil
+
+	default:
+		return Condition{}, fmt.Errorf("line %d: unknown test %q", t.line, t.text)
+	}
+}
+
+// fieldsToCondition builds a single leaf Condition for a one-item field
+// list, or a nested anyof MatchGroup (one Condition per field) for a
+// multi-item list — matching Sieve's "true if any listed header matches"
+// semantics for header/address/exists tests with more than one field.
+func fieldsToCondition(fields []string, comparator, value string) Condition {
+	if len(fields) == 1 {
+		return Condition{Field: normalizeField(fields[0]), Comparator: comparator, Value: value}
+	}
+	conds := make([]Condition, 0, len(fields))
+	for _, f := range fields {
+		conds = append(conds, Condition{Field: normalizeField(f), Comparator: comparator, Value: value})
+	}
+	group := MatchGroup{Op: "anyof", Conditions: conds}
+	return Condition{Group: &group}
+}
+
+func (p *sieveParser) parseAction() (Action, error) {
+	t := p.peek()
+	if t.kind != tokWord {
+		return Action{}, fmt.Errorf("line %d: expected an action, got %q", t.line, tokenDisplay(t))
+	}
+	name := strings.ToLower(t.text)
+	p.next()
+	switch name {
+	case "fileinto":
+		v, err := p.expect(tokString, "folder string")
+		if err != nil {
+			return Action{}, err
+		}
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "move", Value: v.text}, nil
+	case "discard":
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "delete"}, nil
+	case "keep":
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "keep"}, nil
+	case "stop":
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "stop"}, nil
+	case "addflag":
+		v, err := p.expect(tokString, "keyword string")
+		if err != nil {
+			return Action{}, err
+		}
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "keyword", Value: v.text}, nil
+	case "removeflag":
+		v, err := p.expect(tokString, "keyword string")
+		if err != nil {
+			return Action{}, err
+		}
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "unkeyword", Value: v.text}, nil
+	case "markread":
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "read"}, nil
+	case "archive":
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "archive"}, nil
+	case "markspam":
+		if err := p.expectSemicolon(); err != nil {
+			return Action{}, err
+		}
+		return Action{Type: "spam"}, nil
+	default:
+		return Action{}, fmt.Errorf("line %d: unknown action %q", t.line, name)
+	}
+}
+
+// ---- Lexer ----
+
+type tokKind int
+
+const (
+	tokWord tokKind = iota
+	tokString
+	tokLBracket
+	tokRBracket
+	tokLParen
+	tokRParen
+	tokLBrace
+	tokRBrace
+	tokSemicolon
+	tokComma
+	tokColonTag
+	tokEOF
+)
+
+type token struct {
+	kind tokKind
+	text string
+	line int
+}
+
+type sieveLexer struct {
+	src  []rune
+	pos  int
+	line int
+}
+
+func lexSieve(text string) ([]token, error) {
+	l := &sieveLexer{src: []rune(text), line: 1}
+	var out []token
+	for {
+		if err := l.skipWhitespaceAndComments(); err != nil {
+			return nil, err
+		}
+		r, ok := l.peekRune()
+		if !ok {
+			out = append(out, token{kind: tokEOF, line: l.line})
+			return out, nil
+		}
+		line := l.line
+		switch {
+		case r == '[':
+			l.advance()
+			out = append(out, token{kind: tokLBracket, text: "[", line: line})
+		case r == ']':
+			l.advance()
+			out = append(out, token{kind: tokRBracket, text: "]", line: line})
+		case r == '(':
+			l.advance()
+			out = append(out, token{kind: tokLParen, text: "(", line: line})
+		case r == ')':
+			l.advance()
+			out = append(out, token{kind: tokRParen, text: ")", line: line})
+		case r == '{':
+			l.advance()
+			out = append(out, token{kind: tokLBrace, text: "{", line: line})
+		case r == '}':
+			l.advance()
+			out = append(out, token{kind: tokRBrace, text: "}", line: line})
+		case r == ';':
+			l.advance()
+			out = append(out, token{kind: tokSemicolon, text: ";", line: line})
+		case r == ',':
+			l.advance()
+			out = append(out, token{kind: tokComma, text: ",", line: line})
+		case r == '"':
+			l.advance()
+			var sb strings.Builder
+			closed := false
+			for {
+				c, ok := l.advance()
+				if !ok {
+					break
+				}
+				if c == '"' {
+					closed = true
+					break
+				}
+				if c == '\\' {
+					if c2, ok2 := l.advance(); ok2 {
+						sb.WriteRune(c2)
+					}
+					continue
+				}
+				sb.WriteRune(c)
+			}
+			if !closed {
+				return nil, fmt.Errorf("line %d: unterminated string literal", line)
+			}
+			out = append(out, token{kind: tokString, text: sb.String(), line: line})
+		case r == ':':
+			l.advance()
+			var sb strings.Builder
+			for {
+				c, ok := l.peekRune()
+				if !ok || !isWordRune(c) {
+					break
+				}
+				sb.WriteRune(c)
+				l.advance()
+			}
+			out = append(out, token{kind: tokColonTag, text: sb.String(), line: line})
+		default:
+			if !isWordRune(r) {
+				return nil, fmt.Errorf("line %d: unexpected character %q", line, string(r))
+			}
+			var sb strings.Builder
+			for {
+				c, ok := l.peekRune()
+				if !ok || !isWordRune(c) {
+					break
+				}
+				sb.WriteRune(c)
+				l.advance()
+			}
+			out = append(out, token{kind: tokWord, text: sb.String(), line: line})
+		}
+	}
+}
+
+func (l *sieveLexer) peekRune() (rune, bool) {
+	if l.pos >= len(l.src) {
+		return 0, false
+	}
+	return l.src[l.pos], true
+}
+
+func (l *sieveLexer) advance() (rune, bool) {
+	r, ok := l.peekRune()
+	if !ok {
+		return 0, false
+	}
+	l.pos++
+	if r == '\n' {
+		l.line++
+	}
+	return r, true
+}
+
+func (l *sieveLexer) skipWhitespaceAndComments() error {
+	for {
+		r, ok := l.peekRune()
+		if !ok {
+			return nil
+		}
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			l.advance()
+			continue
+		}
+		if r == '#' {
+			for {
+				c, ok := l.advance()
+				if !ok || c == '\n' {
+					break
+				}
+			}
+			continue
+		}
+		if r == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '*' {
+			startLine := l.line
+			l.advance()
+			l.advance()
+			closed := false
+			for {
+				c, ok := l.advance()
+				if !ok {
+					break
+				}
+				if c == '*' {
+					if r2, ok2 := l.peekRune(); ok2 && r2 == '/' {
+						l.advance()
+						closed = true
+						break
+					}
+				}
+			}
+			if !closed {
+				return fmt.Errorf("line %d: unterminated block comment", startLine)
+			}
+			continue
+		}
+		return nil
+	}
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
