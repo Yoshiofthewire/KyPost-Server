@@ -359,6 +359,20 @@ func normalizeField(f string) string {
 	return strings.ToLower(strings.TrimSpace(f))
 }
 
+// validHeaderAddressFields is the exact set of field names compileLeafCondition
+// treats as header/address fields (its "from", "to", "cc", "bcc", "subject"
+// case). "body" and "keyword" are deliberately excluded: compileLeafCondition
+// special-cases those two into a completely different Sieve test (body /
+// hasflag), so a header/address test naming them would silently compile to
+// the wrong test with no error. See sieve.go:166-181 (compileLeafCondition).
+var validHeaderAddressFields = map[string]bool{
+	"from":    true,
+	"to":      true,
+	"cc":      true,
+	"bcc":     true,
+	"subject": true,
+}
+
 func (p *sieveParser) parseComparatorTag(defaultComparator string) (string, error) {
 	if p.peek().kind != tokColonTag {
 		return defaultComparator, nil
@@ -434,6 +448,11 @@ func (p *sieveParser) parseTest() (Condition, error) {
 		}
 		if len(fields) == 0 {
 			return Condition{}, fmt.Errorf("line %d: header/address test requires at least one field", t.line)
+		}
+		for _, f := range fields {
+			if !validHeaderAddressFields[normalizeField(f)] {
+				return Condition{}, fmt.Errorf("line %d: unsupported header/address field %q", t.line, f)
+			}
 		}
 		return fieldsToCondition(fields, comparator, valueTok.text), nil
 

@@ -1,45 +1,121 @@
 package rules
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
+
+// wantCondition describes the expected shape of one parsed Condition,
+// including (via group) the nested conditions of a Condition.Group so
+// success-case subtests can assert group contents, not just the top level.
+type wantCondition struct {
+	negate     bool
+	field      string
+	comparator string
+	value      string
+	group      []wantCondition // non-nil => Condition.Group expected, checked recursively
+}
+
+// assertConditions compares got against want field-by-field (Negate, Field,
+// Comparator, Value), recursing into Condition.Group when want.group is set.
+// A bug like a comparator tag being silently defaulted instead of read from
+// the actual Sieve source would previously slip past TestParseRuleText,
+// which only checked len(Match.Conditions); this catches it.
+func assertConditions(t *testing.T, path string, got []Condition, want []wantCondition) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: len = %d, want %d (%+v)", path, len(got), len(want), got)
+	}
+	for i, w := range want {
+		g := got[i]
+		item := fmt.Sprintf("%s[%d]", path, i)
+		if w.group != nil {
+			if g.Group == nil {
+				t.Fatalf("%s: Group = nil, want a nested group %+v", item, w.group)
+			}
+			assertConditions(t, item+".Group", g.Group.Conditions, w.group)
+			continue
+		}
+		if g.Group != nil {
+			t.Fatalf("%s: Group = %+v, want a leaf condition", item, g.Group)
+		}
+		if g.Negate != w.negate {
+			t.Errorf("%s: Negate = %v, want %v", item, g.Negate, w.negate)
+		}
+		if g.Field != w.field {
+			t.Errorf("%s: Field = %q, want %q", item, g.Field, w.field)
+		}
+		if g.Comparator != w.comparator {
+			t.Errorf("%s: Comparator = %q, want %q", item, g.Comparator, w.comparator)
+		}
+		if g.Value != w.value {
+			t.Errorf("%s: Value = %q, want %q", item, g.Value, w.value)
+		}
+	}
+}
 
 func TestParseRuleText(t *testing.T) {
 	tests := []struct {
 		name       string
 		script     string
 		wantOp     string
-		wantConds  int
+		wantConds  []wantCondition
 		wantAction []Action
 	}{
 		{
-			name:       "simple header contains with fileinto",
-			script:     "require [\"fileinto\"];\n\nif allof(header :contains [\"from\"] \"acme\") {\n    fileinto \"Archive/Acme\";\n}\n",
-			wantOp:     "allof",
-			wantConds:  1,
+			name:   "simple header contains with fileinto",
+			script: "require [\"fileinto\"];\n\nif allof(header :contains [\"from\"] \"acme\") {\n    fileinto \"Archive/Acme\";\n}\n",
+			wantOp: "allof",
+			wantConds: []wantCondition{
+				{field: "from", comparator: "contains", value: "acme"},
+			},
 			wantAction: []Action{{Type: "move", Value: "Archive/Acme"}},
 		},
 		{
-			name:       "anyof with not and hasflag",
-			script:     "require [\"llamalabs\", \"imap4flags\"];\nif anyof(not header :is [\"subject\"] \"spam\", hasflag :is \"VIP\") {\n    archive;\n    stop;\n}\n",
-			wantOp:     "anyof",
-			wantConds:  2,
+			name:   "anyof with not and hasflag",
+			script: "require [\"llamalabs\", \"imap4flags\"];\nif anyof(not header :is [\"subject\"] \"spam\", hasflag :is \"VIP\") {\n    archive;\n    stop;\n}\n",
+			wantOp: "anyof",
+			wantConds: []wantCondition{
+				{negate: true, field: "subject", comparator: "is", value: "spam"},
+				{field: "keyword", comparator: "is", value: "VIP"},
+			},
 			wantAction: []Action{{Type: "archive"}, {Type: "stop"}},
 		},
 		{
-			name:       "keep produces no actions",
-			script:     "if allof(body :contains \"unsubscribe\") {\n    keep;\n}\n",
-			wantOp:     "allof",
-			wantConds:  1,
+			name:   "keep produces no actions",
+			script: "if allof(body :contains \"unsubscribe\") {\n    keep;\n}\n",
+			wantOp: "allof",
+			wantConds: []wantCondition{
+				{field: "body", comparator: "contains", value: "unsubscribe"},
+			},
 			wantAction: nil,
 		},
 		{
-			name:       "comments are stripped",
-			script:     "# a leading comment\nif allof(header :contains [\"from\"] \"acme\") { # inline comment\n    /* block\n       comment */\n    fileinto \"X\";\n}\n",
-			wantOp:     "allof",
-			wantConds:  1,
+			name:   "comments are stripped",
+			script: "# a leading comment\nif allof(header :contains [\"from\"] \"acme\") { # inline comment\n    /* block\n       comment */\n    fileinto \"X\";\n}\n",
+			wantOp: "allof",
+			wantConds: []wantCondition{
+				{field: "from", comparator: "contains", value: "acme"},
+			},
 			wantAction: []Action{{Type: "move", Value: "X"}},
+		},
+		{
+			// A header/address test with more than one field name becomes a
+			// nested anyof Condition.Group (see fieldsToCondition); this
+			// exercises assertConditions' recursion into .group, and also
+			// covers the new valid-field-name path (both names are in
+			// validHeaderAddressFields) alongside Issue 1's rejection path.
+			name:   "header test with multiple fields becomes nested anyof group",
+			script: "if allof(header :is [\"from\", \"to\"] \"acme\") {\n    keep;\n}\n",
+			wantOp: "allof",
+			wantConds: []wantCondition{
+				{group: []wantCondition{
+					{field: "from", comparator: "is", value: "acme"},
+					{field: "to", comparator: "is", value: "acme"},
+				}},
+			},
+			wantAction: nil,
 		},
 	}
 
@@ -55,9 +131,7 @@ func TestParseRuleText(t *testing.T) {
 			if got.Match.Op != tc.wantOp {
 				t.Fatalf("Match.Op = %q, want %q", got.Match.Op, tc.wantOp)
 			}
-			if len(got.Match.Conditions) != tc.wantConds {
-				t.Fatalf("len(Match.Conditions) = %d, want %d (%+v)", len(got.Match.Conditions), tc.wantConds, got.Match.Conditions)
-			}
+			assertConditions(t, "Match.Conditions", got.Match.Conditions, tc.wantConds)
 			if len(got.Actions) != len(tc.wantAction) {
 				t.Fatalf("Actions = %+v, want %+v", got.Actions, tc.wantAction)
 			}
@@ -95,6 +169,18 @@ func TestParseRuleText_Errors(t *testing.T) {
 			name:       "unsupported require capability",
 			script:     "require [\"nonexistent\"];\nif allof(header :contains [\"from\"] \"x\") {\n  keep;\n}\n",
 			wantSubstr: "unsupported require capability",
+		},
+		{
+			// Regression test for Issue 1: "keyword" and "body" are only
+			// valid as their own dedicated Sieve test types (hasflag / body
+			// test), not as a field name inside a header/address field list.
+			// Before this fix, this parsed successfully to
+			// Condition{Field:"keyword", ...}, which CompileRule then
+			// silently re-emits as a hasflag test — a different Sieve test
+			// with different semantics, with no error anywhere.
+			name:       "header test with keyword field name is rejected",
+			script:     "if allof(header :is [\"keyword\"] \"urgent\") {\n  keep;\n}\n",
+			wantSubstr: "unsupported header/address field \"keyword\"",
 		},
 	}
 
