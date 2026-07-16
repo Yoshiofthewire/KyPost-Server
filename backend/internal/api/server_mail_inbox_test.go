@@ -90,8 +90,8 @@ func (f *fakeMailClient) CreateFolder(_ context.Context, _ string, _ string) (st
 func (f *fakeMailClient) RenameFolder(_ context.Context, _ string, _ string) (string, error) {
 	return "", nil
 }
-func (f *fakeMailClient) DeleteFolder(_ context.Context, _ string) error         { return nil }
-func (f *fakeMailClient) EnsureLabel(_ context.Context, _ string) error          { return nil }
+func (f *fakeMailClient) DeleteFolder(_ context.Context, _ string) error { return nil }
+func (f *fakeMailClient) EnsureLabel(_ context.Context, _ string) error  { return nil }
 func (f *fakeMailClient) ApplyLabel(_ context.Context, messageID string, label string) error {
 	f.appliedLabels = append(f.appliedLabels, labelCall{messageID: messageID, label: label})
 	return nil
