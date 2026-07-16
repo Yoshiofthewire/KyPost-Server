@@ -1,4 +1,4 @@
-<img src="./ky.png" alt="KyPost" />
+<img src="./ky50p.png" alt="KyPost" />
 
 # KyPost
 
