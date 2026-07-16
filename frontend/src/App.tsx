@@ -16,6 +16,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import { ReadPage } from "./pages/ReadPage";
+import { RulesPage } from "./pages/RulesPage";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -30,6 +31,7 @@ const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: b
   { to: "/config", label: "Configuration" },
   { to: "/notifications", label: "Pairing" },
   { to: "/security", label: "Security" },
+  { to: "/rules", label: "Filters" },
   { to: "/tuning", label: "Prompt Tuning" },
   { to: "/users", label: "Manage Users", adminOnly: true },
   { to: "/logs", label: "System Logs", adminOnly: true }
@@ -944,6 +946,7 @@ export function App() {
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/notifications" element={protect(<NotificationsPage />)} />
           <Route path="/security" element={protect(<SecurityPage />)} />
+          <Route path="/rules" element={protect(<RulesPage />)} />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
           <Route path="/users" element={protect(<UsersPage />, true)} />
