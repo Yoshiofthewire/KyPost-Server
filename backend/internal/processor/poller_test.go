@@ -2,6 +2,10 @@ package processor
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
@@ -241,9 +245,13 @@ func TestShouldSendNotification(t *testing.T) {
 // noopMailClient is a minimal imapadapter.Client fake for handleMessage
 // tests — only the methods rules.ApplyOutcome might call do anything
 // observable; everything else is an unused no-op to satisfy the interface.
+// inboxActionErr, when set, is returned by ApplyInboxAction so tests can
+// inject a genuine action failure (e.g. a transient IMAP error on
+// archive/move/delete) instead of always succeeding.
 type noopMailClient struct {
-	appliedLabels []string
-	inboxActions  []string
+	appliedLabels  []string
+	inboxActions   []string
+	inboxActionErr error
 }
 
 func (c *noopMailClient) ListUnreadInbox(context.Context, string) ([]imapadapter.Message, string, error) {
@@ -278,7 +286,7 @@ func (c *noopMailClient) ApplyLabel(_ context.Context, _ string, label string) e
 func (c *noopMailClient) RemoveLabel(context.Context, string, string) error { return nil }
 func (c *noopMailClient) ApplyInboxAction(_ context.Context, _ string, action, _, _ string) error {
 	c.inboxActions = append(c.inboxActions, action)
-	return nil
+	return c.inboxActionErr
 }
 func (c *noopMailClient) ListAttachments(context.Context, string, int) ([]imapadapter.AttachmentInfo, error) {
 	return nil, nil
@@ -344,6 +352,86 @@ func TestHandleMessage_StopRuleShortCircuitsClassification(t *testing.T) {
 	}
 	if decisions[0].Status != "applied" || decisions[0].Detail != "rule(s) applied: archive and stop" {
 		t.Fatalf("unexpected decision recorded: %+v", decisions[0])
+	}
+}
+
+// TestHandleMessage_StopRuleActionFailureIsSurfaced proves a genuine action
+// failure (e.g. a transient IMAP error on the archive call) is logged and
+// reflected in the recorded Decision's Detail, rather than being silently
+// treated as success — the bug this test guards against left the message
+// permanently marked processed with no record anywhere that the archive
+// never actually happened.
+func TestHandleMessage_StopRuleActionFailureIsSurfaced(t *testing.T) {
+	logDir := t.TempDir()
+	logger, err := logging.New(logDir)
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	p := &Poller{log: logger} // llama intentionally left nil
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+
+	wantErr := "imap: connection reset by peer"
+	mail := &noopMailClient{inboxActionErr: errors.New(wantErr)}
+	uc := userCtx{
+		id:   "user-1",
+		mail: mail,
+		rules: []rules.Rule{
+			{
+				Name:    "archive and stop",
+				Enabled: true,
+				Match: rules.MatchGroup{
+					Op:         "allof",
+					Conditions: []rules.Condition{{Field: "subject", Comparator: "contains", Value: "newsletter"}},
+				},
+				Actions: []rules.Action{{Type: "archive"}, {Type: "stop"}},
+			},
+		},
+		store: store,
+	}
+	msg := imapadapter.Message{ID: "42", Subject: "Weekly newsletter", Sender: "news@example.com"}
+
+	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	// The failed archive doesn't stop control flow — stop still short-circuits
+	// classification and the message is still marked processed (design is
+	// unchanged); what must change is that the failure is observable.
+	if !store.Seen(msg.ID) {
+		t.Fatal("expected the message to still be marked processed (Stopped control flow unchanged)")
+	}
+
+	decisions := store.Decisions(10)
+	if len(decisions) != 1 {
+		t.Fatalf("expected 1 decision recorded, got %d: %+v", len(decisions), decisions)
+	}
+	d := decisions[0]
+	if !strings.Contains(d.Detail, "rule(s) applied: archive and stop") {
+		t.Fatalf("expected Detail to still report the matched rule, got %q", d.Detail)
+	}
+	if !strings.Contains(d.Detail, "1 action(s) failed") || !strings.Contains(d.Detail, wantErr) {
+		t.Fatalf("expected Detail to mention the failed action and its error, got %q", d.Detail)
+	}
+
+	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
+	if err != nil {
+		t.Fatalf("reading app.log: %v", err)
+	}
+	logText := string(logBytes)
+	if !strings.Contains(logText, "rule action failed") {
+		t.Fatalf("expected an ERROR log line for the failed action, got log:\n%s", logText)
+	}
+	if !strings.Contains(logText, wantErr) {
+		t.Fatalf("expected the log line to include the underlying error, got log:\n%s", logText)
+	}
+	if !strings.Contains(logText, "user-1") || !strings.Contains(logText, "42") {
+		t.Fatalf("expected the log line to include user_id and message_id, got log:\n%s", logText)
 	}
 }
 

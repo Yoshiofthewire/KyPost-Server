@@ -579,14 +579,33 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 	outcome := rules.Evaluate(ruleInput, uc.rules)
 	if len(outcome.Matched) > 0 {
-		rules.ApplyOutcome(ctx, uc.mail, "INBOX", ruleInput, outcome)
+		results := rules.ApplyOutcome(ctx, uc.mail, "INBOX", ruleInput, outcome)
+		detail := "rule(s) applied: " + strings.Join(outcome.Matched, ", ")
+		var failures []string
+		for _, r := range results {
+			if r.Err == nil {
+				continue
+			}
+			p.log.Error(
+				"rule action failed",
+				"user_id", uc.id,
+				"message_id", msg.ID,
+				"rules_matched", strings.Join(outcome.Matched, ", "),
+				"action", r.Action.Type,
+				"error", r.Err.Error(),
+			)
+			failures = append(failures, fmt.Sprintf("%s: %s", r.Action.Type, r.Err.Error()))
+		}
+		if len(failures) > 0 {
+			detail += fmt.Sprintf("; %d action(s) failed: %s", len(failures), strings.Join(failures, "; "))
+		}
 		if err := uc.store.AddDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
 			Subject:   msg.Subject,
 			Status:    "applied",
-			Detail:    "rule(s) applied: " + strings.Join(outcome.Matched, ", "),
+			Detail:    detail,
 		}); err != nil {
 			return err
 		}
