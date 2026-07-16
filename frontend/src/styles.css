@@ -2854,6 +2854,69 @@ pre {
   margin: 4px 0;
 }
 
+.rule-row {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.rule-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rule-summary {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+}
+
+.rule-condition-row,
+.rule-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
+
+.rule-builder {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.rule-script-editor {
+  margin-top: 8px;
+}
+
+.rule-script-textarea {
+  width: 100%;
+  font-family: monospace;
+  font-size: 0.85rem;
+  background: var(--bg);
+  color: var(--ink-strong);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.rule-script-error {
+  color: var(--danger, #c0392b);
+  font-size: 0.85rem;
+}
+
+.rule-run-results {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
 .compose-token-input {
   flex: 1 1 120px;
   min-width: 120px;
