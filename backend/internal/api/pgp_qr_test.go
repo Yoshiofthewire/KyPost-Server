@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"llama-lab/backend/internal/contacts"
 	"llama-lab/backend/internal/pgpmail"
 )
 
@@ -188,5 +189,100 @@ func TestPGPQRKeyRejectsTamperedSignature(t *testing.T) {
 	srv.handlePGPQRKey(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for tampered signature, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPGPQRKeyIncludesContactCardWhenSelfContactSet(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+
+	id, err := pgpmail.GenerateIdentity("Card Test", "card-test@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	sealed, err := id.SealPrivateKey(srv.pgpPrivateKeyPath)
+	if err != nil {
+		t.Fatalf("SealPrivateKey: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentity(userID, id.Fingerprint, id.KeyID, id.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+
+	store, err := srv.userContactsStore(userID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	self, err := store.Upsert(contacts.Contact{
+		FormattedName: "Jane Doe",
+		Org:           "Acme",
+		Emails:        []contacts.ContactValue{{Label: "work", Value: "jane@acme.example"}},
+		PhotoRef:      "should-not-leak.jpg",
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, _, err := store.SetSelf(self.UID, true); err != nil {
+		t.Fatalf("SetSelf: %v", err)
+	}
+
+	token, _, err := srv.createPairingToken(userID, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/qr/key?t="+token, nil)
+	rec := httptest.NewRecorder()
+	srv.handlePGPQRKey(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		ContactCard *pgpQRContactCard `json:"contactCard"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.ContactCard == nil {
+		t.Fatalf("expected contactCard in response, body=%s", rec.Body.String())
+	}
+	if resp.ContactCard.FormattedName != "Jane Doe" || resp.ContactCard.Org != "Acme" {
+		t.Fatalf("contactCard = %+v, want fn=Jane Doe org=Acme", resp.ContactCard)
+	}
+	if len(resp.ContactCard.Emails) != 1 || resp.ContactCard.Emails[0].Value != "jane@acme.example" {
+		t.Fatalf("contactCard emails = %+v", resp.ContactCard.Emails)
+	}
+	if strings.Contains(rec.Body.String(), "should-not-leak.jpg") {
+		t.Fatalf("photoRef leaked into contactCard response: %s", rec.Body.String())
+	}
+}
+
+func TestPGPQRKeyOmitsContactCardWhenNoSelfContact(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+
+	id, err := pgpmail.GenerateIdentity("No Card Test", "no-card-test@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	sealed, err := id.SealPrivateKey(srv.pgpPrivateKeyPath)
+	if err != nil {
+		t.Fatalf("SealPrivateKey: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentity(userID, id.Fingerprint, id.KeyID, id.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+
+	token, _, err := srv.createPairingToken(userID, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/qr/key?t="+token, nil)
+	rec := httptest.NewRecorder()
+	srv.handlePGPQRKey(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "contactCard") {
+		t.Fatalf("expected no contactCard field when no self-contact is set, body=%s", rec.Body.String())
 	}
 }

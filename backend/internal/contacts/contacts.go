@@ -20,6 +20,11 @@ type Contact struct {
 	CreatedAt string `json:"createdAt"`
 	UpdatedAt string `json:"updatedAt"`
 
+	// IsSelf marks this as the caller's own contact card — the (at most
+	// one, enforced by Store.SetSelf) contact whose fields
+	// api.handlePGPQRKey includes in the PGP QR key-exchange response.
+	IsSelf bool `json:"isSelf,omitempty"`
+
 	FormattedName string           `json:"fn"`
 	GivenName     string           `json:"givenName,omitempty"`
 	FamilyName    string           `json:"familyName,omitempty"`
@@ -147,6 +152,7 @@ func (c *Contact) tombstone() {
 	c.Department = ""
 	c.CustomFields = nil
 	c.Pronouns = ""
+	c.IsSelf = false
 	c.MergedUIDs = nil
 	// MergedInto is intentionally preserved: a merge tombstones the loser and
 	// then records which survivor it was folded into.
