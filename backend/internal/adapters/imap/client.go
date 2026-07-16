@@ -168,6 +168,9 @@ type Client interface {
 	DeleteFolder(ctx context.Context, folder string) error
 	EnsureLabel(ctx context.Context, label string) error
 	ApplyLabel(ctx context.Context, messageID, label string) error
+	// RemoveLabel clears an IMAP keyword flag from one message — the mirror
+	// of ApplyLabel, using Keywords[label]=false to emit -FLAGS.
+	RemoveLabel(ctx context.Context, messageID, label string) error
 	ApplyInboxAction(ctx context.Context, messageID, action, mailbox, targetMailbox string) error
 	// ListAttachments returns attachment metadata for one message (UID).
 	ListAttachments(ctx context.Context, mailbox string, uid int) ([]AttachmentInfo, error)
@@ -1127,6 +1130,37 @@ func (c *APIClient) ApplyLabel(ctx context.Context, messageID, label string) err
 	flags := goimap.Flags{Keywords: map[string]bool{label: true}}
 	if err := d.SetFlags(uid, flags); err != nil {
 		return fmt.Errorf("imap set keyword %q on uid %d: %w", label, uid, err)
+	}
+	return nil
+}
+
+// RemoveLabel clears one IMAP keyword flag from a message — the mirror of
+// ApplyLabel, using Keywords[label]=false so SetFlags emits -FLAGS (label)
+// in the same UID STORE shape ApplyLabel uses for +FLAGS.
+func (c *APIClient) RemoveLabel(ctx context.Context, messageID, label string) error {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	uid, err := strconv.Atoi(strings.TrimSpace(messageID))
+	if err != nil || uid <= 0 {
+		return fmt.Errorf("invalid message id %q", messageID)
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return errors.New("label is required")
+	}
+
+	d, err := c.ensureConnectedLocked()
+	if err != nil {
+		return err
+	}
+
+	flags := goimap.Flags{Keywords: map[string]bool{label: false}}
+	if err := d.SetFlags(uid, flags); err != nil {
+		return fmt.Errorf("imap clear keyword %q on uid %d: %w", label, uid, err)
 	}
 	return nil
 }

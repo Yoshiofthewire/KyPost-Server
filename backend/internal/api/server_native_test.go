@@ -69,6 +69,10 @@ func (s *stubMailClient) ApplyLabel(_ context.Context, _ string, _ string) error
 	return nil
 }
 
+func (s *stubMailClient) RemoveLabel(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
 func (s *stubMailClient) ApplyInboxAction(_ context.Context, _ string, _ string, _ string, _ string) error {
 	return nil
 }

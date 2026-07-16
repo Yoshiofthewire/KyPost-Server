@@ -34,6 +34,17 @@ type fakeMailClient struct {
 
 	attachments    map[int][]mailmsg.Attachment
 	attachmentsErr error
+
+	// appliedLabels/removedLabels record every ApplyLabel/RemoveLabel call
+	// (messageID, label pairs) so tests can assert exactly what keyword
+	// actions reached the mail client.
+	appliedLabels []labelCall
+	removedLabels []labelCall
+}
+
+type labelCall struct {
+	messageID string
+	label     string
 }
 
 func (f *fakeMailClient) ListUnreadInbox(_ context.Context, _ string) ([]imapadapter.Message, string, error) {
@@ -81,7 +92,14 @@ func (f *fakeMailClient) RenameFolder(_ context.Context, _ string, _ string) (st
 }
 func (f *fakeMailClient) DeleteFolder(_ context.Context, _ string) error         { return nil }
 func (f *fakeMailClient) EnsureLabel(_ context.Context, _ string) error          { return nil }
-func (f *fakeMailClient) ApplyLabel(_ context.Context, _ string, _ string) error { return nil }
+func (f *fakeMailClient) ApplyLabel(_ context.Context, messageID string, label string) error {
+	f.appliedLabels = append(f.appliedLabels, labelCall{messageID: messageID, label: label})
+	return nil
+}
+func (f *fakeMailClient) RemoveLabel(_ context.Context, messageID string, label string) error {
+	f.removedLabels = append(f.removedLabels, labelCall{messageID: messageID, label: label})
+	return nil
+}
 func (f *fakeMailClient) ApplyInboxAction(_ context.Context, _ string, _ string, _ string, _ string) error {
 	return nil
 }
@@ -511,5 +529,16 @@ func TestServeInbox_TabBucketingByKeyword(t *testing.T) {
 	}
 	if len(resp.ByTab[inboxUncategorizedTab]) != 1 || resp.ByTab[inboxUncategorizedTab][0].MessageID != "2" {
 		t.Fatalf("expected message 2 bucketed into Uncategorized, got %+v", resp.ByTab[inboxUncategorizedTab])
+	}
+}
+
+func TestFakeMailClient_RemoveLabelRecordsCall(t *testing.T) {
+	var client imapadapter.Client = &fakeMailClient{}
+	fake := client.(*fakeMailClient)
+	if err := client.RemoveLabel(context.Background(), "42", "VIP"); err != nil {
+		t.Fatalf("RemoveLabel: %v", err)
+	}
+	if len(fake.removedLabels) != 1 || fake.removedLabels[0].messageID != "42" || fake.removedLabels[0].label != "VIP" {
+		t.Fatalf("expected RemoveLabel(42, VIP) recorded, got %+v", fake.removedLabels)
 	}
 }
