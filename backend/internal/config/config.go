@@ -75,6 +75,7 @@ type NotificationKeys struct {
 // CONFIG_DIR/users/<userID>/config.yaml.
 type UserSettings struct {
 	Notifications UserNotificationSettings `yaml:"notifications" json:"notifications"`
+	Labels        UserLabelSettings        `yaml:"labels" json:"labels"`
 }
 
 type UserNotificationSettings struct {
@@ -82,10 +83,19 @@ type UserNotificationSettings struct {
 	Keywords []string `yaml:"keywords" json:"keywords"`
 }
 
+// UserLabelSettings controls whether the AI classification pipeline
+// automatically applies keyword labels for this user. When
+// AutoApplyEnabled is false, classification is skipped entirely and every
+// message is tagged Primary instead.
+type UserLabelSettings struct {
+	AutoApplyEnabled bool `yaml:"autoApplyEnabled" json:"autoApplyEnabled"`
+}
+
 func DefaultUserSettings() UserSettings {
 	var s UserSettings
 	s.Notifications.Mode = "none"
 	s.Notifications.Keywords = []string{}
+	s.Labels.AutoApplyEnabled = true
 	return s
 }
 

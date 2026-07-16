@@ -199,6 +199,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
 	mux.HandleFunc("PUT /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
+	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
+	mux.HandleFunc("PUT /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
 	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
 	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
 	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
@@ -1266,6 +1268,42 @@ func (s *Server) handleNotificationPreferences(w http.ResponseWriter, r *http.Re
 		settings.Notifications = prefs
 		if err := config.SaveUserSettings(path, settings); err != nil {
 			http.Error(w, "failed to save notification preferences", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}
+}
+
+// handleLabelPreferences reads/writes the calling user's preference for
+// whether the AI classifier automatically applies keyword labels.
+func (s *Server) handleLabelPreferences(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	path := s.userSettingsPath(ac.UserID)
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := config.LoadUserSettings(path)
+		if err != nil {
+			http.Error(w, "failed to read label preferences", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, settings.Labels)
+	case http.MethodPut:
+		var prefs config.UserLabelSettings
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&prefs); err != nil {
+			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
+			return
+		}
+		settings, err := config.LoadUserSettings(path)
+		if err != nil {
+			settings = config.DefaultUserSettings()
+		}
+		settings.Labels = prefs
+		if err := config.SaveUserSettings(path, settings); err != nil {
+			http.Error(w, "failed to save label preferences", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})

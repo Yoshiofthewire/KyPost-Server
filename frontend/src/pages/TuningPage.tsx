@@ -15,6 +15,10 @@ type TuningSaveResponse = {
   restartError?: string;
 };
 
+type LabelPreferences = {
+  autoApplyEnabled: boolean;
+};
+
 type Decision = {
   messageId: string;
   sender: string;
@@ -33,6 +37,24 @@ export function TuningPage() {
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [decisionsLoaded, setDecisionsLoaded] = useState(false);
   const [decisionsError, setDecisionsError] = useState("");
+  const [autoApplyEnabled, setAutoApplyEnabled] = useState(true);
+  const [labelPrefsStatus, setLabelPrefsStatus] = useState("");
+
+  async function toggleAutoApply(enabled: boolean) {
+    const previous = autoApplyEnabled;
+    setAutoApplyEnabled(enabled);
+    try {
+      await putJSON<{ ok: boolean }>("/api/labels/preferences", { autoApplyEnabled: enabled });
+      setLabelPrefsStatus(
+        enabled
+          ? "Automatic keyword labeling enabled."
+          : "Automatic keyword labeling disabled — new mail will be tagged Primary only."
+      );
+    } catch {
+      setAutoApplyEnabled(previous);
+      setLabelPrefsStatus("Failed to update labeling preference.");
+    }
+  }
 
   async function saveTuning() {
     try {
@@ -53,6 +75,12 @@ export function TuningPage() {
         setTuningText(tuningData.content ?? "");
       })
       .catch(() => setTuningStatus("Failed to load tuning settings."));
+  }, []);
+
+  useEffect(() => {
+    getJSON<LabelPreferences>("/api/labels/preferences")
+      .then((prefs) => setAutoApplyEnabled(prefs.autoApplyEnabled ?? true))
+      .catch(() => setLabelPrefsStatus("Failed to load labeling preference."));
   }, []);
 
   useEffect(() => {
@@ -83,6 +111,21 @@ export function TuningPage() {
         <div>
           <h2>TUNING.md</h2>
           <p>Edit and save the markdown instructions used for message labeling.</p>
+
+          <div style={{ marginBottom: "1em" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "0.5em" }}>
+              <input
+                type="checkbox"
+                checked={autoApplyEnabled}
+                onChange={(e) => toggleAutoApply(e.target.checked)}
+              />
+              Automatically apply keyword labels
+            </label>
+            <p className="config-muted">
+              When off, the AI classifier is skipped and every new message is tagged Primary only.
+            </p>
+            {labelPrefsStatus ? <p>{labelPrefsStatus}</p> : null}
+          </div>
 
           <label>
             <div>TUNING.md</div>

@@ -77,6 +77,10 @@ type userCtx struct {
 	mail     imapadapter.Client
 	tuning   string
 	settings config.UserNotificationSettings
+	// autoLabelEnabled mirrors settings.Labels.AutoApplyEnabled at the time
+	// this tick's userCtx was built. When false, handleMessage skips AI
+	// classification entirely and tags every message Primary instead.
+	autoLabelEnabled bool
 	// rules holds every filter rule (enabled and disabled) loaded for this
 	// tick; rules.Evaluate skips disabled rules and rules out of Scope for
 	// the evaluated folder itself, so no pre-filtering happens here.
@@ -419,13 +423,14 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	}
 
 	uc := userCtx{
-		id:       u.ID,
-		username: u.Username,
-		store:    store,
-		mail:     p.userMailClient(u.ID, imapConfigModTime),
-		tuning:   tuning,
-		settings: settings.Notifications,
-		rules:    activeRules,
+		id:               u.ID,
+		username:         u.Username,
+		store:            store,
+		mail:             p.userMailClient(u.ID, imapConfigModTime),
+		tuning:           tuning,
+		settings:         settings.Notifications,
+		autoLabelEnabled: settings.Labels.AutoApplyEnabled,
+		rules:            activeRules,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
@@ -617,6 +622,38 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 			p.maybeSendNativePushNotification(uc, msg, "", nil)
 			return nil
 		}
+	}
+
+	if !uc.autoLabelEnabled {
+		const primaryLabel = "Primary"
+		keywords := keywordsForSelectedLabel(primaryLabel, cfg.Labels.KeywordMappings)
+		p.log.Info(
+			"auto-labeling disabled; tagging Primary",
+			"user_id", uc.id,
+			"message_id", msg.ID,
+			"keywords", strings.Join(keywords, ","),
+		)
+		if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
+			p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", primaryLabel, "error", err.Error())
+			return err
+		}
+		if err := uc.store.MarkProcessed(msg.ID); err != nil {
+			return err
+		}
+		if err := uc.store.AddDecision(state.Decision{
+			MessageID: msg.ID,
+			Sender:    msg.Sender,
+			SentTo:    msg.SentTo,
+			Subject:   msg.Subject,
+			Label:     primaryLabel,
+			Status:    "applied",
+			Detail:    "automatic keyword labeling disabled; tagged Primary",
+		}); err != nil {
+			return err
+		}
+		p.maybeSendPushNotification(uc, msg, primaryLabel, keywords)
+		p.maybeSendNativePushNotification(uc, msg, primaryLabel, keywords)
+		return nil
 	}
 
 	body := strings.TrimSpace(msg.Body)
