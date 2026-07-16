@@ -297,6 +297,39 @@ func ParseRuleText(text string, existing Rule) (Rule, error) {
 // (which is always exactly one flat level) Sieve rule would ever need.
 const maxTestNestingDepth = 32
 
+// ValidateMatchDepth walks m (and any nested Condition.Group) and rejects it
+// once its nesting depth exceeds maxTestNestingDepth — the exact same bound
+// sieveParser.enterTest/exitTest enforces while parsing a Sieve script.
+//
+// This exists because ParseRuleText (the Sieve-script path) isn't the only
+// way a Match tree reaches the store: rules_handlers.go's POST /api/rules and
+// PUT /api/rules/{id} decode a MatchGroup straight from JSON and hand it to
+// store.Upsert with no shape validation at all. Without this check, an
+// authenticated caller could persist an arbitrarily deep Match tree via
+// those two endpoints (bounded only by the request-body size limit and Go's
+// encoding/json nesting cap of 10000) that engine.go's evaluator would then
+// walk on every poller tick forever — reproducing, via the JSON path, the
+// exact resource-exhaustion issue the Sieve-parser depth check was added to
+// close. Both entry points must share this one constant/function rather than
+// each guessing their own limit.
+func ValidateMatchDepth(m MatchGroup) error {
+	return validateMatchGroupDepth(m, 1)
+}
+
+func validateMatchGroupDepth(m MatchGroup, depth int) error {
+	if depth > maxTestNestingDepth {
+		return fmt.Errorf("match nesting exceeds maximum depth of %d", maxTestNestingDepth)
+	}
+	for _, c := range m.Conditions {
+		if c.Group != nil {
+			if err := validateMatchGroupDepth(*c.Group, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 type sieveParser struct {
 	toks  []token
 	pos   int

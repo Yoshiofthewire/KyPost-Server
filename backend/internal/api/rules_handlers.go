@@ -92,6 +92,10 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
+		if err := rules.ValidateMatchDepth(payload.Match); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		payload.ID = ""
 		payload.Name = name
 		created, err := store.Upsert(ruleFromPayload(payload))
@@ -132,6 +136,10 @@ func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSpace(payload.Name)
 		if name == "" {
 			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if err := rules.ValidateMatchDepth(payload.Match); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		payload.ID = existing.ID

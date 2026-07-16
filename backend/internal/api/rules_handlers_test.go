@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
@@ -143,6 +144,166 @@ func TestRulesSieveRoundTrip(t *testing.T) {
 	srv.routes().ServeHTTP(badRec, badReq)
 	if badRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a bad script, got %d, body=%s", badRec.Code, badRec.Body.String())
+	}
+}
+
+// deeplyNestedMatchPayload builds a MatchGroup-shaped map with `wraps`
+// levels of allof(...) nested around a single leaf condition, mirroring the
+// same pathological shape sieve_test.go's "excessive allof nesting is
+// rejected" regression test uses (there, 50 levels of Sieve source text;
+// here, the equivalent JSON MatchGroup/Condition.Group tree). Used to prove
+// rules.ValidateMatchDepth is actually wired into the JSON create/update
+// paths, not just ParseRuleText's Sieve-script path.
+func deeplyNestedMatchPayload(wraps int) map[string]any {
+	current := map[string]any{
+		"op": "allof",
+		"conditions": []map[string]any{
+			{"field": "from", "comparator": "contains", "value": "x"},
+		},
+	}
+	for i := 0; i < wraps; i++ {
+		current = map[string]any{
+			"op": "allof",
+			"conditions": []map[string]any{
+				{"group": current},
+			},
+		}
+	}
+	return current
+}
+
+// TestRulesCreate_RejectsDeeplyNestedMatch guards the gap the first
+// nesting-depth fix (sieve.go's maxTestNestingDepth check inside
+// ParseRuleText) left open: POST /api/rules decodes rulePayload.Match
+// straight from JSON and previously handed it to store.Upsert with no shape
+// validation at all, so a caller could persist a Match tree deep enough that
+// engine.go's evaluator would walk it on every poller tick forever,
+// bypassing the Sieve-script path's depth bound entirely. This posts a
+// 51-level-deep Match tree (well past maxTestNestingDepth's 32) and expects
+// a 400, not a stored rule.
+func TestRulesCreate_RejectsDeeplyNestedMatch(t *testing.T) {
+	srv := newTestServer(t)
+
+	createBody, _ := json.Marshal(map[string]any{
+		"name":    "deeply nested",
+		"enabled": true,
+		"match":   deeplyNestedMatchPayload(50),
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(createBody))
+	authRequest(srv, req)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for deeply-nested match, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "nesting exceeds maximum depth") {
+		t.Fatalf("expected nesting-depth error message, got %q", rec.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	authRequest(srv, listReq)
+	listRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(listRec, listReq)
+	var listResp struct {
+		Rules []rulePayload `json:"rules"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResp.Rules) != 0 {
+		t.Fatalf("expected the rejected rule not to be stored, got %d rules", len(listResp.Rules))
+	}
+}
+
+// TestRulesUpdate_RejectsDeeplyNestedMatch is TestRulesCreate_RejectsDeeplyNestedMatch's
+// sibling for PUT /api/rules/{id}, the other JSON CRUD path that bypassed
+// ParseRuleText's depth check.
+func TestRulesUpdate_RejectsDeeplyNestedMatch(t *testing.T) {
+	srv := newTestServer(t)
+	all, _ := srv.users.List()
+	store, err := srv.userRulesStore(all[0].ID)
+	if err != nil {
+		t.Fatalf("userRulesStore: %v", err)
+	}
+	existing, err := store.Upsert(rulesTestRule("original"))
+	if err != nil {
+		t.Fatalf("seed rule: %v", err)
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{
+		"name":    "updated",
+		"enabled": true,
+		"match":   deeplyNestedMatchPayload(50),
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/api/rules/"+existing.ID, bytes.NewReader(updateBody))
+	authRequest(srv, req)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for deeply-nested match, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "nesting exceeds maximum depth") {
+		t.Fatalf("expected nesting-depth error message, got %q", rec.Body.String())
+	}
+
+	// The original rule must be untouched by the rejected update.
+	stillThere, ok := store.Get(existing.ID)
+	if !ok {
+		t.Fatal("expected original rule to still exist")
+	}
+	if stillThere.Name != "original" {
+		t.Fatalf("expected rejected update not to apply, got name=%q", stillThere.Name)
+	}
+}
+
+// TestRulesCreateUpdate_ReasonableNestingStillSucceeds confirms the new
+// depth check doesn't collaterally break normal rules: a 3-4 level nested
+// Match tree (deeper than the flat GUI builder ever produces, but nowhere
+// near maxTestNestingDepth) must still be accepted by both POST and PUT.
+func TestRulesCreateUpdate_ReasonableNestingStillSucceeds(t *testing.T) {
+	srv := newTestServer(t)
+
+	reasonableMatch := deeplyNestedMatchPayload(3) // 4 levels total (3 wraps + 1 leaf)
+
+	createBody, _ := json.Marshal(map[string]any{
+		"name":    "reasonable nesting",
+		"enabled": true,
+		"match":   reasonableMatch,
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(createBody))
+	authRequest(srv, createReq)
+	createRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body=%s", createRec.Code, createRec.Body.String())
+	}
+	var created rulePayload
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{
+		"name":    "reasonable nesting updated",
+		"enabled": true,
+		"match":   reasonableMatch,
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+created.ID, bytes.NewReader(updateBody))
+	authRequest(srv, updateReq)
+	updateRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	var updated rulePayload
+	if err := json.Unmarshal(updateRec.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updated.Name != "reasonable nesting updated" {
+		t.Fatalf("update did not apply, got %+v", updated)
 	}
 }
 
