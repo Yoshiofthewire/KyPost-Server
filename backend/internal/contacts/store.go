@@ -221,7 +221,11 @@ func (s *Store) Delete(uid string) (bool, error) {
 // the caller's own contact card — the one api.handlePGPQRKey includes in
 // the PGP QR key-exchange response. Marking a contact clears the flag from
 // whichever contact previously held it, enforcing at most one self-contact
-// per store. Returns found=false if uid doesn't exist.
+// per store. Every contact whose IsSelf value actually flips (the target,
+// and any other contact being cleared) gets a fresh Rev/UpdatedAt so
+// ChangedSince reports the change to sync clients; a call that changes
+// nothing (e.g. unmarking a contact that wasn't self) is a no-op. Returns
+// found=false if uid doesn't exist.
 func (s *Store) SetSelf(uid string, self bool) (Contact, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -240,19 +244,33 @@ func (s *Store) SetSelf(uid string, self bool) (Contact, bool, error) {
 		return Contact{}, false, nil
 	}
 
+	now := time.Now().UTC().Format(time.RFC3339)
+	changed := false
+
 	if self {
 		for i := range s.contacts {
-			if i != idx {
+			if i != idx && s.contacts[i].IsSelf {
 				s.contacts[i].IsSelf = false
+				s.seq++
+				s.contacts[i].Rev = s.seq
+				s.contacts[i].UpdatedAt = now
+				changed = true
 			}
 		}
 	}
-	s.seq++
-	s.contacts[idx].IsSelf = self
-	s.contacts[idx].Rev = s.seq
-	s.contacts[idx].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := s.persistLocked(); err != nil {
-		return Contact{}, false, err
+
+	if s.contacts[idx].IsSelf != self {
+		s.contacts[idx].IsSelf = self
+		s.seq++
+		s.contacts[idx].Rev = s.seq
+		s.contacts[idx].UpdatedAt = now
+		changed = true
+	}
+
+	if changed {
+		if err := s.persistLocked(); err != nil {
+			return Contact{}, false, err
+		}
 	}
 	return s.contacts[idx], true, nil
 }

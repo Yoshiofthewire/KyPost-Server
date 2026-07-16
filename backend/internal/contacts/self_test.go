@@ -38,6 +38,12 @@ func TestSetSelf_MarksAndEnforcesUniqueness(t *testing.T) {
 	if refreshedA.IsSelf {
 		t.Fatal("expected a's IsSelf to be cleared after b was marked self")
 	}
+	// a's Rev must advance when its IsSelf flag is cleared, so a sync client
+	// whose cursor is already past a's old Rev still observes the flip via
+	// ChangedSince — not just b's Rev bumping.
+	if refreshedA.Rev <= updated.Rev {
+		t.Fatalf("expected a's Rev to increase after being cleared: got %d, want > %d", refreshedA.Rev, updated.Rev)
+	}
 }
 
 func TestSetSelf_UnknownUIDReturnsNotFound(t *testing.T) {
