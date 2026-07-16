@@ -1033,7 +1033,7 @@ export function App() {
             {composeNotice ? <p className="notice notice-warning">{composeNotice}</p> : null}
 
             <div className="compose-form-grid">
-              <label className="compose-field-row">
+              <div className="compose-field-row">
                 <span>TO:</span>
                 <RecipientField
                   label="To"
@@ -1042,8 +1042,8 @@ export function App() {
                   onAddToken={(token) => addTokenToField("to", token)}
                   onRemoveToken={(index) => setComposeTo((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
                 />
-              </label>
-              <label className="compose-field-row">
+              </div>
+              <div className="compose-field-row">
                 <span>CC:</span>
                 <RecipientField
                   label="Cc"
@@ -1052,8 +1052,8 @@ export function App() {
                   onAddToken={(token) => addTokenToField("cc", token)}
                   onRemoveToken={(index) => setComposeCc((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
                 />
-              </label>
-              <label className="compose-field-row">
+              </div>
+              <div className="compose-field-row">
                 <span>BCC:</span>
                 <RecipientField
                   label="Bcc"
@@ -1062,7 +1062,7 @@ export function App() {
                   onAddToken={(token) => addTokenToField("bcc", token)}
                   onRemoveToken={(index) => setComposeBcc((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
                 />
-              </label>
+              </div>
               <label className="compose-field-row">
                 <span>Subject:</span>
                 <input type="text" value={composeSubject} onChange={(event) => setComposeSubject(event.target.value)} placeholder="Subject" disabled={composeSending || composeSavingDraft} />
