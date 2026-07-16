@@ -21,6 +21,7 @@ import (
 	"llama-lab/backend/internal/mailcache"
 	"llama-lab/backend/internal/redaction"
 	"llama-lab/backend/internal/retry"
+	"llama-lab/backend/internal/rules"
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/users"
 )
@@ -59,6 +60,7 @@ type Poller struct {
 	stores      map[string]*state.Store
 	mailClients map[string]*mailClientEntry
 	mailCaches  map[string]*mailcache.Store
+	rulesStores map[string]*rules.Store
 	rate        map[string][]time.Time
 }
 
@@ -75,6 +77,10 @@ type userCtx struct {
 	mail     imapadapter.Client
 	tuning   string
 	settings config.UserNotificationSettings
+	// rules holds every filter rule (enabled and disabled) loaded for this
+	// tick; rules.Evaluate skips disabled rules and rules out of Scope for
+	// the evaluated folder itself, so no pre-filtering happens here.
+	rules []rules.Rule
 }
 
 func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, llamaClient *llama.HTTPClient) (*Poller, error) {
@@ -97,6 +103,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		stores:               map[string]*state.Store{},
 		mailClients:          map[string]*mailClientEntry{},
 		mailCaches:           map[string]*mailcache.Store{},
+		rulesStores:          map[string]*rules.Store{},
 		rate:                 map[string][]time.Time{},
 	}
 	p.tickSem = make(chan struct{}, 1)
@@ -167,6 +174,25 @@ func (p *Poller) userMailCacheStore(userID string) (*mailcache.Store, error) {
 		return nil, err
 	}
 	p.mailCaches[userID] = st
+	return st, nil
+}
+
+// userRulesStore returns the cached rules store for a user, mirroring
+// userMailCacheStore — the api process independently constructs its own
+// rules.Store over the same on-disk rules.json (see server_userscope.go's
+// userRulesStore); refreshFromDiskLocked is what keeps the two processes'
+// in-memory views coherent, exactly as with state.Store.
+func (p *Poller) userRulesStore(userID string) (*rules.Store, error) {
+	p.userMu.Lock()
+	defer p.userMu.Unlock()
+	if st, ok := p.rulesStores[userID]; ok {
+		return st, nil
+	}
+	st, err := rules.New(p.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	p.rulesStores[userID] = st
 	return st, nil
 }
 
@@ -384,6 +410,14 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		tuning = strings.TrimSpace(string(b))
 	}
 
+	rulesStore, err := p.userRulesStore(u.ID)
+	var activeRules []rules.Rule
+	if err != nil {
+		p.log.Error("failed to open user rules store, skipping rule evaluation", "user_id", u.ID, "error", err.Error())
+	} else {
+		activeRules = rulesStore.List()
+	}
+
 	uc := userCtx{
 		id:       u.ID,
 		username: u.Username,
@@ -391,6 +425,7 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		mail:     p.userMailClient(u.ID, imapConfigModTime),
 		tuning:   tuning,
 		settings: settings.Notifications,
+		rules:    activeRules,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
@@ -521,6 +556,49 @@ func recentDecisionsContext(store *state.Store, limit int) string {
 
 func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.Message) error {
 	cfg := p.currentConfig()
+
+	// Filter rules run first, before classification (below), and skip it
+	// entirely when a matched rule's actions include "stop" — mirrors
+	// Sieve's delivery-time semantics and avoids burning a rate-limited
+	// Ollama call on mail a rule will immediately delete/spam. Rule
+	// matching is local and never leaves the system, so the raw
+	// (unredacted) message is used here, unlike the redacted body handed to
+	// classifyWithRetry further down.
+	uid, _ := strconv.Atoi(strings.TrimSpace(msg.ID))
+	ruleInput := rules.EvalInput{
+		UID:       uid,
+		MessageID: msg.ID,
+		From:      msg.Sender,
+		To:        msg.SentTo,
+		CC:        msg.CC,
+		BCC:       msg.BCC,
+		Subject:   msg.Subject,
+		Body:      msg.Body,
+		Keywords:  msg.Keywords,
+		Folder:    "INBOX",
+	}
+	outcome := rules.Evaluate(ruleInput, uc.rules)
+	if len(outcome.Matched) > 0 {
+		rules.ApplyOutcome(ctx, uc.mail, "INBOX", ruleInput, outcome)
+		if err := uc.store.AddDecision(state.Decision{
+			MessageID: msg.ID,
+			Sender:    msg.Sender,
+			SentTo:    msg.SentTo,
+			Subject:   msg.Subject,
+			Status:    "applied",
+			Detail:    "rule(s) applied: " + strings.Join(outcome.Matched, ", "),
+		}); err != nil {
+			return err
+		}
+		if outcome.Stopped {
+			if err := uc.store.MarkProcessed(msg.ID); err != nil {
+				return err
+			}
+			p.maybeSendPushNotification(uc, msg, "", nil)
+			p.maybeSendNativePushNotification(uc, msg, "", nil)
+			return nil
+		}
+	}
 
 	body := strings.TrimSpace(msg.Body)
 	if len(body) > 2000 {

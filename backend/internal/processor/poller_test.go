@@ -1,10 +1,14 @@
 package processor
 
 import (
+	"context"
 	"testing"
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/config"
+	"llama-lab/backend/internal/logging"
+	"llama-lab/backend/internal/rules"
+	"llama-lab/backend/internal/state"
 )
 
 // TestMailCacheEntriesFromMessages covers the pure conversion tickUser uses
@@ -232,4 +236,160 @@ func TestShouldSendNotification(t *testing.T) {
 			}
 		})
 	}
+}
+
+// noopMailClient is a minimal imapadapter.Client fake for handleMessage
+// tests — only the methods rules.ApplyOutcome might call do anything
+// observable; everything else is an unused no-op to satisfy the interface.
+type noopMailClient struct {
+	appliedLabels []string
+	inboxActions  []string
+}
+
+func (c *noopMailClient) ListUnreadInbox(context.Context, string) ([]imapadapter.Message, string, error) {
+	return nil, "", nil
+}
+func (c *noopMailClient) ListUnreadMessages(context.Context, string, int) ([]imapadapter.UnreadMessage, error) {
+	return nil, nil
+}
+func (c *noopMailClient) ListOverviews(context.Context, string, int) ([]imapadapter.Overview, error) {
+	return nil, nil
+}
+func (c *noopMailClient) SearchMessages(context.Context, string, string, string, int) ([]imapadapter.Overview, error) {
+	return nil, nil
+}
+func (c *noopMailClient) GetMessageBodies(context.Context, string, []int) (map[int]imapadapter.MessageContent, error) {
+	return nil, nil
+}
+func (c *noopMailClient) ListLabels(context.Context) ([]string, error)             { return nil, nil }
+func (c *noopMailClient) ListSubfolders(context.Context, string) ([]string, error) { return nil, nil }
+func (c *noopMailClient) CreateFolder(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (c *noopMailClient) RenameFolder(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (c *noopMailClient) DeleteFolder(context.Context, string) error { return nil }
+func (c *noopMailClient) EnsureLabel(context.Context, string) error  { return nil }
+func (c *noopMailClient) ApplyLabel(_ context.Context, _ string, label string) error {
+	c.appliedLabels = append(c.appliedLabels, label)
+	return nil
+}
+func (c *noopMailClient) RemoveLabel(context.Context, string, string) error { return nil }
+func (c *noopMailClient) ApplyInboxAction(_ context.Context, _ string, action, _, _ string) error {
+	c.inboxActions = append(c.inboxActions, action)
+	return nil
+}
+func (c *noopMailClient) ListAttachments(context.Context, string, int) ([]imapadapter.AttachmentInfo, error) {
+	return nil, nil
+}
+func (c *noopMailClient) GetAttachment(context.Context, string, int, int) (imapadapter.AttachmentInfo, []byte, error) {
+	return imapadapter.AttachmentInfo{}, nil, nil
+}
+func (c *noopMailClient) SaveDraft(context.Context, imapadapter.DraftMessage) error { return nil }
+func (c *noopMailClient) SaveSent(context.Context, imapadapter.DraftMessage) error  { return nil }
+
+// TestHandleMessage_StopRuleShortCircuitsClassification proves a matched
+// "stop" rule skips classifyWithRetry entirely, rather than merely skipping
+// its result: the Poller's llama client is left nil, so if handleMessage
+// called classifyWithRetry anyway, HTTPClient.Classify would panic on a nil
+// receiver dereference (c.baseURL inside ensureWarm) and fail this test.
+// The message must still be marked processed and recorded as a Decision.
+func TestHandleMessage_StopRuleShortCircuitsClassification(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	p := &Poller{log: logger} // llama intentionally left nil
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+
+	mail := &noopMailClient{}
+	uc := userCtx{
+		id:   "user-1",
+		mail: mail,
+		rules: []rules.Rule{
+			{
+				Name:    "archive and stop",
+				Enabled: true,
+				Match: rules.MatchGroup{
+					Op:         "allof",
+					Conditions: []rules.Condition{{Field: "subject", Comparator: "contains", Value: "newsletter"}},
+				},
+				Actions: []rules.Action{{Type: "archive"}, {Type: "stop"}},
+			},
+		},
+		store: store,
+	}
+	msg := imapadapter.Message{ID: "42", Subject: "Weekly newsletter", Sender: "news@example.com"}
+
+	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	if len(mail.inboxActions) != 1 || mail.inboxActions[0] != "archive" {
+		t.Fatalf("expected the archive action to be applied, got %+v", mail.inboxActions)
+	}
+	if !store.Seen(msg.ID) {
+		t.Fatal("expected the message to be marked processed")
+	}
+	decisions := store.Decisions(10)
+	if len(decisions) != 1 {
+		t.Fatalf("expected 1 decision recorded, got %d: %+v", len(decisions), decisions)
+	}
+	if decisions[0].Status != "applied" || decisions[0].Detail != "rule(s) applied: archive and stop" {
+		t.Fatalf("unexpected decision recorded: %+v", decisions[0])
+	}
+}
+
+// TestHandleMessage_NonMatchingRuleStillClassifies is the mirror check:
+// when no rule matches, handleMessage must still reach classification. It
+// can't call the real Ollama HTTP path in a unit test, so it asserts the
+// weaker but still meaningful property that a nil llama client *does*
+// panic once rule evaluation is out of the way — proving the earlier
+// no-panic result above was actually caused by the stop short-circuit and
+// not by some unrelated reason classifyWithRetry never runs.
+func TestHandleMessage_NonMatchingRuleStillClassifies(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	p := &Poller{log: logger} // llama intentionally left nil
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+
+	uc := userCtx{
+		id:   "user-1",
+		mail: &noopMailClient{},
+		rules: []rules.Rule{
+			{
+				Name:    "never matches",
+				Enabled: true,
+				Match: rules.MatchGroup{
+					Op:         "allof",
+					Conditions: []rules.Condition{{Field: "subject", Comparator: "contains", Value: "no-such-substring"}},
+				},
+				Actions: []rules.Action{{Type: "archive"}},
+			},
+		},
+		store: store,
+	}
+	msg := imapadapter.Message{ID: "43", Subject: "Ordinary mail", Sender: "someone@example.com"}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected classifyWithRetry to be reached (and panic on the nil llama client) when no rule matches")
+		}
+	}()
+	_ = p.handleMessage(context.Background(), uc, msg)
 }
