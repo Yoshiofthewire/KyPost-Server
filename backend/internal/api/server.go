@@ -2637,6 +2637,7 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 		MessageIDs    []string `json:"messageIds"`
 		Mailbox       string   `json:"mailbox"`
 		TargetMailbox string   `json:"targetMailbox"`
+		Keyword       string   `json:"keyword"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -2646,14 +2647,19 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 	action := strings.ToLower(strings.TrimSpace(req.Action))
 	mailbox := strings.TrimSpace(req.Mailbox)
 	targetMailbox := strings.TrimSpace(req.TargetMailbox)
+	keyword := strings.TrimSpace(req.Keyword)
 	switch action {
-	case "delete", "archive", "spam", "read", "move":
+	case "delete", "archive", "spam", "read", "move", "label", "unlabel":
 	default:
 		http.Error(w, "unsupported action", http.StatusBadRequest)
 		return
 	}
 	if action == "move" && targetMailbox == "" {
 		http.Error(w, "targetMailbox is required for move action", http.StatusBadRequest)
+		return
+	}
+	if (action == "label" || action == "unlabel") && keyword == "" {
+		http.Error(w, "keyword is required for label/unlabel action", http.StatusBadRequest)
 		return
 	}
 
@@ -2682,7 +2688,20 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 	failures := make([]inboxActionFailure, 0)
 	processed := 0
 	for _, messageID := range uniqueIDs {
-		if err := mailClient.ApplyInboxAction(r.Context(), messageID, action, mailbox, targetMailbox); err != nil {
+		// label/unlabel bypass ApplyInboxAction's switch entirely (it has no
+		// concept of a keyword parameter) and call the dedicated keyword
+		// methods directly, keeping ApplyInboxAction's folder-fallback logic
+		// for the other actions untouched.
+		var err error
+		switch action {
+		case "label":
+			err = mailClient.ApplyLabel(r.Context(), messageID, keyword)
+		case "unlabel":
+			err = mailClient.RemoveLabel(r.Context(), messageID, keyword)
+		default:
+			err = mailClient.ApplyInboxAction(r.Context(), messageID, action, mailbox, targetMailbox)
+		}
+		if err != nil {
 			failures = append(failures, inboxActionFailure{MessageID: messageID, Error: err.Error()})
 			continue
 		}
