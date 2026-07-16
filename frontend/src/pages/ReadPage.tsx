@@ -13,6 +13,7 @@ type InboxEmail = {
   subject: string;
   body?: string;
   label?: string;
+  keywords?: string[];
   status: string;
   detail?: string;
   atUtc: string;
@@ -259,6 +260,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const [attachmentsError, setAttachmentsError] = useState("");
+  const [keywordDraft, setKeywordDraft] = useState("");
+  const [availableKeywords, setAvailableKeywords] = useState<string[]>([]);
   const emailReaderDialogRef = useRef<HTMLDialogElement | null>(null);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
   const [showImages, setShowImages] = useState(false);
@@ -467,6 +470,23 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     };
   }, [mailbox]);
 
+  useEffect(() => {
+    if (!selected) return;
+    let cancelled = false;
+    getJSON<{ configured: string[]; imap: string[] }>("/api/labels")
+      .then((data) => {
+        if (cancelled) return;
+        const merged = new Set([...(data.configured ?? []), ...(data.imap ?? [])]);
+        setAvailableKeywords(Array.from(merged).sort());
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableKeywords([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.messageId]);
+
   const rows = useMemo(() => {
     if (isInboxMailbox) {
       if (!activeTab) return [];
@@ -631,6 +651,45 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       return false;
     } finally {
       setActionLoading(false);
+    }
+  }
+
+  function updateSelectedKeywords(next: string[]) {
+    setSelected((current) => (current ? { ...current, keywords: next } : current));
+    setByTab((current) => {
+      const updated: Record<string, InboxEmail[]> = {};
+      Object.entries(current).forEach(([tab, items]) => {
+        updated[tab] = items.map((item) =>
+          selected && item.messageId === selected.messageId ? { ...item, keywords: next } : item
+        );
+      });
+      return updated;
+    });
+  }
+
+  async function addKeywordToSelected(rawKeyword: string) {
+    const keyword = rawKeyword.trim();
+    if (!selected || !keyword) return;
+    if ((selected.keywords ?? []).some((k) => k.toLowerCase() === keyword.toLowerCase())) {
+      setKeywordDraft("");
+      return;
+    }
+    try {
+      await postJSON("/api/inbox/actions", { action: "label", messageIds: [selected.messageId], keyword, mailbox });
+      setKeywordDraft("");
+      updateSelectedKeywords([...(selected.keywords ?? []), keyword]);
+    } catch (e) {
+      setActionError(toErrorMessage(e, "failed to add keyword"));
+    }
+  }
+
+  async function removeKeywordFromSelected(keyword: string) {
+    if (!selected) return;
+    try {
+      await postJSON("/api/inbox/actions", { action: "unlabel", messageIds: [selected.messageId], keyword, mailbox });
+      updateSelectedKeywords((selected.keywords ?? []).filter((k) => k !== keyword));
+    } catch (e) {
+      setActionError(toErrorMessage(e, "failed to remove keyword"));
     }
   }
 
@@ -1298,6 +1357,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                         <div className="inbox-row-meta">
                           <span>{item.sender || "-"}</span>
                           <span>{displayTime}</span>
+                          {(item.keywords ?? []).map((kw) => (
+                            <span key={kw} className="inbox-keyword-chip">{kw}</span>
+                          ))}
                         </div>
                       </td>
                       <td className="inbox-cell inbox-sender-cell inbox-desktop-col">{item.sender || "-"}</td>
@@ -1405,6 +1467,48 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               <p style={{ margin: 0 }}><strong>Sender:</strong> {selected.sender || "-"}</p>
               <p style={{ margin: 0 }}><strong>Sent To:</strong> {selected.sentTo || "-"}</p>
               <p style={{ margin: 0 }}><strong>Keyword:</strong> {selected.label || "Uncategorized"}</p>
+              <div className="email-keyword-editor">
+                <strong>Keywords:</strong>
+                <div className="compose-token-field-wrap">
+                  <div className="compose-token-field">
+                    {(selected.keywords ?? []).map((kw) => (
+                      <span key={kw} className="compose-token-pill">
+                        <span className="compose-token-pill-label">{kw}</span>
+                        <button
+                          type="button"
+                          className="compose-token-pill-remove"
+                          aria-label={`Remove keyword ${kw}`}
+                          onClick={() => removeKeywordFromSelected(kw)}
+                        >
+                          &times;
+                        </button>
+                      </span>
+                    ))}
+                    <input
+                      type="text"
+                      className="compose-token-input"
+                      list="inbox-keyword-options"
+                      value={keywordDraft}
+                      placeholder="Add keyword"
+                      onChange={(e) => setKeywordDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void addKeywordToSelected(keywordDraft);
+                        }
+                      }}
+                      onBlur={() => {
+                        if (keywordDraft.trim()) void addKeywordToSelected(keywordDraft);
+                      }}
+                    />
+                  </div>
+                </div>
+                <datalist id="inbox-keyword-options">
+                  {availableKeywords.map((kw) => (
+                    <option key={kw} value={kw} />
+                  ))}
+                </datalist>
+              </div>
               <p style={{ margin: 0 }}><strong>Status:</strong> {selected.status || "-"}</p>
               <p style={{ margin: 0 }}><strong>Time:</strong> {formatTimestamp(selected.atUtc)}</p>
               {selected.detail ? <p style={{ margin: 0 }}><strong>Detail:</strong> {selected.detail}</p> : null}

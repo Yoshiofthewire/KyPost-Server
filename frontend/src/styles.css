@@ -2836,6 +2836,24 @@ pre {
   font-size: 0.85rem;
 }
 
+.inbox-keyword-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: rgba(194, 154, 114, 0.18);
+  border: 1px solid rgba(194, 154, 114, 0.5);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  color: var(--ink-strong);
+}
+
+.email-keyword-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0;
+}
+
 .compose-token-input {
   flex: 1 1 120px;
   min-width: 120px;
