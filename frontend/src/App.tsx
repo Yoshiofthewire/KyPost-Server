@@ -710,7 +710,7 @@ export function App() {
     <div className="shell">
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <img className="sidebar-llama-logo" src="/llamalabel.png" alt="KyPost" style={{ width: "100%", maxWidth: 180, display: "block", margin: "0 auto 0.75rem" }} />
+          <img className="sidebar-llama-logo" src="/ky.png" alt="KyPost" style={{ width: "100%", maxWidth: 180, display: "block", margin: "0 auto 0.75rem" }} />
         </div>
         <button type="button" className="new-email-button" onClick={openComposeWindow}>
           New Email
