@@ -230,6 +230,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
+	mux.HandleFunc("POST /api/contacts/{id}/self", s.withAuth(s.handleContactSelf))
 	mux.HandleFunc("POST /api/pgp/identity/generate", s.withAuth(s.handlePGPIdentityGenerate))
 	mux.HandleFunc("POST /api/pgp/identity/import", s.withAuth(s.handlePGPIdentityImport))
 	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
