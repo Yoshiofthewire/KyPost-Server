@@ -43,6 +43,7 @@ import (
 	"llama-lab/backend/internal/mfa"
 	"llama-lab/backend/internal/pgpmail"
 	"llama-lab/backend/internal/processor"
+	"llama-lab/backend/internal/rules"
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/totp"
 	"llama-lab/backend/internal/users"
@@ -95,6 +96,7 @@ type Server struct {
 	userStores     map[string]*state.Store
 	userContacts   map[string]*contacts.Store
 	userGroups     map[string]*groups.Store
+	userRules      map[string]*rules.Store
 	userMailCache  map[string]*mailcache.Store
 	userMail       map[string]*serverMailEntry
 	subIndex       map[string]string
@@ -132,6 +134,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userStores:           map[string]*state.Store{},
 		userContacts:         map[string]*contacts.Store{},
 		userGroups:           map[string]*groups.Store{},
+		userRules:            map[string]*rules.Store{},
 		userMailCache:        map[string]*mailcache.Store{},
 		userMail:             map[string]*serverMailEntry{},
 		subIndex:             map[string]string{},
@@ -243,6 +246,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
 	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
 	mux.HandleFunc("DELETE /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.HandleFunc("GET /api/rules", s.withMailAuth(s.handleRules))
+	mux.HandleFunc("POST /api/rules", s.withAuth(s.handleRules))
+	mux.HandleFunc("PUT /api/rules/{id}", s.withAuth(s.handleRuleByID))
+	mux.HandleFunc("DELETE /api/rules/{id}", s.withAuth(s.handleRuleByID))
+	mux.HandleFunc("POST /api/rules/reorder", s.withAuth(s.handleRulesReorder))
+	mux.HandleFunc("GET /api/rules/{id}/sieve", s.withMailAuth(s.handleRuleSieve))
+	mux.HandleFunc("PUT /api/rules/{id}/sieve", s.withAuth(s.handleRuleSieve))
 	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.HandleFunc("GET /api/setup", s.handleSetup)

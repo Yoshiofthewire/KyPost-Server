@@ -1,0 +1,186 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"llama-lab/backend/internal/rules"
+)
+
+func TestRulesCreateListUpdateDelete(t *testing.T) {
+	srv := newTestServer(t)
+
+	createBody, _ := json.Marshal(map[string]any{
+		"name":    "Archive newsletters",
+		"enabled": true,
+		"match": map[string]any{
+			"op": "allof",
+			"conditions": []map[string]any{
+				{"field": "from", "comparator": "contains", "value": "newsletter"},
+			},
+		},
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(createBody))
+	authRequest(srv, createReq)
+	createRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body=%s", createRec.Code, createRec.Body.String())
+	}
+	var created rulePayload
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("expected assigned ID")
+	}
+	if !created.GUIEditable {
+		t.Fatal("expected flat rule to be GUI editable")
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	authRequest(srv, listReq)
+	listRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listResp struct {
+		Rules []rulePayload `json:"rules"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResp.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(listResp.Rules))
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{
+		"name":    "Archive all newsletters",
+		"enabled": false,
+		"match":   listResp.Rules[0].Match,
+		"actions": listResp.Rules[0].Actions,
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+created.ID, bytes.NewReader(updateBody))
+	authRequest(srv, updateReq)
+	updateRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	var updated rulePayload
+	if err := json.Unmarshal(updateRec.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updated.Name != "Archive all newsletters" || updated.Enabled {
+		t.Fatalf("update did not apply, got %+v", updated)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/rules/"+created.ID, nil)
+	authRequest(srv, deleteReq)
+	deleteRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+}
+
+func TestRulesSieveRoundTrip(t *testing.T) {
+	srv := newTestServer(t)
+
+	createBody, _ := json.Marshal(map[string]any{
+		"name": "from acme",
+		"match": map[string]any{
+			"op":         "allof",
+			"conditions": []map[string]any{{"field": "from", "comparator": "contains", "value": "acme"}},
+		},
+		"actions": []map[string]any{{"type": "move", "value": "Archive/Acme"}},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(createBody))
+	authRequest(srv, createReq)
+	createRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(createRec, createReq)
+	var created rulePayload
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/rules/"+created.ID+"/sieve", nil)
+	authRequest(srv, getReq)
+	getRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get sieve status = %d, body=%s", getRec.Code, getRec.Body.String())
+	}
+	var sieveResp struct {
+		Script string `json:"script"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &sieveResp); err != nil {
+		t.Fatalf("decode sieve response: %v", err)
+	}
+	if sieveResp.Script == "" {
+		t.Fatal("expected non-empty compiled script")
+	}
+
+	putBody, _ := json.Marshal(map[string]any{"script": sieveResp.Script})
+	putReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+created.ID+"/sieve", bytes.NewReader(putBody))
+	authRequest(srv, putReq)
+	putRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put sieve status = %d, body=%s", putRec.Code, putRec.Body.String())
+	}
+
+	badReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+created.ID+"/sieve", bytes.NewReader([]byte(`{"script":"if bogus(x) { keep; }"}`)))
+	authRequest(srv, badReq)
+	badRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a bad script, got %d, body=%s", badRec.Code, badRec.Body.String())
+	}
+}
+
+func TestRulesReorder(t *testing.T) {
+	srv := newTestServer(t)
+	all, _ := srv.users.List()
+	store, err := srv.userRulesStore(all[0].ID)
+	if err != nil {
+		t.Fatalf("userRulesStore: %v", err)
+	}
+	a, _ := store.Upsert(rulesTestRule("a"))
+	b, _ := store.Upsert(rulesTestRule("b"))
+
+	reorderBody, _ := json.Marshal(map[string]any{"ids": []string{b.ID, a.ID}})
+	req := httptest.NewRequest(http.MethodPost, "/api/rules/reorder", bytes.NewReader(reorderBody))
+	authRequest(srv, req)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reorder status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	list := store.List()
+	if len(list) != 2 || list[0].Name != "b" || list[1].Name != "a" {
+		t.Fatalf("expected [b, a] after reorder, got %+v", list)
+	}
+}
+
+// rulesTestRule builds a minimal enabled rule matching From contains "acme"
+// with an archive action, for tests that only need a fixture rule to exist.
+// Task 7 adds a second test function to this file that also uses this
+// helper — keep it exported at file scope, not local to one test.
+func rulesTestRule(name string) rules.Rule {
+	return rules.Rule{
+		Name:    name,
+		Enabled: true,
+		Match: rules.MatchGroup{
+			Op:         "allof",
+			Conditions: []rules.Condition{{Field: "from", Comparator: "contains", Value: "acme"}},
+		},
+		Actions: []rules.Action{{Type: "archive"}},
+	}
+}

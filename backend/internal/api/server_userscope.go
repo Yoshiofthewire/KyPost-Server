@@ -13,6 +13,7 @@ import (
 	"llama-lab/backend/internal/contacts"
 	"llama-lab/backend/internal/groups"
 	"llama-lab/backend/internal/mailcache"
+	"llama-lab/backend/internal/rules"
 	"llama-lab/backend/internal/state"
 )
 
@@ -135,6 +136,31 @@ func (s *Server) groupsFor(r *http.Request) (*groups.Store, error) {
 		return nil, errors.New("no auth context on request")
 	}
 	return s.userGroupsStore(ac.UserID)
+}
+
+func (s *Server) userRulesStore(userID string) (*rules.Store, error) {
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	if st, ok := s.userRules[userID]; ok {
+		return st, nil
+	}
+	st, err := rules.New(s.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	s.userRules[userID] = st
+	return st, nil
+}
+
+// rulesFor resolves the calling user's rules store from the request's
+// AuthContext (requires the handler to be wrapped in withAuth or
+// withMailAuth).
+func (s *Server) rulesFor(r *http.Request) (*rules.Store, error) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		return nil, errors.New("no auth context on request")
+	}
+	return s.userRulesStore(ac.UserID)
 }
 
 // sanitizeGroupIDsForUser drops any group ID that isn't a real group owned
