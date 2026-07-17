@@ -70,7 +70,7 @@ function summarizeRule(rule: Rule): string {
 function blankRule(): Partial<Rule> {
   return {
     name: "New rule",
-    enabled: true,
+    enabled: false,
     scope: {},
     match: { op: "allof", conditions: [{ field: "from", comparator: "contains", value: "" }] },
     actions: [{ type: "archive" }]
