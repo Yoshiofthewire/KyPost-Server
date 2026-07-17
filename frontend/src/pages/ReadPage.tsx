@@ -1248,7 +1248,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     borderRadius: 999,
                     border: "1px solid var(--line)",
                     background: isActive ? "var(--chip-active-bg)" : "var(--accent-soft)",
-                    color: "var(--ink-strong)",
+                    color: isActive ? "var(--accent-contrast)" : "var(--ink-strong)",
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",

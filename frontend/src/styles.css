@@ -191,7 +191,7 @@ body {
 
 .drop-target-active {
   border-color: var(--accent) !important;
-  background: rgba(194, 154, 114, 0.22) !important;
+  background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
 }
 
 .sidebar-folder-menu-wrap {
@@ -722,7 +722,7 @@ pre {
 }
 
 .notice-success {
-  background: rgba(194, 154, 114, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .notice-warning {
@@ -788,8 +788,8 @@ pre {
 }
 
 .health-ok {
-  background: rgba(194, 154, 114, 0.2);
-  border-color: rgba(194, 154, 114, 0.4);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .health-bad {
@@ -841,7 +841,7 @@ pre {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at 92% 10%, rgba(194, 154, 114, 0.2), transparent 42%),
+    radial-gradient(circle at 92% 10%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 42%),
     linear-gradient(155deg, color-mix(in srgb, var(--panel) 82%, var(--bg)), color-mix(in srgb, var(--panel) 94%, var(--bg)) 46%);
 }
 
@@ -1301,7 +1301,7 @@ pre {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at 6% 8%, rgba(194, 154, 114, 0.16), transparent 36%),
+    radial-gradient(circle at 6% 8%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 36%),
     linear-gradient(160deg, color-mix(in srgb, var(--panel) 85%, var(--bg)), color-mix(in srgb, var(--panel) 95%, var(--bg)) 46%);
 }
 
@@ -1455,7 +1455,7 @@ pre {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at 94% 6%, rgba(194, 154, 114, 0.16), transparent 40%),
+    radial-gradient(circle at 94% 6%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 40%),
     linear-gradient(160deg, color-mix(in srgb, var(--panel) 85%, var(--bg)), color-mix(in srgb, var(--panel) 95%, var(--bg)) 46%);
 }
 
@@ -1937,7 +1937,7 @@ pre {
   flex-direction: column;
   overflow: hidden;
   background:
-    radial-gradient(circle at 94% 6%, rgba(194, 154, 114, 0.16), transparent 40%),
+    radial-gradient(circle at 94% 6%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 40%),
     linear-gradient(160deg, color-mix(in srgb, var(--panel) 85%, var(--bg)), color-mix(in srgb, var(--panel) 95%, var(--bg)) 46%);
 }
 
@@ -2726,8 +2726,8 @@ pre {
 }
 
 .compose-save-draft {
-  background: rgba(194, 154, 114, 0.24);
-  border-color: rgba(194, 154, 114, 0.5);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   color: var(--ink-strong);
 }
 
@@ -2787,8 +2787,8 @@ pre {
   gap: 6px;
   max-width: 100%;
   padding: 4px 8px;
-  background: rgba(194, 154, 114, 0.18);
-  border: 1px solid rgba(194, 154, 114, 0.5);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   border-radius: 999px;
   font-size: 0.85rem;
   color: var(--ink-strong);
@@ -2834,8 +2834,8 @@ pre {
   gap: 6px;
   max-width: 100%;
   padding: 4px 8px;
-  background: rgba(194, 154, 114, 0.18);
-  border: 1px solid rgba(194, 154, 114, 0.5);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   border-radius: 999px;
   font-size: 0.85rem;
   color: var(--ink-strong);
@@ -2862,8 +2862,8 @@ pre {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  background: rgba(194, 154, 114, 0.18);
-  border: 1px solid rgba(194, 154, 114, 0.5);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   border-radius: 999px;
   font-size: 0.72rem;
   color: var(--ink-strong);
@@ -2981,7 +2981,7 @@ pre {
 
 .recipient-autocomplete-row.active,
 .recipient-autocomplete-row:hover {
-  background: rgba(194, 154, 114, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .recipient-autocomplete-name {
