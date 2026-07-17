@@ -334,7 +334,7 @@ export function applyTheme(themeName: ThemeName) {
 
 export function getStoredTheme(): ThemeName {
   try {
-    const saved = window.localStorage.getItem(THEME_STORAGE_KEY) ?? "Dark Matter";
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY) ?? "Patina Ky";
     if (isThemeName(saved)) {
       return saved;
     }
@@ -350,9 +350,9 @@ export function getStoredTheme(): ThemeName {
     if (saved === "Cliffs") {
       return "White Cliffs";
     }
-    return "Dark Matter";
+    return "Patina Ky";
   } catch {
-    return "Dark Matter";
+    return "Patina Ky";
   }
 }
 
