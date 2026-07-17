@@ -79,7 +79,8 @@ type userCtx struct {
 	settings config.UserNotificationSettings
 	// autoLabelEnabled mirrors settings.Labels.AutoApplyEnabled at the time
 	// this tick's userCtx was built. When false, handleMessage skips AI
-	// classification entirely and tags every message Primary instead.
+	// classification entirely and tags every message with the account's
+	// default label instead (disabledLabelingFallback).
 	autoLabelEnabled bool
 	// rules holds every filter rule (enabled and disabled) loaded for this
 	// tick; rules.Evaluate skips disabled rules and rules out of Scope for
@@ -625,16 +626,17 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 
 	if !uc.autoLabelEnabled {
-		const primaryLabel = "Primary"
-		keywords := keywordsForSelectedLabel(primaryLabel, cfg.Labels.KeywordMappings)
+		defaultLabel := disabledLabelingFallback(cfg.Labels.Allowlist)
+		keywords := keywordsForSelectedLabel(defaultLabel, cfg.Labels.KeywordMappings)
 		p.log.Info(
-			"auto-labeling disabled; tagging Primary",
+			"auto-labeling disabled; tagging default label",
 			"user_id", uc.id,
 			"message_id", msg.ID,
+			"selected_label", defaultLabel,
 			"keywords", strings.Join(keywords, ","),
 		)
 		if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
-			p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", primaryLabel, "error", err.Error())
+			p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", defaultLabel, "error", err.Error())
 			return err
 		}
 		if err := uc.store.MarkProcessed(msg.ID); err != nil {
@@ -645,14 +647,14 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
 			Subject:   msg.Subject,
-			Label:     primaryLabel,
+			Label:     defaultLabel,
 			Status:    "applied",
-			Detail:    "automatic keyword labeling disabled; tagged Primary",
+			Detail:    "automatic keyword labeling disabled; tagged " + defaultLabel,
 		}); err != nil {
 			return err
 		}
-		p.maybeSendPushNotification(uc, msg, primaryLabel, keywords)
-		p.maybeSendNativePushNotification(uc, msg, primaryLabel, keywords)
+		p.maybeSendPushNotification(uc, msg, defaultLabel, keywords)
+		p.maybeSendNativePushNotification(uc, msg, defaultLabel, keywords)
 		return nil
 	}
 
@@ -1051,6 +1053,26 @@ func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, mess
 		return struct{}{}, err, true
 	})
 	return err
+}
+
+// disabledLabelingFallback picks the label applied when auto-labeling is
+// off. "Primary" is preferred for backward compatibility, but it only
+// matches a tab the frontend actually shows by default
+// (server.go's bucket()/firstMatchingKeyword, ReadPage.tsx's tabs[0]
+// default) when it's genuinely one of the account's configured labels. If
+// it isn't, falling back to the literal string leaves mail silently
+// stranded in the Uncategorized tab, which looks like mail vanishing
+// (effectively an unrequested auto-archive) rather than being sorted.
+func disabledLabelingFallback(allowlist []string) string {
+	for _, label := range allowlist {
+		if strings.EqualFold(strings.TrimSpace(label), "Primary") {
+			return strings.TrimSpace(label)
+		}
+	}
+	if len(allowlist) > 0 {
+		return strings.TrimSpace(allowlist[0])
+	}
+	return "Primary"
 }
 
 func keywordsForSelectedLabel(label string, mappings map[string][]string) []string {

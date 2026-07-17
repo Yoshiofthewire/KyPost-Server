@@ -457,8 +457,9 @@ func TestHandleMessage_NonMatchingRuleStillClassifies(t *testing.T) {
 	}
 
 	uc := userCtx{
-		id:   "user-1",
-		mail: &noopMailClient{},
+		id:               "user-1",
+		mail:             &noopMailClient{},
+		autoLabelEnabled: true,
 		rules: []rules.Rule{
 			{
 				Name:    "never matches",
@@ -480,4 +481,56 @@ func TestHandleMessage_NonMatchingRuleStillClassifies(t *testing.T) {
 		}
 	}()
 	_ = p.handleMessage(context.Background(), uc, msg)
+}
+
+// TestHandleMessage_AutoLabelDisabledUsesConfiguredLabel proves the
+// auto-labeling-disabled fallback always applies a label present in the
+// account's configured allowlist, rather than the hardcoded literal
+// "Primary" — which silently drops mail into the invisible Uncategorized
+// tab (server.go's bucket()/firstMatchingKeyword) whenever "Primary" isn't
+// one of the user's configured labels, making new mail look archived and
+// unsorted from the frontend's perspective (ReadPage.tsx always defaults
+// activeTab to tabs[0], never to Uncategorized).
+func TestHandleMessage_AutoLabelDisabledUsesConfiguredLabel(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+
+	p := &Poller{log: logger} // llama intentionally left nil; disabled path never calls it
+	p.cfg.Labels.Allowlist = []string{"Work", "Bills"}
+
+	mail := &noopMailClient{}
+	uc := userCtx{
+		id:               "user-1",
+		mail:             mail,
+		store:            store,
+		autoLabelEnabled: false,
+	}
+	msg := imapadapter.Message{ID: "44", Subject: "Invoice due", Sender: "billing@example.com"}
+
+	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	if len(mail.appliedLabels) == 0 {
+		t.Fatal("expected a label to be applied")
+	}
+	got := mail.appliedLabels[0]
+	found := false
+	for _, allowed := range p.cfg.Labels.Allowlist {
+		if strings.EqualFold(allowed, got) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("applied label %q is not in the configured allowlist %v — mail will land in the invisible Uncategorized tab", got, p.cfg.Labels.Allowlist)
+	}
 }

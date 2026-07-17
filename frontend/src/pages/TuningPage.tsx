@@ -48,7 +48,7 @@ export function TuningPage() {
       setLabelPrefsStatus(
         enabled
           ? "Automatic keyword labeling enabled."
-          : "Automatic keyword labeling disabled — new mail will be tagged Primary only."
+          : "Automatic keyword labeling disabled — new mail will be tagged with your default label only."
       );
     } catch {
       setAutoApplyEnabled(previous);
@@ -122,7 +122,7 @@ export function TuningPage() {
               Automatically apply keyword labels
             </label>
             <p className="config-muted">
-              When off, the AI classifier is skipped and every new message is tagged Primary only.
+              When off, the AI classifier is skipped and every new message is tagged with your default label ("Primary" if configured, otherwise your first configured label) only.
             </p>
             {labelPrefsStatus ? <p>{labelPrefsStatus}</p> : null}
           </div>

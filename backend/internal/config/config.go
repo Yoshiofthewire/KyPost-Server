@@ -86,7 +86,8 @@ type UserNotificationSettings struct {
 // UserLabelSettings controls whether the AI classification pipeline
 // automatically applies keyword labels for this user. When
 // AutoApplyEnabled is false, classification is skipped entirely and every
-// message is tagged Primary instead.
+// message is tagged with the account's default label instead (see
+// disabledLabelingFallback in processor/poller.go).
 type UserLabelSettings struct {
 	AutoApplyEnabled bool `yaml:"autoApplyEnabled" json:"autoApplyEnabled"`
 }
