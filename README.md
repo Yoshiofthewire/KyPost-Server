@@ -12,10 +12,16 @@ It polls unread mail, classifies messages, applies IMAP keywords, and includes a
 - Multi-user with roles: admins manage users and system settings; each user connects their own IMAP mailbox
 - IMAP inbox reader with folder management and drag/drop move actions
 - Automatic keyword labeling for unread mail (each active user's mailbox is polled independently)
+- Filter Rules: a GUI condition/action builder plus a raw Sieve script editor, with a run-now panel to apply rules on demand
 - Built-in compose flow with SMTP send and IMAP draft save
-- Browser push notifications (all mail or keyword-only), per user
+- PGP end-to-end mail encryption: generate or import a key, look up recipient keys on keys.openpgp.org, and check recipient key status before sending
+- Contacts address book with groups, dedupe, bulk delete, CSV/vCard import/export, and photo support
+- Built-in CardDAV server (`/dav`, `/.well-known/carddav`) for syncing contacts to phones/desktop apps, plus an optional CardDAV client sync against an external address book
+- Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
+- Optional CAPTCHA (Turnstile or Friendly Captcha) on login, layered on top of the built-in 3-strikes/15-minute lockout
+- Browser push notifications (all mail or keyword-only), per user, plus native push pairing for mobile apps
 - Config UI for IMAP, SMTP, model auth, tuning, logs, health, and decisions
-- A dozen Theme presets 
+- A dozen Theme presets
 
 ## Architecture
 
@@ -212,9 +218,21 @@ Important files:
 Auth:
 
 - `POST /api/auth/login`
+- `GET /api/auth/captcha-config`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
 - `POST /api/auth/password`
+
+Multi-factor authentication:
+
+- `GET /api/mfa/status`
+- `POST /api/mfa/totp/setup`
+- `POST /api/mfa/totp/confirm`
+- `POST /api/mfa/totp/disable`
+- `POST /api/mfa/recovery-codes/regenerate`
+- `PUT /api/mfa/push/enabled`
+- `POST /api/auth/mfa/totp` / `POST /api/auth/mfa/recovery-code` (login-time verification)
+- `POST /api/auth/mfa/push/poll` / `POST /api/auth/mfa/push/finish` / `POST /api/mfa/push/respond` (push-approval sign-in)
 
 User management (admin only):
 
@@ -223,12 +241,16 @@ User management (admin only):
 - `POST /api/users/{id}/reset-password`
 - `POST /api/users/{id}/deactivate`
 - `POST /api/users/{id}/reactivate`
+- `POST /api/users/{id}/clear-mfa`
 
 Runtime:
 
 - `GET /api/status`
 - `GET /api/health`
 - `POST /api/health/repair` (admin only)
+- `POST /api/admin/mail/poll-now` (admin only; trigger an immediate poll)
+- `GET /api/setup` (whether initial admin setup has completed)
+- `GET /pickup/{id}?t=<token>` (single-use mobile pickup link)
 
 Config and data:
 
@@ -244,6 +266,7 @@ IMAP and inbox:
 - `GET /api/inbox?limit=500&mailbox=<name>`
 - `POST /api/inbox/actions`
 - `GET|POST|PUT|DELETE /api/inbox/folders`
+- `GET /api/mail/search`
 
 Mail:
 
@@ -251,6 +274,46 @@ Mail:
 - `POST /api/mail/draft` (same optional `attachments` shape)
 - `GET /api/mail/attachments?mailbox=&messageId=` (list a message's attachment metadata)
 - `GET /api/mail/attachment?mailbox=&messageId=&index=` (download one attachment)
+
+Filter Rules (caller's own rules):
+
+- `GET|POST /api/rules`
+- `PUT|DELETE /api/rules/{id}`
+- `POST /api/rules/reorder`
+- `GET|PUT /api/rules/{id}/sieve` (raw Sieve script view/edit)
+- `POST /api/rules/run` (run rules now, on demand)
+
+PGP:
+
+- `POST /api/pgp/identity/generate` / `POST /api/pgp/identity/import`
+- `GET|DELETE /api/pgp/identity`
+- `GET /api/pgp/keyserver/lookup` (query keys.openpgp.org)
+- `POST /api/pgp/recipients/check` (key status for a set of recipients before sending)
+- `GET /api/pgp/qr/token` / `GET /api/pgp/qr/key` (public key exchange via QR)
+
+Contacts:
+
+- `GET|POST /api/contacts`
+- `GET|PUT|DELETE /api/contacts/{id}`
+- `POST /api/contacts/dedupe`
+- `GET /api/contacts/search`
+- `POST /api/contacts/bulk-delete`
+- `GET /api/contacts/export` / `POST /api/contacts/import`
+- `GET|POST|DELETE /api/contacts/dav-password` (app-specific CardDAV password)
+- `GET|POST|DELETE /api/contacts/carddav-client/config` and `POST /api/contacts/carddav-client/sync` (sync from an external CardDAV server)
+- `POST|GET|DELETE /api/contacts/{id}/photo`
+- `POST /api/contacts/{id}/self`
+- `GET|POST /api/contacts/sync` (mobile two-way sync, authenticated via pairing token)
+
+Groups:
+
+- `GET|POST /api/groups`
+- `PUT|DELETE /api/groups/{id}`
+
+CardDAV server (address book sync for phones/desktop apps, authenticated with a per-user DAV password):
+
+- `/.well-known/carddav`
+- `/dav/...`
 
 Notifications (all scoped to the signed-in user):
 
