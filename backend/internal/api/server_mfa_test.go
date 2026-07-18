@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base32"
@@ -80,13 +81,30 @@ func enrollTOTP(t *testing.T, srv *Server, userID string) (secret string, recove
 	return setupResp.Secret, confirmResp.RecoveryCodes
 }
 
-// doJSONAuth is doJSON plus an injected session for userID.
+// doJSONAuth is doJSON plus an injected session for userID, including the
+// matching X-CSRF-Token header a real browser client would send (see
+// authRequestAs/csrfCheckOK) — without it every mutating request would be
+// rejected with 403 regardless of the test's own assertions.
 func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payload any, userID string) *httptest.ResponseRecorder {
 	token := "session-token-" + userID
+	csrfToken := "csrf-token-" + userID
 	srv.mu.Lock()
-	srv.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour)}
+	srv.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	srv.mu.Unlock()
-	return doJSON(srv, handler, method, path, payload, &http.Cookie{Name: "llama_session", Value: token})
+
+	var body *bytes.Reader
+	if payload != nil {
+		b, _ := json.Marshal(payload)
+		body = bytes.NewReader(b)
+	} else {
+		body = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, body)
+	req.AddCookie(&http.Cookie{Name: "llama_session", Value: token})
+	req.Header.Set("X-CSRF-Token", csrfToken)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
 }
 
 func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
@@ -126,7 +144,7 @@ func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 		t.Fatalf("mfa/totp: status=%d body=%s", totpRec.Code, totpRec.Body.String())
 	}
 	cookies := totpRec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "llama_session" {
+	if findCookie(cookies, "llama_session") == nil {
 		t.Fatalf("expected a llama_session cookie after second factor, got %+v", cookies)
 	}
 

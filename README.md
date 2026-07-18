@@ -123,6 +123,8 @@ Common variables:
 - `PUSH_RELAY_KEY` (per-server API key issued by the relay operator; required together with `PUSH_RELAY_URL` to enable Android native push)
 - `APNS_RELAY_URL` (optional; base URL of the central APNs relay Worker that delivers iOS native push)
 - `APNS_RELAY_KEY` (per-server API key issued by the relay operator; required together with `APNS_RELAY_URL` to enable iOS native push)
+- `CAPTCHA_PROVIDER` (optional; `turnstile` or `friendly` to require a CAPTCHA solution on login, on top of the built-in 3-strikes/15-minute account lockout)
+- `CAPTCHA_SITE_KEY` / `CAPTCHA_SECRET_KEY` (required together with `CAPTCHA_PROVIDER`; site key is public, secret key verifies solutions server-side)
 
 Notes:
 

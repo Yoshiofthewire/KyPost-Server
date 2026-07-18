@@ -147,10 +147,12 @@ func authRequest(s *Server, req *http.Request) {
 		panic("authRequest: no test user available")
 	}
 	token := "session-token"
+	csrfToken := "csrf-token"
 	s.mu.Lock()
-	s.sessions[token] = Session{UserID: all[0].ID, ExpiresAt: time.Now().Add(24 * time.Hour)}
+	s.sessions[token] = Session{UserID: all[0].ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
 	req.AddCookie(&http.Cookie{Name: "llama_session", Value: token})
+	req.Header.Set("X-CSRF-Token", csrfToken)
 }
 
 func TestNativeRegisterStoresDevice(t *testing.T) {

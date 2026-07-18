@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -14,6 +15,17 @@ import (
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/carddav"
 )
+
+// allowLoopbackOutboundForTest relaxes the SSRF guard (see ssrf_guard.go)
+// for the duration of a test so syncCardDAVClient can reach an
+// httptest.Server, which always listens on a loopback address. Production
+// code must never touch outboundIPGuard.
+func allowLoopbackOutboundForTest(t *testing.T) {
+	t.Helper()
+	old := outboundIPGuard
+	outboundIPGuard = func(net.IP) bool { return false }
+	t.Cleanup(func() { outboundIPGuard = old })
+}
 
 // fakeMultiBookBackend serves two address books for a single fixed user: an
 // empty one (listed first, mirroring servers like mailbox.org/SOGo that put
@@ -124,6 +136,7 @@ func (b *fakeMultiBookBackend) DeleteAddressObject(ctx context.Context, p string
 //     like mailbox.org/SOGo), and the sync must still end up importing the
 //     contact from the second one instead of blindly using the first.
 func TestSyncCardDAVClientProbesEveryDiscoveredBook(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
 	backend := &fakeMultiBookBackend{prefix: "/carddav"}
 	handler := &carddav.Handler{Backend: backend, Prefix: "/carddav"}
 

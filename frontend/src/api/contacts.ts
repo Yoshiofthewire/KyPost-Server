@@ -1,4 +1,4 @@
-import { getJSON, postJSON, putJSON, deleteJSON } from "./client";
+import { getJSON, postJSON, putJSON, deleteJSON, readCsrfToken } from "./client";
 
 export type ContactValue = {
   label?: string;
@@ -258,6 +258,7 @@ export async function importContacts(file: File): Promise<ImportResult> {
 
   const response = await fetch("/api/contacts/import", {
     method: "POST",
+    headers: { "X-CSRF-Token": readCsrfToken() },
     body: formData
   });
 
@@ -278,6 +279,7 @@ export async function uploadContactPhoto(uid: string, file: File): Promise<{ pho
 
   const response = await fetch(`/api/contacts/${encodeURIComponent(uid)}/photo`, {
     method: "POST",
+    headers: { "X-CSRF-Token": readCsrfToken() },
     body: formData
   });
 

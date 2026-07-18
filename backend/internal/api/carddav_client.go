@@ -122,6 +122,10 @@ func (s *Server) handleContactsCardDAVClientConfig(w http.ResponseWriter, r *htt
 			http.Error(w, "serverUrl, username, and password are required", http.StatusBadRequest)
 			return
 		}
+		if err := validateOutboundURL(payload.ServerURL, "http", "https"); err != nil {
+			http.Error(w, "serverUrl is not reachable: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		payload.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
 		if err := writeCardDAVClientConfigPayload(cfgPath, s.imapConfigKeyPath, payload); err != nil {
@@ -468,7 +472,10 @@ func discoverAddressBooksFrom(ctx context.Context, httpClient webdav.HTTPClient,
 // see what was found and pin a specific path if the auto-pick is still
 // wrong.
 func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store, groupsStore *groups.Store, storePhoto func([]byte) (string, error)) (imported, updated int, addressBookPath string, discovered []discoveredAddressBook, err error) {
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	if verr := validateOutboundURL(cfg.ServerURL, "http", "https"); verr != nil {
+		return 0, 0, "", nil, fmt.Errorf("refusing to sync: %w", verr)
+	}
+	httpClient := newSSRFSafeHTTPClient(30 * time.Second)
 	authed := webdav.HTTPClientWithBasicAuth(httpClient, cfg.Username, cfg.Password)
 	hostRoot, err := cardDAVHostRoot(cfg.ServerURL)
 	if err != nil {

@@ -70,6 +70,12 @@ func (s *Server) handleCardDAV(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Cap the request body (PUT, REPORT, ...) the same way the JSON
+	// contact-photo upload path does: without this, a PUT with an
+	// arbitrarily large body (e.g. a vCard carrying a huge base64 PHOTO data
+	// URI) would be fully buffered in memory and base64-decoded with no
+	// limit at all.
+	r.Body = http.MaxBytesReader(w, r.Body, maxContactPhotoBytes)
 	handler := &carddav.Handler{Backend: &contactsDAVBackend{server: s}, Prefix: davPrefix}
 	handler.ServeHTTP(w, r)
 }

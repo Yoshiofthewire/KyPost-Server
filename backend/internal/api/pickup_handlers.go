@@ -20,6 +20,10 @@ const pickupLinkTTL = 7 * 24 * time.Hour
 // directly on the mux without withAuth: the recipient has no account, only
 // the signed token in the link.
 func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
+	if !s.pairingSecretConfigured() {
+		http.Error(w, "pickup links are not configured", http.StatusServiceUnavailable)
+		return
+	}
 	id := strings.TrimSpace(r.PathValue("id"))
 	token := strings.TrimSpace(r.URL.Query().Get("t"))
 	if id == "" || token == "" {
@@ -52,6 +56,9 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 // integration for every recipient in the "without key" set of an encrypted
 // send.
 func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainBody, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) error {
+	if !s.pairingSecretConfigured() {
+		return fmt.Errorf("PAIRING_SECRET is not set; refusing to send a pickup link signed with a known-empty key")
+	}
 	id, err := s.pickupStore.Create(userID, recipient, subject, plainBody, pickupLinkTTL)
 	if err != nil {
 		return fmt.Errorf("create pickup record: %w", err)
@@ -92,6 +99,20 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 // silently wrong for anyone else: pickup links emailed to recipients and QR
 // codes scanned by other devices will point at the operator's own machine.
 // Log a warning once so the degraded state is observable instead of silent.
+// pairingSecretConfigured reports whether PAIRING_SECRET is set, logging a
+// one-time warning when it's not: without it, pickup links and QR
+// key-exchange tokens would otherwise be HMAC-signed with a known-empty key,
+// which provides no security even though the endpoints appear to work.
+func (s *Server) pairingSecretConfigured() bool {
+	if s.pairingSecret != "" {
+		return true
+	}
+	s.pairingSecretWarn.Do(func() {
+		s.logger.Error("PAIRING_SECRET is not set; pickup links and PGP QR key-exchange are disabled (they would otherwise be signed with a known-empty key)")
+	})
+	return false
+}
+
 func (s *Server) pickupBaseURL() string {
 	if s.serverBaseURL != "" {
 		return s.serverBaseURL

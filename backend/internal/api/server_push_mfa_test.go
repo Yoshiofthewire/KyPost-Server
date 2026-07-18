@@ -211,7 +211,7 @@ func TestPushLoginApproveFlow(t *testing.T) {
 		t.Fatalf("finish: status=%d body=%s", finishRec.Code, finishRec.Body.String())
 	}
 	cookies := finishRec.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != "llama_session" {
+	if findCookie(cookies, "llama_session") == nil {
 		t.Fatalf("expected session cookie after finish, got %+v", cookies)
 	}
 }

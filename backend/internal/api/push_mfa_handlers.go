@@ -207,7 +207,7 @@ func (s *Server) handlePushFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
-	if err := s.startSession(w, u.ID); err != nil {
+	if err := s.startSession(w, r, u.ID); err != nil {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}

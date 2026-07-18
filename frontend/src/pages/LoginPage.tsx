@@ -1,12 +1,18 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { postJSON } from "../api/client";
+import { getJSON, postJSON } from "../api/client";
 import type { AuthState } from "../auth";
+import { CaptchaWidget, type CaptchaProvider } from "../components/CaptchaWidget";
 
 type LoginPageProps = {
   auth: AuthState;
   onAuthChanged: () => Promise<void> | void;
   mode?: "login" | "password";
+};
+
+type CaptchaConfig = {
+  provider: CaptchaProvider | "";
+  siteKey: string;
 };
 
 export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProps) {
@@ -23,7 +29,28 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
   const [useRecoveryCode, setUseRecoveryCode] = useState(false);
   const [mfaMethods, setMfaMethods] = useState<string[]>([]);
   const [mfaMode, setMfaMode] = useState<"totp" | "push">("totp");
+  const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
+  const [captchaToken, setCaptchaToken] = useState("");
+  const [captchaNonce, setCaptchaNonce] = useState(0);
   const passwordMode = mode === "password";
+
+  useEffect(() => {
+    if (passwordMode) {
+      return;
+    }
+    let cancelled = false;
+    getJSON<CaptchaConfig>("/api/auth/captcha-config")
+      .then((cfg) => {
+        if (!cancelled) setCaptchaConfig(cfg);
+      })
+      .catch(() => {
+        // CAPTCHA is an operator opt-in; if the config fetch fails, log in
+        // proceeds without it rather than blocking the whole form.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [passwordMode]);
 
   useEffect(() => {
     if (passwordMode) {
@@ -52,6 +79,10 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
 
   async function submitLogin(e: FormEvent) {
     e.preventDefault();
+    if (captchaConfig?.provider && !captchaToken) {
+      setStatus("Please complete the CAPTCHA challenge.");
+      return;
+    }
     setBusy(true);
     setStatus("");
     try {
@@ -61,7 +92,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         mfaRequired?: boolean;
         challengeId?: string;
         methods?: string[];
-      }>("/api/auth/login", { username, password });
+      }>("/api/auth/login", { username, password, captchaToken: captchaToken || undefined });
       if (res.mfaRequired && res.challengeId) {
         const methods = res.methods ?? [];
         setMfaChallengeId(res.challengeId);
@@ -74,9 +105,18 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       }
       await onAuthChanged();
       finishSignIn(Boolean(res.mustChangePassword));
-    } catch {
-      setStatus("Login failed. Check username and password.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      setStatus(
+        message.includes("429")
+          ? "Too many failed attempts. Please wait a few minutes before trying again."
+          : "Login failed. Check username and password."
+      );
     } finally {
+      // CAPTCHA tokens are single-use: always get a fresh challenge for the
+      // next attempt, success or failure.
+      setCaptchaToken("");
+      setCaptchaNonce((n) => n + 1);
       setBusy(false);
     }
   }
@@ -293,6 +333,14 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
               autoComplete="current-password"
             />
           </label>
+          {captchaConfig?.provider ? (
+            <CaptchaWidget
+              key={captchaNonce}
+              provider={captchaConfig.provider}
+              siteKey={captchaConfig.siteKey}
+              onToken={setCaptchaToken}
+            />
+          ) : null}
           <button type="submit" disabled={busy}>
             {busy ? "Signing in..." : "Sign In"}
           </button>

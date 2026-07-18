@@ -2,10 +2,31 @@ export function toErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+// readCsrfToken reads the non-HttpOnly csrf_token cookie the backend sets
+// alongside the session cookie at login (double-submit CSRF pattern — see
+// backend's csrfCheckOK). It carries no authority on its own; it only proves
+// this request originated from JS that could read our own cookies, which a
+// cross-site attacker's forged form/script cannot do. Exported for the rare
+// caller (multipart/form-data uploads) that can't go through
+// getJSON/postJSON/putJSON/deleteJSON and must attach the header itself.
+export function readCsrfToken(): string {
+  const match = document.cookie.match(/(?:^|; )csrf_token=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
+  if (method !== "GET" && method !== "HEAD") {
+    const csrfToken = readCsrfToken();
+    if (csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken;
+    }
+  }
   const response = await fetch(path, {
     credentials: "include",
-    ...init
+    ...init,
+    headers
   });
   if (!response.ok) {
     let detail = "";

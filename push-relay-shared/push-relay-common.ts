@@ -43,6 +43,15 @@ export interface CommonEnv {
   REGISTRATION_ENABLED?: string;
   /** Minute-tier rate limiter (native binding, no KV writes). */
   PUSH_RATE_LIMITER?: RateLimitBinding;
+  /**
+   * Per-IP minute-tier limiter for POST /register (native binding, no KV
+   * writes). Bounds how fast a single IP can mint self-registered keys —
+   * the "one active key per IP" dedup in handleRegister only limits
+   * *concurrent* keys per IP, not how often an IP can churn through new
+   * ones, so this closes the gap that lets an attacker mint many
+   * short-lived permanent keys from one address before rotating IPs.
+   */
+  REGISTER_RATE_LIMITER?: RateLimitBinding;
   /** Per-key usage counters, offloaded off the KV write path. */
   USAGE_ANALYTICS?: AnalyticsEngineDatasetLike;
 }
@@ -63,6 +72,7 @@ export interface ApiKeyRecord {
 export const KEY_PREFIX = "key:"; // key:<sha256(key)>      -> ApiKeyRecord (durable)
 export const KEY_INDEX_PREFIX = "keyid:"; // keyid:<id>     -> <sha256(key)> for revoke-by-id
 export const IP_INDEX_PREFIX = "ipkey:"; // ipkey:<ip>      -> keyId (one active key per IP)
+export const BOUND_TOKEN_PREFIX = "boundtoken:"; // boundtoken:<sha256(deviceToken)> -> keyId (first sender owns it)
 
 export const DEFAULT_LIMIT_PER_MINUTE = 10;
 
@@ -139,6 +149,45 @@ export function isExpired(record: ApiKeyRecord, now: number): boolean {
   return Number.isFinite(at) && at <= now;
 }
 
+// ---- device-token pinning ---------------------------------------------------
+//
+// Closes the open-relay gap left by public self-registration (handleRegister):
+// without this, any key holder could /send to any device token, including one
+// they don't own — spoofing push notifications at strangers. The first key to
+// successfully deliver to a given token "claims" it; every later /send to that
+// token must come from the same key. A claim is released for reclaiming if the
+// owning key was since revoked/expired/deleted, so key rotation never
+// permanently orphans a legitimate device.
+
+export type TokenBindingResult = { allowed: true } | { allowed: false; reason: string };
+
+/**
+ * Checks whether keyId may send to token: allowed if the token is unclaimed,
+ * already claimed by this same key, or the claiming key is no longer active.
+ */
+export async function checkTokenBinding(env: CommonEnv, token: string, keyId: string): Promise<TokenBindingResult> {
+  const tokenHash = await sha256Hex(token);
+  const boundKeyId = await env.API_KEYS.get(BOUND_TOKEN_PREFIX + tokenHash);
+  if (!boundKeyId || boundKeyId === keyId) {
+    return { allowed: true };
+  }
+  const boundHash = await env.API_KEYS.get(KEY_INDEX_PREFIX + boundKeyId);
+  if (!boundHash) {
+    return { allowed: true }; // the claiming key was fully deleted
+  }
+  const boundRecord = await env.API_KEYS.get<ApiKeyRecord>(KEY_PREFIX + boundHash, "json");
+  if (!boundRecord || !boundRecord.enabled || isExpired(boundRecord, Date.now())) {
+    return { allowed: true }; // claiming key is revoked/disabled/expired: free to reclaim
+  }
+  return { allowed: false, reason: "token is already bound to a different active api key" };
+}
+
+/** Claims token for keyId. Call only after a send actually succeeds. */
+export async function bindToken(env: CommonEnv, token: string, keyId: string): Promise<void> {
+  const tokenHash = await sha256Hex(token);
+  await env.API_KEYS.put(BOUND_TOKEN_PREFIX + tokenHash, keyId);
+}
+
 // ---- per-key rate limits ---------------------------------------------------
 
 /** Resolve a limit var: unset -> default; "0"/negative/invalid -> disabled. */
@@ -158,17 +207,23 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
 // push-relay-free-tier-ceiling notes.
 
 /**
- * Minute-tier check via the native rate-limiting binding (no KV writes). Returns
+ * Minute-tier check via a native rate-limiting binding (no KV writes). Returns
  * true when allowed. Fails open if the binding is missing (e.g. local dev
- * without support) or errors, so delivery is never blocked by the limiter itself.
+ * without support) or errors, so delivery/registration is never blocked by
+ * the limiter itself. Shared by the per-key send limiter (PUSH_RATE_LIMITER)
+ * and the per-IP registration limiter (REGISTER_RATE_LIMITER) — key is
+ * whatever the caller wants to bucket on (a key hash or a client IP).
  */
-export async function checkMinuteLimit(env: CommonEnv, rc: RequestContext, hash: string): Promise<boolean> {
-  const limiter = env.PUSH_RATE_LIMITER;
+export async function checkMinuteLimit(
+  limiter: RateLimitBinding | undefined,
+  rc: RequestContext,
+  key: string,
+): Promise<boolean> {
   if (!limiter || typeof limiter.limit !== "function") {
     return true;
   }
   try {
-    const { success } = await limiter.limit({ key: hash });
+    const { success } = await limiter.limit({ key });
     return success;
   } catch (err) {
     rc.log({ level: "error", event: "ratelimit.binding_error", error: String((err as Error).message ?? err) });
@@ -284,14 +339,25 @@ export function registrationEnabled(env: CommonEnv): boolean {
  *
  * One active key per IP: registering from an IP that already holds a key
  * invalidates the previous one (so a server that loses its key file can simply
- * re-register). Abuse is further bounded by the per-key rolling limits and the
- * REGISTRATION_ENABLED kill-switch; add a Cloudflare rate-limiting rule on this
- * route to cap how often a single IP can churn keys.
+ * re-register). That alone only bounds *concurrent* keys per IP, not how fast
+ * an IP can churn through new ones (mint, use once, re-register, repeat), so
+ * it's paired with a per-IP minute-tier rate limit (REGISTER_RATE_LIMITER) on
+ * top of the per-key rolling limits and the REGISTRATION_ENABLED kill-switch.
  */
 export async function handleRegister(request: Request, rc: RequestContext): Promise<Response> {
   const { env } = rc;
   if (!registrationEnabled(env)) {
     return fail(rc, 403, "self-registration is disabled");
+  }
+  const registeredIp = request.headers.get("CF-Connecting-IP");
+  if (registeredIp && !(await checkMinuteLimit(env.REGISTER_RATE_LIMITER, rc, registeredIp))) {
+    rc.log({ level: "warn", event: "register.denied", reason: "rate_limited", ip: registeredIp });
+    const response = fail(rc, 429, "too many registration attempts, try again later", {
+      window: "minute",
+      retryAfterSeconds: 60,
+    });
+    response.headers.set("Retry-After", "60");
+    return response;
   }
   let body: { label?: string };
   try {
@@ -300,7 +366,6 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     body = {};
   }
   const label = (body.label ?? "").trim() || "self-registered";
-  const registeredIp = request.headers.get("CF-Connecting-IP");
 
   // Enforce one active key per IP: invalidate any prior key for this IP first.
   if (registeredIp) {

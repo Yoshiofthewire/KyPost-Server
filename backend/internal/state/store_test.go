@@ -258,3 +258,43 @@ func TestNativeDeviceMFAApproverToggle(t *testing.T) {
 		t.Fatalf("expected updated=false for unknown device, got updated=%v err=%v", missing, err)
 	}
 }
+
+// TestUpsertNativeDevicePreservesRevokedMFAApprover guards against a routine
+// push-token refresh (which always re-registers with MFAApprover: true)
+// silently undoing a user's explicit revocation of a device's approver
+// status, via both the device-ID match path and the push-token+platform
+// merge path used when a device re-pairs without its ID.
+func TestUpsertNativeDevicePreservesRevokedMFAApprover(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := s.UpsertNativeDevice(NativeDevice{DeviceID: "dev-1", Platform: "ios", PushToken: "tok-1", UserID: "user-1", MFAApprover: true}); err != nil {
+		t.Fatalf("UpsertNativeDevice: %v", err)
+	}
+	if updated, err := s.SetNativeDeviceMFAApprover("dev-1", false); err != nil || !updated {
+		t.Fatalf("SetNativeDeviceMFAApprover: updated=%v err=%v", updated, err)
+	}
+
+	// A routine re-registration by device ID (e.g. push-token refresh) always
+	// sends MFAApprover: true — it must not resurrect the revoked approver.
+	if err := s.UpsertNativeDevice(NativeDevice{DeviceID: "dev-1", Platform: "ios", PushToken: "tok-1-refreshed", UserID: "user-1", MFAApprover: true}); err != nil {
+		t.Fatalf("UpsertNativeDevice (id match): %v", err)
+	}
+	got, ok := s.GetNativeDevice("dev-1")
+	if !ok || got.MFAApprover {
+		t.Fatalf("expected revoked approver to survive id-match re-registration, got %+v ok=%v", got, ok)
+	}
+
+	// Same scenario via the push-token+platform merge path (re-pair without
+	// a device ID).
+	if err := s.UpsertNativeDevice(NativeDevice{Platform: "ios", PushToken: "tok-1-refreshed", UserID: "user-1", MFAApprover: true}); err != nil {
+		t.Fatalf("UpsertNativeDevice (token match): %v", err)
+	}
+	got, ok = s.GetNativeDevice("dev-1")
+	if !ok || got.MFAApprover {
+		t.Fatalf("expected revoked approver to survive token-match re-registration, got %+v ok=%v", got, ok)
+	}
+}

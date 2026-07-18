@@ -129,12 +129,24 @@ revoke them, so you can see which keys lapsed.
 { "token": "<FCM registration token>", "title": "…", "body": "…", "data": { "url": "/read" }, "platform": "android" }
 ```
 
-Responses: `200 {"ok":true}` on delivery; `410 {"stale":true}` when the token is
-no longer registered (the Go server then removes the device); `401` for a bad or
-expired key; `429` when the per-key rate limit is exceeded (body has
-`"window":"minute"` and a `Retry-After` header); `502` for other upstream FCM
-errors. Error bodies include a `requestId` that matches the `X-Request-Id`
-response header and the structured logs.
+Responses: `200 {"ok":true}` on delivery; `403` when the token is already
+claimed by a different active key (see Token pinning below); `410 {"stale":true}`
+when the token is no longer registered (the Go server then removes the
+device); `401` for a bad or expired key; `429` when the per-key rate limit is
+exceeded (body has `"window":"minute"` and a `Retry-After` header); `502` for
+other upstream FCM errors. Error bodies include a `requestId` that matches the
+`X-Request-Id` response header and the structured logs.
+
+## Token pinning
+
+The first key to successfully deliver to a given device token "claims" it;
+every later `/send` to that token must come from the same key, or it's
+rejected with `403`. This closes the open-relay gap self-registration
+otherwise leaves: without it, any registered key could spoof push to any
+device token, including ones it has no business reaching. A claim is
+automatically released for reclaiming if the owning key is later revoked,
+disabled, or expires — so rotating your key never permanently orphans your
+own devices, it just re-claims them on the next successful send.
 
 ## Rate limiting
 

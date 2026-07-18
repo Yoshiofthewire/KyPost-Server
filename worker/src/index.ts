@@ -38,7 +38,9 @@ import {
   KEY_PREFIX,
   RequestContext,
   bearer,
+  bindToken,
   checkMinuteLimit,
+  checkTokenBinding,
   fail,
   handleAdminCreate,
   handleAdminList,
@@ -105,6 +107,12 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return fail(rc, 400, "missing token");
   }
 
+  const binding = await checkTokenBinding(env, token, record.id);
+  if (!binding.allowed) {
+    rc.log({ level: "warn", event: "send.denied", reason: "token_bound_to_other_key", keyId: record.id });
+    return fail(rc, 403, binding.reason);
+  }
+
   const config = fcmConfig(env);
   if (!isConfigured(config)) {
     rc.log({ level: "error", event: "send.misconfigured", keyId: record.id });
@@ -112,7 +120,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   }
 
   // Minute tier first (native binding, no KV). Then the hour/day tiers in KV.
-  if (!(await checkMinuteLimit(env, rc, hash))) {
+  if (!(await checkMinuteLimit(env.PUSH_RATE_LIMITER, rc, hash))) {
     rc.log({ level: "warn", event: "send.denied", reason: "rate_limited", keyId: record.id, window: "minute" });
     const response = fail(rc, 429, "rate limit exceeded", {
       window: "minute",
@@ -145,6 +153,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
 
   if (result.ok) {
     rc.log({ level: "info", event: "send.ok", keyId: record.id });
+    rc.ctx.waitUntil(bindToken(env, token, record.id));
     return json({ ok: true });
   }
   if (result.stale) {

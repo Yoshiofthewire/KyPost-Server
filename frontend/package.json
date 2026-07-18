@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@types/dompurify": "^3.0.5",
+    "dompurify": "^3.4.12",
     "openpgp": "^6.3.1",
     "qrcode": "^1.5.4",
     "quill": "^2.0.3",

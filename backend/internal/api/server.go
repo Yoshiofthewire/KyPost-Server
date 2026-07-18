@@ -31,6 +31,7 @@ import (
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/adapters/llama"
+	"llama-lab/backend/internal/captcha"
 	"llama-lab/backend/internal/config"
 	"llama-lab/backend/internal/contacts"
 	"llama-lab/backend/internal/cryptutil"
@@ -54,10 +55,14 @@ import (
 // Session tracks who a live session token belongs to. Role is deliberately
 // not stored here: currentUser looks the user up live from the users store
 // on every request so a role change or deactivation take effect on the very
-// next request rather than only at next login.
+// next request rather than only at next login. CSRFToken backs the
+// double-submit CSRF check (see csrfCheckOK) — minted alongside the session
+// and mirrored into the non-HttpOnly csrf_token cookie so the frontend can
+// read and echo it back as a header.
 type Session struct {
 	UserID    string
 	ExpiresAt time.Time
+	CSRFToken string
 }
 
 // AuthContext identifies the caller of an authenticated request.
@@ -86,9 +91,14 @@ type Server struct {
 	pairingSecret        string
 	serverBaseURL        string
 	baseURLFallbackWarn  sync.Once
+	pairingSecretWarn    sync.Once
 	nativePushDispatcher *processor.NativePushDispatcher
 	pickupStore          *pgpmail.PickupStore
 	poller               *processor.Poller
+	loginLockout         *loginLockout
+	captchaVerifier      captcha.Verifier
+	captchaProvider      captcha.Provider
+	captchaSiteKey       string
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
@@ -113,6 +123,22 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	pgpPrivateKeyPath := config.EnvOrDefault("PGP_PRIVATE_KEY_FILE", "/llama_lab/private/pgp-private-key.key")
 	pickupStoreKeyPath := config.EnvOrDefault("PICKUP_STORE_KEY_FILE", "/llama_lab/private/pickup-store.key")
 	pairingSecret := strings.TrimSpace(os.Getenv("PAIRING_SECRET"))
+
+	captchaProvider := captcha.Provider(strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER"))))
+	captchaSiteKey := strings.TrimSpace(os.Getenv("CAPTCHA_SITE_KEY"))
+	captchaVerifier, err := captcha.NewVerifier(captcha.Config{
+		Provider:  captchaProvider,
+		SiteKey:   captchaSiteKey,
+		SecretKey: strings.TrimSpace(os.Getenv("CAPTCHA_SECRET_KEY")),
+	})
+	if err != nil {
+		// Misconfigured CAPTCHA must fail closed on login (see handleLogin)
+		// rather than silently running unprotected, but must not prevent the
+		// server itself from starting.
+		logger.Error("captcha misconfigured; login CAPTCHA will reject all attempts until fixed", "error", err.Error())
+		captchaVerifier = misconfiguredCaptchaVerifier{err: err}
+	}
+
 	return &Server{
 		cfg:                  cfg,
 		onConfigUpdated:      onConfigUpdated,
@@ -140,7 +166,21 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userMail:             map[string]*serverMailEntry{},
 		subIndex:             map[string]string{},
 		davCredentials:       newDAVCredentialCache(),
+		loginLockout:         newLoginLockout(),
+		captchaVerifier:      captchaVerifier,
+		captchaProvider:      captchaProvider,
+		captchaSiteKey:       captchaSiteKey,
 	}
+}
+
+// misconfiguredCaptchaVerifier stands in for a Verifier that failed to
+// construct (e.g. CAPTCHA_PROVIDER set but CAPTCHA_SECRET_KEY missing), so
+// login fails closed with a clear error instead of silently running with no
+// CAPTCHA check at all.
+type misconfiguredCaptchaVerifier struct{ err error }
+
+func (m misconfiguredCaptchaVerifier) Verify(context.Context, string, string) (bool, error) {
+	return false, m.err
 }
 
 // SetPoller wires the background mail poller into the server so admin
@@ -159,6 +199,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
 	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	mux.HandleFunc("GET /api/auth/captcha-config", s.handleCaptchaConfig)
 	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
 	mux.HandleFunc("POST /api/auth/mfa/recovery-code", s.handleMFARecoveryCode)
 	mux.HandleFunc("POST /api/auth/mfa/push/poll", s.handlePushPoll)
@@ -2049,6 +2090,33 @@ func externalBaseURL(r *http.Request) string {
 	return proto + "://" + host
 }
 
+// clientIP best-effort resolves the caller's IP for logging/CAPTCHA context
+// (never for security decisions): X-Forwarded-For's first hop when present
+// (this app already trusts X-Forwarded-* for scheme/host, see
+// externalBaseURL/isRequestSecure), falling back to the raw connection
+// address with its port stripped.
+func clientIP(r *http.Request) string {
+	if fwd := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); fwd != "" {
+		return fwd
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
+// isRequestSecure reports whether r was received over HTTPS, either
+// directly or (per X-Forwarded-Proto) via a TLS-terminating reverse proxy.
+// Used to decide whether the session cookie can carry the Secure attribute
+// without breaking plain-HTTP local/dev deployments.
+func isRequestSecure(r *http.Request) bool {
+	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
+		return strings.EqualFold(proto, "https")
+	}
+	return r.TLS != nil
+}
+
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	store, err := s.storeFor(r)
 	if err != nil {
@@ -2998,18 +3066,51 @@ func (s *Server) handlePollNow(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+		CaptchaToken string `json:"captchaToken,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+
+	// Three-strikes/15-minute lockout, keyed by the exact username
+	// submitted regardless of whether it belongs to a real account (so
+	// lockout behavior can't be used to enumerate valid usernames).
+	if allowed, retryAfter := s.loginLockout.allowed(req.Username); !allowed {
+		retrySeconds := int(retryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "too many failed attempts, try again later",
+			"retryAfterSeconds": retrySeconds,
+		})
+		return
+	}
+
+	// CAPTCHA, when an operator has configured a provider, is required on
+	// every login attempt and checked before the password is verified so a
+	// failed/missing solution never pays scrypt's cost.
+	if s.captchaVerifier != nil {
+		ok, err := s.captchaVerifier.Verify(r.Context(), req.CaptchaToken, clientIP(r))
+		if err != nil {
+			s.logger.Error("captcha verification failed", "error", err.Error())
+			http.Error(w, "captcha verification unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !ok {
+			http.Error(w, "captcha verification failed", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	u, err := s.users.GetByUsername(req.Username)
 	if err != nil || !u.Active || !users.VerifyPassword(u, req.Password) {
+		s.loginLockout.recordFailure(req.Username)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
+	s.loginLockout.recordSuccess(req.Username)
 
 	// Second-factor users must clear a challenge before a session exists. No
 	// cookie is set here; the client receives a challenge id plus the methods it
@@ -3037,25 +3138,46 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.startSession(w, u.ID); err != nil {
+	if err := s.startSession(w, r, u.ID); err != nil {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mustChangePassword": u.MustChangePassword})
 }
 
+// handleCaptchaConfig is public (pre-login) and tells the frontend which
+// CAPTCHA widget, if any, to render on the login form. provider=="" means
+// CAPTCHA is disabled. siteKey is the provider's public site key — safe to
+// expose, unlike the secret key used server-side for verification.
+func (s *Server) handleCaptchaConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": s.captchaProvider,
+		"siteKey":  s.captchaSiteKey,
+	})
+}
+
 // startSession mints a session token for userID, records it, and sets the
 // llama_session cookie with exactly the flags the legacy password-only login
 // used. Shared by handleLogin and the second-factor endpoints.
-func (s *Server) startSession(w http.ResponseWriter, userID string) error {
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID string) error {
 	token, err := randomToken(24)
 	if err != nil {
 		return err
 	}
+	csrfToken, err := randomToken(24)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
-	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour)}
+	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	secure := isRequestSecure(r)
+	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+	// Deliberately NOT HttpOnly: the frontend must be able to read this and
+	// echo it back as the X-CSRF-Token header (double-submit pattern) — see
+	// csrfCheckOK. It carries no authority on its own without the paired
+	// HttpOnly session cookie, so JS-readability doesn't weaken the session.
+	http.SetCookie(w, &http.Cookie{Name: "csrf_token", Value: csrfToken, Path: "/", HttpOnly: false, Secure: secure, SameSite: http.SameSiteLaxMode})
 	return nil
 }
 
@@ -3112,7 +3234,7 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mfaChallenges.Delete(ch.ID)
-	if err := s.startSession(w, u.ID); err != nil {
+	if err := s.startSession(w, r, u.ID); err != nil {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}
@@ -3156,7 +3278,7 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mfaChallenges.Delete(ch.ID)
-	if err := s.startSession(w, u.ID); err != nil {
+	if err := s.startSession(w, r, u.ID); err != nil {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}
@@ -3170,7 +3292,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, c.Value)
 		s.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	secure := isRequestSecure(r)
+	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "csrf_token", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: false, Secure: secure, SameSite: http.SameSiteLaxMode})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -3330,8 +3454,46 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
+		if !s.csrfCheckOK(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "missing or invalid csrf token"})
+			return
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
+}
+
+// csrfCheckOK enforces a double-submit CSRF check on cookie-authenticated,
+// state-changing (non-GET/HEAD/OPTIONS) requests: the X-CSRF-Token header
+// must match the csrf_token minted alongside the caller's session (see
+// startSession). It intentionally does nothing when no llama_session cookie
+// is present — mobile clients (subscriberId/subscriberHash query params, see
+// resolveMailAuthContext) and CardDAV (HTTP Basic Auth) never send that
+// cookie, so they carry no ambient, forgeable credential for CSRF to exploit
+// in the first place and are structurally exempt rather than specially
+// carved out here.
+func (s *Server) csrfCheckOK(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	cookie, err := r.Cookie("llama_session")
+	if err != nil {
+		return true
+	}
+	s.mu.RLock()
+	sess, ok := s.sessions[cookie.Value]
+	s.mu.RUnlock()
+	if !ok {
+		// No matching session for this cookie value: either it's stale (the
+		// caller-visible auth check elsewhere will already reject the
+		// request) or this request actually authenticated via a different,
+		// cookie-free path (e.g. withMailAuth's mobile fallback) despite an
+		// unrelated cookie being present. Either way there's no session CSRF
+		// token to check against.
+		return true
+	}
+	header := r.Header.Get("X-CSRF-Token")
+	return header != "" && subtle.ConstantTimeCompare([]byte(header), []byte(sess.CSRFToken)) == 1
 }
 
 // withMailAuth gates endpoints mobile clients need to reach without a web
@@ -3350,6 +3512,10 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+		if !s.csrfCheckOK(r) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "missing or invalid csrf token"})
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
@@ -3393,7 +3559,7 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 		return AuthContext{}, false
 	}
 	// Sliding window session expiry for active users.
-	s.sessions[cookie.Value] = Session{UserID: sess.UserID, ExpiresAt: time.Now().Add(24 * time.Hour)}
+	s.sessions[cookie.Value] = Session{UserID: sess.UserID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: sess.CSRFToken}
 	s.mu.Unlock()
 
 	u, err := s.users.Get(sess.UserID)

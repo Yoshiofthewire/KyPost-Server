@@ -107,6 +107,31 @@ func TestHandlePickupSecondViewIsGone(t *testing.T) {
 	}
 }
 
+// TestHandlePickupRefusesWhenPairingSecretUnset guards against pickup tokens
+// being silently HMAC-signed with a known-empty key: both the page and the
+// notification sender must fail closed instead of degrading silently when
+// PAIRING_SECRET was never configured.
+func TestHandlePickupRefusesWhenPairingSecretUnset(t *testing.T) {
+	srv := newTestServer(t)
+	srv.pairingSecret = ""
+
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", time.Hour)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t=anything", nil)
+	rec := httptest.NewRecorder()
+	pickupMux(srv).ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+
+	if err := srv.sendPickupNotification("user-1", "from@example.com", "recipient@example.com", "Subject", "Body", "smtp.example.com", 587, "smtp.example.com:587", "user", "pass"); err == nil {
+		t.Fatalf("sendPickupNotification: expected error when PAIRING_SECRET is unset, got nil")
+	}
+}
+
 func TestHandlePickupUnknownIDIsGone(t *testing.T) {
 	srv := newTestServer(t)
 

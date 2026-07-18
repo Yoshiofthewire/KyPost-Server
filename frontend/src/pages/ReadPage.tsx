@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
+import DOMPurify from "dompurify";
 import { getJSON, postJSON, toErrorMessage } from "../api/client";
 import { usePagination } from "../hooks/usePagination";
 import { PageTabs } from "../components/PageTabs";
@@ -125,12 +126,24 @@ function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
   })}`;
 }
 
+// sanitizeEmailHtml is the one and only place untrusted HTML email content
+// (sender-controlled — the single highest-risk XSS input in a mail client)
+// is allowed to become live markup. Every caller that turns an email body
+// into DOM (the read view, and reply/forward quoting into the compose
+// editor) must route through this as the *last* transformation step, so
+// nothing added earlier survives untouched.
+function sanitizeEmailHtml(html: string): string {
+  return DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+}
+
 function processEmailHtml(html: string, showImages: boolean): string {
   // Extract body content if it's a full HTML document
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
   const content = bodyMatch ? bodyMatch[1] : html;
 
   if (typeof window === "undefined") {
+    // No DOM available to sanitize against (DOMPurify requires one); this
+    // path exists only as a defensive SSR guard and never renders directly.
     if (showImages) return content;
     return content.replace(/<img[^>]*>/gi, "[Image Blocked]");
   }
@@ -139,7 +152,7 @@ function processEmailHtml(html: string, showImages: boolean): string {
   const document = parser.parseFromString(`<div>${content}</div>`, "text/html");
   const root = document.body.firstElementChild;
   if (!root) {
-    return content;
+    return sanitizeEmailHtml(content);
   }
 
   root.querySelectorAll("a[href]").forEach((anchor) => {
@@ -153,7 +166,7 @@ function processEmailHtml(html: string, showImages: boolean): string {
     });
   }
 
-  return root.innerHTML;
+  return sanitizeEmailHtml(root.innerHTML);
 }
 
 function firstAddressFromText(value: string): string {
@@ -208,7 +221,7 @@ function buildReplyBody(email: InboxEmail): string {
   const subject = email.subject || "(no subject)";
   const body = email.body || "";
   const isHtml = /<[^>]+>/.test(body);
-  const rendered = isHtml ? body : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
+  const rendered = isHtml ? sanitizeEmailHtml(body) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
   return [
     "<p><br /></p>",
     `<p>On ${escapeHtml(time)}, ${escapeHtml(sender)} wrote:</p>`,
@@ -226,7 +239,7 @@ function buildForwardBody(email: InboxEmail): string {
   const subject = email.subject || "(no subject)";
   const body = email.body || "";
   const isHtml = /<[^>]+>/.test(body);
-  const rendered = isHtml ? body : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
+  const rendered = isHtml ? sanitizeEmailHtml(body) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
   return [
     "<p><br /></p>",
     "<p>---------- Forwarded message ----------</p>",
@@ -939,12 +952,17 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
 
   async function openEmailDetails(item: InboxEmail) {
     if (isDraftMailbox && onOpenDraft) {
+      const body = item.body ?? "";
       onOpenDraft({
         sentTo: item.sentTo,
         cc: item.cc,
         bcc: item.bcc,
         subject: item.subject,
-        body: item.body
+        // Same sink as buildReplyBody/buildForwardBody (composeHtmlBody ->
+        // editor.root.innerHTML): a draft's stored body is HTML and must be
+        // sanitized before it can become live markup, same as any other
+        // untrusted HTML entering the compose editor.
+        body: /<[^>]+>/.test(body) ? sanitizeEmailHtml(body) : body
       });
       return;
     }

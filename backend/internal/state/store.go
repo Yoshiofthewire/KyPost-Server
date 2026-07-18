@@ -615,6 +615,11 @@ func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 			if device.RegisteredAt == "" {
 				device.RegisteredAt = existing.RegisteredAt
 			}
+			// A re-registration (e.g. routine push-token refresh) must not
+			// silently undo an explicit MFAApprover choice made via
+			// SetNativeDeviceMFAApprover — only that dedicated endpoint may
+			// change approver status for an already-known device.
+			device.MFAApprover = existing.MFAApprover
 			s.nativeDevices[i] = device
 			s.nativeDevicesDirty = true
 			return s.persistLocked()
@@ -629,6 +634,7 @@ func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 			if existing.PushToken == device.PushToken && existing.Platform == device.Platform {
 				device.DeviceID = existing.DeviceID
 				device.RegisteredAt = existing.RegisteredAt
+				device.MFAApprover = existing.MFAApprover
 				s.nativeDevices[i] = device
 				s.nativeDevicesDirty = true
 				return s.persistLocked()
