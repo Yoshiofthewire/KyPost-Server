@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/adapters/classifier"
+	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/logging"
@@ -27,7 +27,7 @@ import (
 )
 
 // maxConcurrentUserTicks bounds how many user mailboxes are polled in
-// parallel. The shared Llama client serializes classify calls anyway, so
+// parallel. The shared classifier client serializes classify calls anyway, so
 // this mainly overlaps IMAP fetch latency across users.
 const maxConcurrentUserTicks = 4
 
@@ -46,7 +46,7 @@ type Poller struct {
 	// the one shared LLM backend. Per-user mailbox state lives in stores.
 	globalStore          *state.Store
 	health               *health.Service
-	llama                *classifier.HTTPClient
+	classifier           *classifier.HTTPClient
 	redaction            *redaction.Engine
 	nativePushDispatcher *NativePushDispatcher
 	cancel               context.CancelFunc
@@ -88,7 +88,7 @@ type userCtx struct {
 	rules []rules.Rule
 }
 
-func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, llamaClient *classifier.HTTPClient) (*Poller, error) {
+func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, classifierClient *classifier.HTTPClient) (*Poller, error) {
 	re, err := redaction.New(cfg.Redaction.Patterns)
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		users:                usersStore,
 		globalStore:          globalStore,
 		health:               healthSvc,
-		llama:                llamaClient,
+		classifier:           classifierClient,
 		redaction:            re,
 		nativePushDispatcher: NewNativePushDispatcher(log),
 		stateDir:             stateDir,
@@ -529,7 +529,7 @@ func (p *Poller) reloadConfigIfNeeded() {
 	p.UpdateConfig(next)
 }
 
-// recentDecisionsContext returns a short summary of the last N applied decisions to give Llama labelling context.
+// recentDecisionsContext returns a short summary of the last N applied decisions to give classifier labelling context.
 func recentDecisionsContext(store *state.Store, limit int) string {
 	all := store.Decisions(50)
 	var applied []state.Decision
@@ -674,14 +674,14 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		}
 	}
 
-	label, err := classifyWithRetry(ctx, p.llama, cfg.Labels.Allowlist, msg.Sender, msg.Subject, bodyWithContext, uc.tuning)
+	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, msg.Sender, msg.Subject, bodyWithContext, uc.tuning)
 	if err != nil {
 		if isAICreditsExhaustedError(err) {
 			p.flagAICreditsExhausted()
 		}
 		return err
 	}
-	// A successful classification means Llama has credits again; clear any flag.
+	// A successful classification means the classifier has credits again; clear any flag.
 	p.clearAICreditsExhausted()
 	p.log.Info("classification result", "user_id", uc.id, "message_id", msg.ID, "raw_label", strings.TrimSpace(label), "sender", msg.Sender, "subject", msg.Subject)
 	selected := classifier.SelectLabelFromText(cfg.Labels.Allowlist, label)
@@ -960,18 +960,18 @@ func classifyWithRetry(ctx context.Context, c *classifier.HTTPClient, labels []s
 		if err == nil && out != "" {
 			return out, nil, false
 		}
-		if err != nil && isPermanentLlamaClassifyError(err) {
+		if err != nil && isPermanentClassifierError(err) {
 			return "", err, false
 		}
 		if err == nil {
 			// Classify returned no error but an empty label — treat as retryable.
-			err = fmt.Errorf("llama returned empty label")
+			err = fmt.Errorf("classifier returned empty label")
 		}
 		return "", err, true
 	})
 }
 
-func isPermanentLlamaClassifyError(err error) bool {
+func isPermanentClassifierError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -982,14 +982,14 @@ func isPermanentLlamaClassifyError(err error) bool {
 	if strings.Contains(msg, "invalid input") || strings.Contains(msg, "unprocessable") {
 		return true
 	}
-	// Out of AI credits will not recover on retry; stop hammering Llama.
+	// Out of AI credits will not recover on retry; stop hammering the classifier.
 	if isAICreditsExhaustedError(err) {
 		return true
 	}
 	return false
 }
 
-// isAICreditsExhaustedError reports whether a classify error is Llama signalling
+// isAICreditsExhaustedError reports whether a classify error is the classifier signalling
 // that the weekly chat limit / AI credits have been exhausted.
 func isAICreditsExhaustedError(err error) bool {
 	if err == nil {
@@ -1010,8 +1010,8 @@ func (p *Poller) flagAICreditsExhausted() {
 	}
 	p.health.SetAICreditsExhausted(now)
 	if newly {
-		p.log.Error("Llama AI credits exhausted; email classification paused until credits reset",
-			"detail", "Llama returned the weekly chat limit response")
+		p.log.Error("AI credits exhausted; email classification paused until credits reset",
+			"detail", "classifier returned the weekly chat limit response")
 	}
 }
 
@@ -1026,7 +1026,7 @@ func (p *Poller) clearAICreditsExhausted() {
 	}
 	p.health.ClearAICreditsExhausted()
 	if cleared {
-		p.log.Info("Llama AI credits restored; email classification resumed")
+		p.log.Info("AI credits restored; email classification resumed")
 	}
 }
 

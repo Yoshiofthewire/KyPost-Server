@@ -122,13 +122,13 @@ type runDeps struct {
 }
 
 func runDaemon(d runDeps) error {
-	llamaClient := newLlamaClient(d.cfg)
-	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, llamaClient)
+	classifierClient := newClassifierClient(d.cfg)
+	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient)
 	if err != nil {
 		return err
 	}
 	poller.SetConfigPath(d.configPath)
-	warmupLlamaOnStartup(d.logger, llamaClient, poller)
+	warmupClassifierOnStartup(d.logger, classifierClient, poller)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go poller.Run()
@@ -151,15 +151,15 @@ func runAll(d runDeps) error {
 	if exhausted, at := d.store.AICreditsExhausted(); exhausted {
 		d.health.SetAICreditsExhausted(at)
 	}
-	llamaClient := newLlamaClient(d.cfg)
-	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, llamaClient)
+	classifierClient := newClassifierClient(d.cfg)
+	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient)
 	if err != nil {
 		return err
 	}
 	poller.SetConfigPath(d.configPath)
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, poller.UpdateConfig)
 	srv.SetPoller(poller)
-	warmupLlamaOnStartup(d.logger, llamaClient, poller)
+	warmupClassifierOnStartup(d.logger, classifierClient, poller)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -226,12 +226,12 @@ func monitorHealth(logger *logging.Logger, healthSvc *health.Service) {
 	}
 }
 
-// newLlamaClient builds the one shared LLM client. config.yaml wins when it
+// newClassifierClient builds the one shared LLM client. config.yaml wins when it
 // points somewhere real; the OLLAMA_* env vars are the fallback so existing
 // env-only deployments keep working. The persisted legacy config default
 // ("http://127.0.0.1:3333" with path "/") predates the Ollama runtime and
 // is treated as unset.
-func newLlamaClient(cfg config.Config) *classifier.HTTPClient {
+func newClassifierClient(cfg config.Config) *classifier.HTTPClient {
 	const legacyDeadDefault = "http://127.0.0.1:3333"
 
 	baseURL := strings.TrimSpace(cfg.Classifier.BaseURL)
@@ -239,7 +239,7 @@ func newLlamaClient(cfg config.Config) *classifier.HTTPClient {
 	if !fromConfig {
 		baseURL = strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL"))
 		if baseURL == "" {
-			baseURL = strings.TrimSpace(os.Getenv("LLAMA_BASE_URL"))
+			baseURL = strings.TrimSpace(os.Getenv("CLASSIFIER_BASE_URL"))
 		}
 		if baseURL == "" {
 			baseURL = "http://127.0.0.1:11434"
@@ -268,7 +268,7 @@ func newLlamaClient(cfg config.Config) *classifier.HTTPClient {
 	return classifier.NewHTTPClient(baseURL, apiKey, classifyPath, tuning, 3*time.Minute)
 }
 
-func warmupLlamaOnStartup(logger *logging.Logger, client *classifier.HTTPClient, poller *processor.Poller) {
+func warmupClassifierOnStartup(logger *logging.Logger, client *classifier.HTTPClient, poller *processor.Poller) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
