@@ -294,7 +294,12 @@ export function ContactsPage() {
 
   async function loadContacts(): Promise<Contact[]> {
     const next = await listContacts();
-    next.sort((a, b) => a.fn.localeCompare(b.fn));
+    next.sort((a, b) => {
+      if (a.isSelf !== b.isSelf) {
+        return a.isSelf ? -1 : 1;
+      }
+      return a.fn.localeCompare(b.fn);
+    });
     setContacts(next);
     return next;
   }
