@@ -1,7 +1,7 @@
 services:
   llama-lab:
     build: .
-    container_name: llama-lab
+    container_name: KyPost-Server
     ports:
       - "5866:5866"
     #  - "11434:11434"  #Uncomment to expose Ollama API
