@@ -63,7 +63,7 @@ func TestHandleContactSelf_UnknownIDReturns404(t *testing.T) {
 // TestContactSelfEndpointRoutesThroughRealMux drives the endpoint through
 // the server's real route table (not a hand-wired middleware call) so it
 // fails if the route registration in server.go is ever dropped — same
-// pattern as TestContactsDedupeAcceptsSubscriberHash.
+// pattern as TestContactsDedupeAcceptsDeviceCredentials.
 func TestContactSelfEndpointRoutesThroughRealMux(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)

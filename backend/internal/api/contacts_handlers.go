@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -350,32 +349,17 @@ type contactsSyncPushRequest struct {
 
 // handleContactsSync is the mobile two-way sync endpoint. It is unauthenticated
 // by web session — like handleNotificationNativePull, the caller proves
-// ownership with the subscriberId + subscriberHash minted during device
-// pairing (GET /api/notifications/pairing / POST /api/notifications/native/register),
-// sent via the X-Kypost-Subscriber-Id/X-Kypost-Subscriber-Hash headers or,
-// as a legacy fallback, ?sub=&hash= query params (see
-// docs/superpowers/plans/2026-07-19-pairing-auth-headers.md).
+// ownership of a specific paired device with the deviceId + deviceSecret
+// minted during registration (POST /api/notifications/native/register), sent
+// via the X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see
+// device_auth.go).
 func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
-	if s.pairingSecret == "" {
-		http.Error(w, "pairing is not configured", http.StatusServiceUnavailable)
+	userID, _, ok := s.deviceAuthFromRequest(r)
+	if !ok {
+		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
 		return
 	}
-	subscriberID, subscriberHash := pairingCredentialsFromRequest(r)
-	if subscriberID == "" || subscriberHash == "" {
-		http.Error(w, "sub and hash are required", http.StatusBadRequest)
-		return
-	}
-	expectedHash := s.pairingSubscriberHash(subscriberID)
-	if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
-		http.Error(w, "invalid subscriber hash", http.StatusUnauthorized)
-		return
-	}
-	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
-	if !okOwner {
-		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
-		return
-	}
-	store, err := s.userContactsStore(ownerID)
+	store, err := s.userContactsStore(userID)
 	if err != nil {
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
 		return
@@ -405,7 +389,7 @@ func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(change.FormattedName) == "" {
 				continue
 			}
-			change.GroupIDs = s.sanitizeGroupIDsForUser(ownerID, change.GroupIDs)
+			change.GroupIDs = s.sanitizeGroupIDsForUser(userID, change.GroupIDs)
 			if _, err := store.Upsert(change.toContact(uid)); err != nil {
 				http.Error(w, "failed to apply change", http.StatusInternalServerError)
 				return

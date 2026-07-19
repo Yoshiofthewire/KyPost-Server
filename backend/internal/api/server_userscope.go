@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -41,15 +40,9 @@ func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, userID stri
 // credentials yet; handlers translate it into a 400 with a clear message.
 var errIMAPNotConfigured = errors.New("imap configuration is required")
 
-// errMailUnauthorized and errMailPairingNotConfigured are the two failure
-// modes withMailAuth distinguishes: a bad/missing credential (401) versus a
-// mobile-shaped request (sub+hash supplied) hitting a server that has no
-// PAIRING_SECRET set (503) — mirroring handleContactsSync's precedent
-// without misreporting 503 for an ordinary unauthenticated web request.
-var (
-	errMailUnauthorized         = errors.New("unauthorized")
-	errMailPairingNotConfigured = errors.New("pairing is not configured")
-)
+// errMailUnauthorized is returned by resolveMailAuthContext for any failed
+// auth attempt (no session, no/invalid device credentials).
+var errMailUnauthorized = errors.New("unauthorized")
 
 func (s *Server) userConfigDir(userID string) string {
 	return filepath.Join(s.configDir, "users", userID)
@@ -235,35 +228,21 @@ func (s *Server) mailFor(r *http.Request) (imapadapter.Client, error) {
 }
 
 // resolveMailAuthContext authenticates a mail request either by session
-// cookie (web) or by subscriberId/subscriberHash pairing credentials
-// (mobile/native, reusing the same pairing trust boundary as native push
-// and contacts sync — see contacts_handlers.go's handleContactsSync).
-// Pairing credentials are read from the X-Kypost-Subscriber-Id/
-// X-Kypost-Subscriber-Hash headers, falling back to the legacy ?sub=&hash=
-// query params for clients that haven't updated yet (see
-// docs/superpowers/plans/2026-07-19-pairing-auth-headers.md). Mobile
-// never sees or sets raw IMAP/SMTP credentials; it only acts on an account
-// already configured through the web UI.
+// cookie (web) or by per-device pairing credentials (mobile/native, reusing
+// the same device trust boundary as native push and contacts sync — see
+// contacts_handlers.go's handleContactsSync). Device credentials are read
+// from the X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see
+// device_auth.go). Mobile never sees or sets raw IMAP/SMTP credentials; it
+// only acts on an account already configured through the web UI.
 func (s *Server) resolveMailAuthContext(r *http.Request) (AuthContext, error) {
 	if ac, ok := s.currentUser(r); ok {
 		return ac, nil
 	}
-	subscriberID, subscriberHash := pairingCredentialsFromRequest(r)
-	if subscriberID == "" || subscriberHash == "" {
-		return AuthContext{}, errMailUnauthorized
-	}
-	if s.pairingSecret == "" {
-		return AuthContext{}, errMailPairingNotConfigured
-	}
-	expectedHash := s.pairingSubscriberHash(subscriberID)
-	if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
-		return AuthContext{}, errMailUnauthorized
-	}
-	ownerID, ok := s.lookupUserBySubscriber(subscriberID)
+	userID, _, ok := s.deviceAuthFromRequest(r)
 	if !ok {
 		return AuthContext{}, errMailUnauthorized
 	}
-	return AuthContext{UserID: ownerID}, nil
+	return AuthContext{UserID: userID}, nil
 }
 
 func (s *Server) invalidateUserMail(userID string) {
@@ -325,5 +304,64 @@ func (s *Server) rescanSubscriberIndex() {
 	}
 	s.userMu.Lock()
 	s.subIndex = next
+	s.userMu.Unlock()
+}
+
+// lookupUserByDevice maps a per-device ID back to its owning user, for the
+// ongoing device-auth path (mail/contacts/pull/push-approve/deregister).
+// Lazily rebuilt on a miss, mirroring lookupUserBySubscriber.
+func (s *Server) lookupUserByDevice(deviceID string) (string, bool) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return "", false
+	}
+	s.userMu.Lock()
+	if userID, ok := s.deviceIndex[deviceID]; ok {
+		s.userMu.Unlock()
+		return userID, true
+	}
+	s.userMu.Unlock()
+
+	s.rescanDeviceIndex()
+
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	userID, ok := s.deviceIndex[deviceID]
+	return userID, ok
+}
+
+// rescanDeviceIndex rebuilds deviceID -> userID by reading every per-user
+// state.json's nativeDevices array. Mirrors rescanSubscriberIndex.
+func (s *Server) rescanDeviceIndex() {
+	usersDir := filepath.Join(s.stateDir, "users")
+	entries, err := os.ReadDir(usersDir)
+	if err != nil {
+		return
+	}
+	next := map[string]string{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(usersDir, e.Name(), "state.json"))
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			NativeDevices []struct {
+				DeviceID string `json:"deviceId"`
+			} `json:"nativeDevices"`
+		}
+		if err := json.Unmarshal(b, &doc); err != nil {
+			continue
+		}
+		for _, d := range doc.NativeDevices {
+			if id := strings.TrimSpace(d.DeviceID); id != "" {
+				next[id] = e.Name()
+			}
+		}
+	}
+	s.userMu.Lock()
+	s.deviceIndex = next
 	s.userMu.Unlock()
 }

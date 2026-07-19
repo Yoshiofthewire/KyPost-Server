@@ -119,13 +119,13 @@ func TestPGPQREndpointsFailClosedOnUnsetPairingSecret(t *testing.T) {
 	}
 }
 
-// TestPGPQRTokenAcceptsSubscriberHash drives the endpoint through the
+// TestPGPQRTokenAcceptsDeviceCredentials drives the endpoint through the
 // server's real route table (not a hand-wired middleware call) so it fails
 // if GET /api/pgp/qr/token is ever wired back to withAuth instead of
 // withMailAuth. llama-mobile's "My QR Code" screen has no session cookie —
-// sub/hash pairing is its only credential — so this endpoint must accept it
-// or that screen can never authenticate at all.
-func TestPGPQRTokenAcceptsSubscriberHash(t *testing.T) {
+// its own device pairing credential is all it has — so this endpoint must
+// accept it or that screen can never authenticate at all.
+func TestPGPQRTokenAcceptsDeviceCredentials(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 
@@ -141,19 +141,15 @@ func TestPGPQRTokenAcceptsSubscriberHash(t *testing.T) {
 		t.Fatalf("SetPGPIdentity: %v", err)
 	}
 
-	subStore := testUserStore(t, srv)
-	subscriberID, err := subStore.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
-	}
-	hash := srv.pairingSubscriberHash(subscriberID)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "pgp-qr-device")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/pgp/qr/token?sub="+subscriberID+"&hash="+hash, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/qr/token", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
 	srv.routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d (pairing auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("status = %d, want %d (device auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 

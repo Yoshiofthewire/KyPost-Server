@@ -95,6 +95,18 @@ type NativeDevice struct {
 	// Transport specifies the push delivery transport: "fcm", "apns", or "unifiedpush".
 	// Empty/absent means derive from Platform: "ios"/"macos" -> "apns", else "fcm".
 	Transport string `json:"transport,omitempty"`
+	// SecretHash is the scrypt-encoded hash (users.HashPassword format) of this
+	// device's own pairing secret, minted once at registration. The raw secret
+	// is never stored, only this hash, and it must never be serialized into an
+	// API response — see Redacted().
+	SecretHash string `json:"secretHash,omitempty"`
+}
+
+// Redacted returns a copy of d with SecretHash cleared, safe to serialize into
+// an API response.
+func (d NativeDevice) Redacted() NativeDevice {
+	d.SecretHash = ""
+	return d
 }
 
 // PullNotification is one queued notification awaiting an App Pull fetch. Seq

@@ -309,23 +309,19 @@ func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 
 // TestCSRFProtectionSkipsRequestsWithoutSessionCookie guards the scoping
 // that keeps CSRF protection from ever touching mobile: withMailAuth's
-// subscriberId/subscriberHash path (no cookie at all) must not require a
-// CSRF header, since a request with no session cookie carries no ambient,
-// forgeable credential for CSRF to exploit.
+// device-credential path (no cookie at all) must not require a CSRF header,
+// since a request with no session cookie carries no ambient, forgeable
+// credential for CSRF to exploit.
 func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 	srv := newTestServer(t)
-	srv.pairingSecret = "test-pairing-secret"
 	u, err := srv.users.Create("ivan", "pw-ivan", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	const subscriberID = "sub-ivan"
-	srv.userMu.Lock()
-	srv.subIndex[subscriberID] = u.ID
-	srv.userMu.Unlock()
+	deviceID, deviceSecret := pairNativeDevice(t, srv, u.ID, "csrf-device")
 
-	hash := srv.pairingSubscriberHash(subscriberID)
-	req := httptest.NewRequest(http.MethodPost, "/api/inbox/actions?sub="+subscriberID+"&hash="+hash, bytes.NewReader([]byte(`{"action":"read","messageIds":[]}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/inbox/actions", bytes.NewReader([]byte(`{"action":"read","messageIds":[]}`)))
+	setDeviceHeaders(req, deviceID, deviceSecret)
 	rec := httptest.NewRecorder()
 	srv.withMailAuth(srv.handleInboxActions)(rec, req)
 	if rec.Code == http.StatusForbidden {

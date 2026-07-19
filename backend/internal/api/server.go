@@ -102,7 +102,8 @@ type Server struct {
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
-	// pairing registration endpoint.
+	// pairing registration endpoint, and the deviceID -> userID index used
+	// by ongoing per-device auth (deviceAuthFromRequest).
 	userMu         sync.Mutex
 	userStores     map[string]*state.Store
 	userContacts   map[string]*contacts.Store
@@ -111,6 +112,7 @@ type Server struct {
 	userMailCache  map[string]*mailcache.Store
 	userMail       map[string]*serverMailEntry
 	subIndex       map[string]string
+	deviceIndex    map[string]string
 	davCredentials davCredentialCache
 }
 
@@ -165,6 +167,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userMailCache:        map[string]*mailcache.Store{},
 		userMail:             map[string]*serverMailEntry{},
 		subIndex:             map[string]string{},
+		deviceIndex:          map[string]string{},
 		davCredentials:       newDAVCredentialCache(),
 		loginLockout:         newLoginLockout(),
 		captchaVerifier:      captchaVerifier,
@@ -260,6 +263,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
+	mux.HandleFunc("POST /api/notifications/native/deregister", s.handleNotificationNativeDeregister)
 	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
 	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
 	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
@@ -1591,7 +1595,6 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		resp["configurationError"] = configurationError
 	}
 	if configured {
-		resp["subscriberHash"] = s.pairingSubscriberHash(subscriberID)
 		token, expiresAt, err := s.createPairingToken(subscriberID, time.Duration(pairingTTLSeconds)*time.Second)
 		if err != nil {
 			s.logger.Error("failed to create pairing token", "subscriber_id", subscriberID, "error", err.Error())
@@ -1605,15 +1608,14 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 }
 
 type nativeRegisterRequest struct {
-	SubscriberID   string `json:"subscriberId"`
-	SubscriberHash string `json:"subscriberHash"`
-	PairingToken   string `json:"pairingToken"`
-	DeviceToken    string `json:"deviceToken"`
-	DeviceID       string `json:"deviceId,omitempty"`
-	Platform       string `json:"platform,omitempty"`
-	Transport      string `json:"transport,omitempty"`
-	DeviceName     string `json:"deviceName,omitempty"`
-	AppVersion     string `json:"appVersion,omitempty"`
+	SubscriberID string `json:"subscriberId"`
+	PairingToken string `json:"pairingToken"`
+	DeviceToken  string `json:"deviceToken"`
+	DeviceID     string `json:"deviceId,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	Transport    string `json:"transport,omitempty"`
+	DeviceName   string `json:"deviceName,omitempty"`
+	AppVersion   string `json:"appVersion,omitempty"`
 }
 
 func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http.Request) {
@@ -1629,7 +1631,6 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	}
 
 	subscriberID := strings.TrimSpace(req.SubscriberID)
-	subscriberHash := strings.ToLower(strings.TrimSpace(req.SubscriberHash))
 	pairingToken := strings.TrimSpace(req.PairingToken)
 	deviceToken := strings.TrimSpace(req.DeviceToken)
 	if subscriberID == "" || pairingToken == "" || deviceToken == "" {
@@ -1659,13 +1660,6 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
 		return
 	}
-	if subscriberHash != "" {
-		expectedHash := s.pairingSubscriberHash(subscriberID)
-		if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
-			http.Error(w, "invalid subscriber hash", http.StatusUnauthorized)
-			return
-		}
-	}
 
 	// The pairing token proved this device was handed a QR minted by a
 	// signed-in user; resolve which user's device list to write into.
@@ -1680,6 +1674,20 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Mint this device's own pairing secret. Only its hash is ever persisted
+	// (see state.NativeDevice.SecretHash); the raw value is returned once
+	// below and never retrievable again.
+	rawSecret, err := randomToken(24)
+	if err != nil {
+		http.Error(w, "failed to mint device secret", http.StatusInternalServerError)
+		return
+	}
+	secretHash, err := users.HashPassword(rawSecret)
+	if err != nil {
+		http.Error(w, "failed to mint device secret", http.StatusInternalServerError)
+		return
+	}
+
 	device := state.NativeDevice{
 		DeviceID:    strings.TrimSpace(req.DeviceID),
 		Platform:    platform,
@@ -1690,6 +1698,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		UserAgent:   strings.TrimSpace(r.Header.Get("User-Agent")),
 		UserID:      ownerID,
 		MFAApprover: true,
+		SecretHash:  secretHash,
 	}
 	if err := store.UpsertNativeDevice(device); err != nil {
 		http.Error(w, "failed to persist native device", http.StatusInternalServerError)
@@ -1708,6 +1717,10 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
+	s.userMu.Lock()
+	s.deviceIndex[registeredDeviceID] = ownerID
+	s.userMu.Unlock()
+
 	serverBaseURL := s.serverBaseURL
 	if serverBaseURL == "" {
 		serverBaseURL = externalBaseURL(r)
@@ -1721,6 +1734,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		"ok":           true,
 		"synced":       true,
 		"deviceId":     registeredDeviceID,
+		"deviceSecret": rawSecret,
 		"devices":      len(devices),
 		"deliveryMode": store.NativeDeliveryMode(),
 		"pullEndpoint": pullEndpoint,
@@ -1736,7 +1750,12 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"devices": store.ListNativeDevices()})
+		devices := store.ListNativeDevices()
+		redacted := make([]state.NativeDevice, len(devices))
+		for i, d := range devices {
+			redacted[i] = d.Redacted()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"devices": redacted})
 	case http.MethodDelete:
 		var payload struct {
 			DeviceID string `json:"deviceId"`
@@ -1755,6 +1774,9 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 			http.Error(w, "failed to remove native device", http.StatusInternalServerError)
 			return
 		}
+		s.userMu.Lock()
+		delete(s.deviceIndex, deviceID)
+		s.userMu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
 	}
 }
@@ -1809,9 +1831,38 @@ func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.R
 		}
 		if ok {
 			removed++
+			s.userMu.Lock()
+			delete(s.deviceIndex, device.DeviceID)
+			s.userMu.Unlock()
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
+}
+
+// handleNotificationNativeDeregister lets a paired device remove itself —
+// e.g. on app logout/uninstall — without going through a web session. It
+// authenticates with the device's own X-Kypost-Device-Id/
+// X-Kypost-Device-Secret credentials (deviceAuthFromRequest), so a device can
+// only ever remove itself, never another device on the account.
+func (s *Server) handleNotificationNativeDeregister(w http.ResponseWriter, r *http.Request) {
+	userID, device, ok := s.deviceAuthFromRequest(r)
+	if !ok {
+		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+		return
+	}
+	store, err := s.userStore(userID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	if _, err := store.RemoveNativeDevice(device.DeviceID); err != nil {
+		http.Error(w, "failed to remove device", http.StatusInternalServerError)
+		return
+	}
+	s.userMu.Lock()
+	delete(s.deviceIndex, device.DeviceID)
+	s.userMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleNotificationNativeMode switches native delivery between the relay-backed
@@ -1843,35 +1894,19 @@ func (s *Server) handleNotificationNativeMode(w http.ResponseWriter, r *http.Req
 
 // handleNotificationNativePull serves queued notifications to a paired mobile
 // app polling over plain HTTP — the App Pull path that bypasses the Cloudflare
-// relay and Firebase entirely. It is unauthenticated by web session; the device
-// proves ownership with the subscriber id + subscriber hash it received during
-// pairing (the same stable HMAC the register endpoint validates), sent via
-// the X-Kypost-Subscriber-Id/X-Kypost-Subscriber-Hash headers or, as a
-// legacy fallback, ?sub=&hash= query params (see
-// docs/superpowers/plans/2026-07-19-pairing-auth-headers.md). The
+// relay and Firebase entirely. It is unauthenticated by web session; the
+// device proves it is that specific still-paired device with its own
+// deviceId + deviceSecret (minted at registration), sent via the
+// X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see device_auth.go). The
 // client passes ?after=<cursor> to fetch only notifications newer than its
 // last poll.
 func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Request) {
-	if s.pairingSecret == "" {
-		http.Error(w, "pairing is not configured", http.StatusServiceUnavailable)
+	userID, _, ok := s.deviceAuthFromRequest(r)
+	if !ok {
+		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
 		return
 	}
-	subscriberID, subscriberHash := pairingCredentialsFromRequest(r)
-	if subscriberID == "" || subscriberHash == "" {
-		http.Error(w, "sub and hash are required", http.StatusBadRequest)
-		return
-	}
-	expectedHash := s.pairingSubscriberHash(subscriberID)
-	if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
-		http.Error(w, "invalid subscriber hash", http.StatusUnauthorized)
-		return
-	}
-	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
-	if !okOwner {
-		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
-		return
-	}
-	store, err := s.userStore(ownerID)
+	store, err := s.userStore(userID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
 		return
@@ -1963,12 +1998,6 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 		"serverBaseUrl":    serverBaseURL,
 		"registerEndpoint": registerEndpoint,
 	})
-}
-
-func (s *Server) pairingSubscriberHash(subscriberID string) string {
-	mac := hmac.New(sha256.New, []byte(s.pairingSecret))
-	mac.Write([]byte(subscriberID))
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 type pairingTokenClaims struct {
@@ -3497,8 +3526,8 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // state-changing (non-GET/HEAD/OPTIONS) requests: the X-CSRF-Token header
 // must match the csrf_token minted alongside the caller's session (see
 // startSession). It intentionally does nothing when no llama_session cookie
-// is present — mobile clients (subscriberId/subscriberHash query params, see
-// resolveMailAuthContext) and CardDAV (HTTP Basic Auth) never send that
+// is present — mobile clients (X-Kypost-Device-Id/X-Kypost-Device-Secret
+// headers, see resolveMailAuthContext) and CardDAV (HTTP Basic Auth) never send that
 // cookie, so they carry no ambient, forgeable credential for CSRF to exploit
 // in the first place and are structurally exempt rather than specially
 // carved out here.
@@ -3530,18 +3559,15 @@ func (s *Server) csrfCheckOK(r *http.Request) bool {
 // withMailAuth gates endpoints mobile clients need to reach without a web
 // session — mail read/act-on (inbox, folders, actions, draft, send), contacts
 // dedupe/groups/photo-get, and the PGP QR token mint — for either a web
-// session cookie or mobile's paired subscriberId/subscriberHash — see
-// resolveMailAuthContext. Despite the name, it's no longer mail-exclusive;
-// IMAP/SMTP account setup (/api/imap/config, /api/imap/test) and other
-// web-UI-only writes intentionally stay on withAuth only.
+// session cookie or a paired device's own X-Kypost-Device-Id/
+// X-Kypost-Device-Secret credentials — see resolveMailAuthContext. Despite
+// the name, it's no longer mail-exclusive; IMAP/SMTP account setup
+// (/api/imap/config, /api/imap/test) and other web-UI-only writes
+// intentionally stay on withAuth only.
 func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ac, err := s.resolveMailAuthContext(r)
 		if err != nil {
-			if errors.Is(err, errMailPairingNotConfigured) {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
-				return
-			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}

@@ -57,26 +57,23 @@ func TestContactsDedupeEndpoint(t *testing.T) {
 	}
 }
 
-// TestContactsDedupeAcceptsSubscriberHash drives the endpoint through the
+// TestContactsDedupeAcceptsDeviceCredentials drives the endpoint through the
 // server's real route table (not a hand-wired middleware call) so it fails
 // if /api/contacts/dedupe is ever wired to withAuth instead of withMailAuth.
-// Mobile clients only have subscriberId/subscriberHash pairing, never a
+// Mobile clients only have their own device pairing credentials, never a
 // session cookie — see Mobile_Contacts_DEDupe.md Part 0.
-func TestContactsDedupeAcceptsSubscriberHash(t *testing.T) {
+func TestContactsDedupeAcceptsDeviceCredentials(t *testing.T) {
 	srv := newTestServer(t)
-	store := testUserStore(t, srv)
-	subscriberID, err := store.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
-	}
-	hash := srv.pairingSubscriberHash(subscriberID)
+	userID := srv.mustBootstrapUserID(t)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "dedupe-device")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/contacts/dedupe?sub="+subscriberID+"&hash="+hash, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/contacts/dedupe", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
 	srv.routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d (pairing auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("status = %d, want %d (device auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 

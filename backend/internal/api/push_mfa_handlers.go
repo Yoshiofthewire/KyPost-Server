@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -215,45 +214,29 @@ func (s *Server) handlePushFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePushRespond is the endpoint a paired mobile device calls to approve or
-// deny a login challenge. It authenticates with the same subscriber pairing
-// credential the native register/pull endpoints use — no session cookie. It
-// enforces that the responding device's owner is exactly the user the challenge
-// was minted for (a device can never approve another user's login), and that the
-// named device is still permitted to approve.
+// deny a login challenge. It authenticates with the device's own
+// X-Kypost-Device-Id/X-Kypost-Device-Secret credentials (see
+// device_auth.go) — no session cookie. It enforces that the responding
+// device's owner is exactly the user the challenge was minted for (a device
+// can never approve another user's login), and that the device is still
+// permitted to approve.
 func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
-	if s.pairingSecret == "" {
-		http.Error(w, "pairing is not configured", http.StatusServiceUnavailable)
+	userID, device, ok := s.deviceAuthFromRequest(r)
+	if !ok {
+		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
 		return
 	}
 	var req struct {
-		ChallengeID    string `json:"challengeId"`
-		SubscriberID   string `json:"subscriberId"`
-		SubscriberHash string `json:"subscriberHash"`
-		DeviceID       string `json:"deviceId"`
-		Approve        bool   `json:"approve"`
+		ChallengeID string `json:"challengeId"`
+		Approve     bool   `json:"approve"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 	challengeID := strings.TrimSpace(req.ChallengeID)
-	subscriberID := strings.TrimSpace(req.SubscriberID)
-	subscriberHash := strings.ToLower(strings.TrimSpace(req.SubscriberHash))
-	deviceID := strings.TrimSpace(req.DeviceID)
-	if challengeID == "" || subscriberID == "" || subscriberHash == "" || deviceID == "" {
-		http.Error(w, "challengeId, subscriberId, subscriberHash, and deviceId are required", http.StatusBadRequest)
-		return
-	}
-
-	// Device auth: same trust boundary as native register/pull.
-	expectedHash := s.pairingSubscriberHash(subscriberID)
-	if subtle.ConstantTimeCompare([]byte(subscriberHash), []byte(expectedHash)) != 1 {
-		http.Error(w, "invalid subscriber hash", http.StatusUnauthorized)
-		return
-	}
-	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
-	if !okOwner {
-		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
+	if challengeID == "" {
+		http.Error(w, "challengeId is required", http.StatusBadRequest)
 		return
 	}
 
@@ -264,7 +247,7 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
-	if ch.UserID != ownerID {
+	if ch.UserID != userID {
 		http.Error(w, "challenge does not belong to this device", http.StatusForbidden)
 		return
 	}
@@ -275,7 +258,7 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 	// push notifications regardless of this setting — without this check, any
 	// paired device could silently approve a login for a user who never opted
 	// into push as a second factor.
-	owner, err := s.users.Get(ownerID)
+	owner, err := s.users.Get(userID)
 	if err != nil {
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
@@ -285,14 +268,9 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.userStore(ownerID)
+	store, err := s.userStore(userID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
-		return
-	}
-	device, okDev := store.GetNativeDevice(deviceID)
-	if !okDev {
-		http.Error(w, "unknown device", http.StatusUnauthorized)
 		return
 	}
 	// The device must be permitted to approve. Under the graceful default (no
@@ -310,7 +288,7 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.mfaChallenges.ResolvePush(challengeID, deviceID, req.Approve)
+	status, err := s.mfaChallenges.ResolvePush(challengeID, device.DeviceID, req.Approve)
 	if err != nil {
 		if errors.Is(err, mfa.ErrChallengeAlreadyResolved) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "challenge already resolved", "status": status})

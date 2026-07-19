@@ -79,6 +79,48 @@ func authRequest(s *Server, req *http.Request) {
 	req.Header.Set("X-CSRF-Token", csrfToken)
 }
 
+// pairNativeDevice registers a native device for userID directly in that
+// user's state store (bypassing the HTTP register handler for test speed),
+// hashing a freshly minted raw secret the same way
+// handleNotificationNativeRegister does, and warms deviceIndex so
+// lookupUserByDevice resolves it without a rescan. Returns the deviceId/
+// deviceSecret pair a simulated device presents via
+// X-Kypost-Device-Id/X-Kypost-Device-Secret.
+func pairNativeDevice(t *testing.T, srv *Server, userID, deviceID string) (id, secret string) {
+	t.Helper()
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	raw, err := randomToken(24)
+	if err != nil {
+		t.Fatalf("randomToken: %v", err)
+	}
+	hash, err := users.HashPassword(raw)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := store.UpsertNativeDevice(state.NativeDevice{
+		DeviceID:    deviceID,
+		Platform:    "android",
+		PushToken:   "tok-" + deviceID,
+		UserID:      userID,
+		MFAApprover: true,
+		SecretHash:  hash,
+	}); err != nil {
+		t.Fatalf("UpsertNativeDevice: %v", err)
+	}
+	srv.userMu.Lock()
+	srv.deviceIndex[deviceID] = userID
+	srv.userMu.Unlock()
+	return deviceID, raw
+}
+
+func setDeviceHeaders(req *http.Request, deviceID, deviceSecret string) {
+	req.Header.Set(headerDeviceID, deviceID)
+	req.Header.Set(headerDeviceSecret, deviceSecret)
+}
+
 func TestNativeRegisterStoresDevice(t *testing.T) {
 	srv := newTestServer(t)
 	// The subscriber ID is minted from the owning user's store, exactly as
@@ -95,14 +137,13 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 	}
 
 	payload := map[string]any{
-		"subscriberId":   subscriberID,
-		"subscriberHash": srv.pairingSubscriberHash(subscriberID),
-		"pairingToken":   token,
-		"deviceToken":    "native-device-token",
-		"deviceId":       "device-a",
-		"platform":       "ios",
-		"deviceName":     "Alice phone",
-		"appVersion":     "1.2.3",
+		"subscriberId": subscriberID,
+		"pairingToken": token,
+		"deviceToken":  "native-device-token",
+		"deviceId":     "device-a",
+		"platform":     "ios",
+		"deviceName":   "Alice phone",
+		"appVersion":   "1.2.3",
 	}
 	body, _ := json.Marshal(payload)
 
@@ -112,6 +153,17 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		DeviceID     string `json:"deviceId"`
+		DeviceSecret string `json:"deviceSecret"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal register response: %v", err)
+	}
+	if resp.DeviceSecret == "" {
+		t.Fatalf("response deviceSecret is empty, want a minted secret")
 	}
 
 	devices := store.ListNativeDevices()
@@ -126,6 +178,12 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 	}
 	if devices[0].DeviceName != "Alice phone" {
 		t.Fatalf("deviceName = %q, want %q", devices[0].DeviceName, "Alice phone")
+	}
+	if devices[0].SecretHash == "" || devices[0].SecretHash == resp.DeviceSecret {
+		t.Fatalf("stored SecretHash = %q, want a non-empty hash distinct from the raw secret", devices[0].SecretHash)
+	}
+	if !users.VerifySecretHash(devices[0].SecretHash, resp.DeviceSecret) {
+		t.Fatalf("stored SecretHash does not verify against the returned deviceSecret")
 	}
 }
 
@@ -175,9 +233,10 @@ func TestNativeDevicesListAndDelete(t *testing.T) {
 	srv := newTestServer(t)
 	store := testUserStore(t, srv)
 	if err := store.UpsertNativeDevice(state.NativeDevice{
-		DeviceID:  "device-b",
-		Platform:  "android",
-		PushToken: "token-b",
+		DeviceID:   "device-b",
+		Platform:   "android",
+		PushToken:  "token-b",
+		SecretHash: "scrypt$16384$8$1$salt$hash",
 	}); err != nil {
 		t.Fatalf("UpsertNativeDevice: %v", err)
 	}
@@ -198,6 +257,18 @@ func TestNativeDevicesListAndDelete(t *testing.T) {
 	if len(listResp.Devices) != 1 {
 		t.Fatalf("GET devices len = %d, want 1", len(listResp.Devices))
 	}
+	if listResp.Devices[0].SecretHash != "" {
+		t.Fatalf("decoded SecretHash = %q, want empty (unmarshaled struct)", listResp.Devices[0].SecretHash)
+	}
+	var rawListResp struct {
+		Devices []map[string]any `json:"devices"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &rawListResp); err != nil {
+		t.Fatalf("unmarshal raw list response: %v", err)
+	}
+	if _, ok := rawListResp.Devices[0]["secretHash"]; ok {
+		t.Fatalf("device list response JSON contains a secretHash key, want it fully absent (redacted)")
+	}
 
 	delBody := []byte(`{"deviceId":"device-b"}`)
 	delRec := httptest.NewRecorder()
@@ -217,15 +288,12 @@ func TestNativeDevicesListAndDelete(t *testing.T) {
 func TestNativeDeliveryModeAndPull(t *testing.T) {
 	srv := newTestServer(t)
 	store := testUserStore(t, srv)
-	subscriberID, err := store.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
 	}
-	// Warm the subscriber -> user index the pull endpoint resolves through.
-	srv.subIndex[subscriberID] = func() string {
-		all, _ := srv.users.List()
-		return all[0].ID
-	}()
+	userID := all[0].ID
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "pull-device")
 
 	// Switch this user to App Pull mode via the authenticated endpoint.
 	modeRec := httptest.NewRecorder()
@@ -244,11 +312,11 @@ func TestNativeDeliveryModeAndPull(t *testing.T) {
 		t.Fatalf("EnqueuePullNotification: %v", err)
 	}
 
-	hash := srv.pairingSubscriberHash(subscriberID)
-
-	// A device with the correct subscriber hash fetches the queue from cursor 0.
+	// The paired device fetches the queue from cursor 0 using its own
+	// device credentials.
 	pullRec := httptest.NewRecorder()
-	pullReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?sub="+subscriberID+"&hash="+hash+"&after=0", nil)
+	pullReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?after=0", nil)
+	setDeviceHeaders(pullReq, deviceID, deviceSecret)
 	srv.handleNotificationNativePull(pullRec, pullReq)
 	if pullRec.Code != http.StatusOK {
 		t.Fatalf("pull status = %d, want %d; body=%s", pullRec.Code, http.StatusOK, pullRec.Body.String())
@@ -270,7 +338,8 @@ func TestNativeDeliveryModeAndPull(t *testing.T) {
 
 	// Polling again from the returned cursor yields nothing new.
 	pull2Rec := httptest.NewRecorder()
-	pull2Req := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?sub="+subscriberID+"&hash="+hash+"&after=1", nil)
+	pull2Req := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?after=1", nil)
+	setDeviceHeaders(pull2Req, deviceID, deviceSecret)
 	srv.handleNotificationNativePull(pull2Rec, pull2Req)
 	var pull2 struct {
 		Notifications []state.PullNotification `json:"notifications"`
@@ -282,56 +351,85 @@ func TestNativeDeliveryModeAndPull(t *testing.T) {
 		t.Fatalf("pull2 notifications = %d, want 0", len(pull2.Notifications))
 	}
 
-	// A wrong subscriber hash is rejected.
+	// A wrong device secret is rejected.
 	badRec := httptest.NewRecorder()
-	badReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?sub="+subscriberID+"&hash=deadbeef", nil)
+	badReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(badReq, deviceID, "wrong-secret")
 	srv.handleNotificationNativePull(badRec, badReq)
 	if badRec.Code != http.StatusUnauthorized {
-		t.Fatalf("bad-hash status = %d, want %d", badRec.Code, http.StatusUnauthorized)
+		t.Fatalf("bad-secret status = %d, want %d", badRec.Code, http.StatusUnauthorized)
+	}
+
+	// Once the device is removed (unpaired), its still-known credentials no
+	// longer work — this is the revocation fix this whole change exists for.
+	if _, err := store.RemoveNativeDevice(deviceID); err != nil {
+		t.Fatalf("RemoveNativeDevice: %v", err)
+	}
+	revokedRec := httptest.NewRecorder()
+	revokedReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(revokedReq, deviceID, deviceSecret)
+	srv.handleNotificationNativePull(revokedRec, revokedReq)
+	if revokedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-removal status = %d, want %d", revokedRec.Code, http.StatusUnauthorized)
 	}
 }
 
-func TestNotificationNativePullAcceptsSubscriberHashViaHeader(t *testing.T) {
+func TestNativeDeregisterRemovesOnlyItself(t *testing.T) {
 	srv := newTestServer(t)
-	store := testUserStore(t, srv)
-	subscriberID, err := store.GetOrCreateSubscriberID()
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "self-device")
+	otherID, otherSecret := pairNativeDevice(t, srv, userID, "other-device")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/deregister", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	srv.handleNotificationNativeDeregister(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deregister status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	store, err := srv.userStore(userID)
 	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+		t.Fatalf("userStore: %v", err)
 	}
-	srv.subIndex[subscriberID] = func() string {
-		all, _ := srv.users.List()
-		return all[0].ID
-	}()
-
-	modeRec := httptest.NewRecorder()
-	modeReq := httptest.NewRequest(http.MethodPut, "/api/notifications/native/mode", bytes.NewReader([]byte(`{"mode":"pull"}`)))
-	authRequest(srv, modeReq)
-	srv.withAuth(srv.handleNotificationNativeMode).ServeHTTP(modeRec, modeReq)
-	if modeRec.Code != http.StatusOK {
-		t.Fatalf("mode PUT status = %d, want %d; body=%s", modeRec.Code, http.StatusOK, modeRec.Body.String())
+	if _, ok := store.GetNativeDevice(deviceID); ok {
+		t.Fatalf("device %q still present after self-deregister", deviceID)
+	}
+	if _, ok := store.GetNativeDevice(otherID); !ok {
+		t.Fatalf("unrelated device %q was removed by another device's deregister call", otherID)
 	}
 
-	if err := store.EnqueuePullNotification(state.PullNotification{Title: "hi", Body: "new mail"}); err != nil {
-		t.Fatalf("EnqueuePullNotification: %v", err)
-	}
-
-	hash := srv.pairingSubscriberHash(subscriberID)
-
+	// The now-removed device's credentials no longer authenticate.
 	pullRec := httptest.NewRecorder()
-	pullReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull?after=0", nil)
-	pullReq.Header.Set(headerSubscriberID, subscriberID)
-	pullReq.Header.Set(headerSubscriberHash, hash)
+	pullReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(pullReq, deviceID, deviceSecret)
 	srv.handleNotificationNativePull(pullRec, pullReq)
-	if pullRec.Code != http.StatusOK {
-		t.Fatalf("pull status = %d, want %d; body=%s", pullRec.Code, http.StatusOK, pullRec.Body.String())
+	if pullRec.Code != http.StatusUnauthorized {
+		t.Fatalf("post-deregister pull status = %d, want %d", pullRec.Code, http.StatusUnauthorized)
 	}
-	var pull struct {
-		Notifications []state.PullNotification `json:"notifications"`
+
+	// Garbage credentials are rejected without removing anything.
+	garbageRec := httptest.NewRecorder()
+	garbageReq := httptest.NewRequest(http.MethodPost, "/api/notifications/native/deregister", nil)
+	setDeviceHeaders(garbageReq, otherID, "not-the-secret")
+	srv.handleNotificationNativeDeregister(garbageRec, garbageReq)
+	if garbageRec.Code != http.StatusUnauthorized {
+		t.Fatalf("garbage-credential deregister status = %d, want %d", garbageRec.Code, http.StatusUnauthorized)
 	}
-	if err := json.Unmarshal(pullRec.Body.Bytes(), &pull); err != nil {
-		t.Fatalf("unmarshal pull response: %v", err)
+	if _, ok := store.GetNativeDevice(otherID); !ok {
+		t.Fatalf("device %q was removed by a mismatched-secret deregister attempt", otherID)
 	}
-	if len(pull.Notifications) != 1 || pull.Notifications[0].Title != "hi" {
-		t.Fatalf("pull notifications = %+v, want one titled 'hi'", pull.Notifications)
+
+	// The unrelated device's real credentials still work untouched.
+	otherPullRec := httptest.NewRecorder()
+	otherPullReq := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(otherPullReq, otherID, otherSecret)
+	srv.handleNotificationNativePull(otherPullRec, otherPullReq)
+	if otherPullRec.Code != http.StatusOK {
+		t.Fatalf("unrelated device pull status = %d, want %d; body=%s", otherPullRec.Code, http.StatusOK, otherPullRec.Body.String())
 	}
 }

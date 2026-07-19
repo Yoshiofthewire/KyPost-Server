@@ -7,37 +7,16 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/users"
 )
 
-// pairApproverDevice registers a native device for userID directly in that
-// user's state store and warms the subscriber index, returning the credential
-// pair a simulated device presents to handlePushRespond. It mirrors the trust
-// boundary the real register/pull endpoints use (subscriberId + subscriberHash).
-func pairApproverDevice(t *testing.T, srv *Server, userID, deviceID string) (subscriberID, subscriberHash string) {
+// pairApproverDevice registers a native device for userID and returns the
+// deviceId/deviceSecret credential pair a simulated device presents to
+// handlePushRespond via X-Kypost-Device-Id/X-Kypost-Device-Secret. Thin
+// wrapper over pairNativeDevice (which already sets MFAApprover: true).
+func pairApproverDevice(t *testing.T, srv *Server, userID, deviceID string) (id, secret string) {
 	t.Helper()
-	store, err := srv.userStore(userID)
-	if err != nil {
-		t.Fatalf("userStore: %v", err)
-	}
-	subscriberID, err = store.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
-	}
-	srv.userMu.Lock()
-	srv.subIndex[subscriberID] = userID
-	srv.userMu.Unlock()
-	if err := store.UpsertNativeDevice(state.NativeDevice{
-		DeviceID:    deviceID,
-		Platform:    "android",
-		PushToken:   "tok-" + deviceID,
-		UserID:      userID,
-		MFAApprover: true,
-	}); err != nil {
-		t.Fatalf("UpsertNativeDevice: %v", err)
-	}
-	return subscriberID, srv.pairingSubscriberHash(subscriberID)
+	return pairNativeDevice(t, srv, userID, deviceID)
 }
 
 func TestPushEnableRequiresTOTP(t *testing.T) {
@@ -151,14 +130,16 @@ func methodsContain(methods []string, want string) bool {
 	return false
 }
 
-func respondPush(srv *Server, challengeID, subscriberID, subscriberHash, deviceID string, approve bool) *httptest.ResponseRecorder {
-	return doJSON(srv, srv.handlePushRespond, http.MethodPost, "/api/mfa/push/respond", map[string]any{
-		"challengeId":    challengeID,
-		"subscriberId":   subscriberID,
-		"subscriberHash": subscriberHash,
-		"deviceId":       deviceID,
-		"approve":        approve,
+func respondPush(srv *Server, challengeID, deviceID, deviceSecret string, approve bool) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]any{
+		"challengeId": challengeID,
+		"approve":     approve,
 	})
+	req := httptest.NewRequest(http.MethodPost, "/api/mfa/push/respond", bytes.NewReader(body))
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	rec := httptest.NewRecorder()
+	srv.handlePushRespond(rec, req)
+	return rec
 }
 
 func pollPush(srv *Server, challengeID string) string {
@@ -187,7 +168,7 @@ func TestPushLoginApproveFlow(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	enrollTOTP(t, srv, u.ID)
-	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-quinn")
+	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-quinn")
 	enablePush(t, srv, u.ID)
 
 	challengeID, methods := loginChallenge(t, srv, "quinn", "pw-quinn")
@@ -198,7 +179,7 @@ func TestPushLoginApproveFlow(t *testing.T) {
 		t.Fatalf("expected pending before response")
 	}
 
-	if rec := respondPush(srv, challengeID, sub, hash, "dev-quinn", true); rec.Code != http.StatusOK {
+	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
 		t.Fatalf("respond approve: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if pollPush(srv, challengeID) != "approved" {
@@ -223,11 +204,11 @@ func TestPushLoginDenyFlow(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	enrollTOTP(t, srv, u.ID)
-	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-rex")
+	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-rex")
 	enablePush(t, srv, u.ID)
 
 	challengeID, _ := loginChallenge(t, srv, "rex", "pw-rex")
-	if rec := respondPush(srv, challengeID, sub, hash, "dev-rex", false); rec.Code != http.StatusOK {
+	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, false); rec.Code != http.StatusOK {
 		t.Fatalf("respond deny: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if pollPush(srv, challengeID) != "denied" {
@@ -254,11 +235,11 @@ func TestPushRespondCrossUserRejected(t *testing.T) {
 	pairApproverDevice(t, srv, a.ID, "dev-alice")
 	enablePush(t, srv, a.ID)
 	// Bob's own device + credential.
-	subB, hashB := pairApproverDevice(t, srv, b.ID, "dev-bob")
+	deviceB, secretB := pairApproverDevice(t, srv, b.ID, "dev-bob")
 
 	// Alice logs in; Bob's device tries to approve her challenge.
 	challengeID, _ := loginChallenge(t, srv, "alice", "pw-alice")
-	rec := respondPush(srv, challengeID, subB, hashB, "dev-bob", true)
+	rec := respondPush(srv, challengeID, deviceB, secretB, true)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-user respond: status=%d, want 403 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -281,7 +262,7 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	enrollTOTP(t, srv, u.ID)
-	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-tara")
+	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-tara")
 	// Deliberately do NOT call enablePush: PushMFAEnabled stays false.
 
 	challengeID, methods := loginChallenge(t, srv, "tara", "pw-tara")
@@ -289,7 +270,7 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 		t.Fatalf("methods = %v, want push absent for a push-disabled user", methods)
 	}
 
-	rec := respondPush(srv, challengeID, sub, hash, "dev-tara", true)
+	rec := respondPush(srv, challengeID, deviceID, deviceSecret, true)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("respond without push enabled: status=%d, want 403 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -305,15 +286,15 @@ func TestPushFirstResponseWins(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	enrollTOTP(t, srv, u.ID)
-	sub, hash := pairApproverDevice(t, srv, u.ID, "dev-sam")
+	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-sam")
 	enablePush(t, srv, u.ID)
 
 	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam")
-	if rec := respondPush(srv, challengeID, sub, hash, "dev-sam", true); rec.Code != http.StatusOK {
+	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
 		t.Fatalf("first respond: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	// A second response (even from the same device) is rejected, not overwritten.
-	second := respondPush(srv, challengeID, sub, hash, "dev-sam", false)
+	second := respondPush(srv, challengeID, deviceID, deviceSecret, false)
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second respond: status=%d, want 409 (body=%s)", second.Code, second.Body.String())
 	}

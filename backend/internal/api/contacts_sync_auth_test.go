@@ -6,59 +6,54 @@ import (
 	"testing"
 )
 
-// These tests cover handleContactsSync's own pairing-auth check — a
-// separate inline copy from resolveMailAuthContext, not previously covered
-// by a dedicated auth test.
-func TestContactsSyncAcceptsSubscriberHashViaHeader(t *testing.T) {
+// These tests cover handleContactsSync's own device-auth check (via
+// deviceAuthFromRequest), not previously covered by a dedicated auth test.
+func TestContactsSyncAcceptsDeviceCredentialsViaHeader(t *testing.T) {
 	srv := newTestServer(t)
-	store := testUserStore(t, srv)
-	subscriberID, err := store.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
 	}
-	hash := srv.pairingSubscriberHash(subscriberID)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, all[0].ID, "contacts-device")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/contacts/sync", nil)
-	req.Header.Set(headerSubscriberID, subscriberID)
-	req.Header.Set(headerSubscriberHash, hash)
+	setDeviceHeaders(req, deviceID, deviceSecret)
 	srv.routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d (pairing auth via headers should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("status = %d, want %d (device auth via headers should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 
-func TestContactsSyncAcceptsSubscriberHashViaQueryParamFallback(t *testing.T) {
+func TestContactsSyncRejectsQueryParams(t *testing.T) {
 	srv := newTestServer(t)
-	store := testUserStore(t, srv)
-	subscriberID, err := store.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
 	}
-	hash := srv.pairingSubscriberHash(subscriberID)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, all[0].ID, "contacts-device-2")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/contacts/sync?sub="+subscriberID+"&hash="+hash, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/contacts/sync?device="+deviceID+"&secret="+deviceSecret, nil)
 	srv.routes().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d (legacy query-param auth must keep working during rollout); body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d (query params must not authenticate — headers only)", rec.Code, http.StatusUnauthorized)
 	}
 }
 
-func TestContactsSyncRejectsInvalidHash(t *testing.T) {
+func TestContactsSyncRejectsInvalidSecret(t *testing.T) {
 	srv := newTestServer(t)
-	store := testUserStore(t, srv)
-	subscriberID, err := store.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
 	}
+	deviceID, _ := pairNativeDevice(t, srv, all[0].ID, "contacts-device-3")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/contacts/sync", nil)
-	req.Header.Set(headerSubscriberID, subscriberID)
-	req.Header.Set(headerSubscriberHash, "deadbeef")
+	setDeviceHeaders(req, deviceID, "deadbeef")
 	srv.routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {

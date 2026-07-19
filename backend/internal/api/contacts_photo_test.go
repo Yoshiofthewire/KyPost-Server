@@ -8,12 +8,12 @@ import (
 	"llama-lab/backend/internal/contacts"
 )
 
-// TestContactPhotoGetAcceptsSubscriberHash drives the endpoint through the
+// TestContactPhotoGetAcceptsDeviceCredentials drives the endpoint through the
 // server's real route table (not a hand-wired middleware call) so it fails
 // if GET /api/contacts/{id}/photo is ever wired back to withAuth instead of
-// withMailAuth. Mobile clients only have subscriberId/subscriberHash
-// pairing, never a session cookie — see Client_Contact_Update.md Part 0.
-func TestContactPhotoGetAcceptsSubscriberHash(t *testing.T) {
+// withMailAuth. Mobile clients only have their own device pairing
+// credentials, never a session cookie — see Client_Contact_Update.md Part 0.
+func TestContactPhotoGetAcceptsDeviceCredentials(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 
@@ -39,18 +39,14 @@ func TestContactPhotoGetAcceptsSubscriberHash(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	subStore := testUserStore(t, srv)
-	subscriberID, err := subStore.GetOrCreateSubscriberID()
-	if err != nil {
-		t.Fatalf("GetOrCreateSubscriberID: %v", err)
-	}
-	hash := srv.pairingSubscriberHash(subscriberID)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "photo-device")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/contacts/"+c.UID+"/photo?sub="+subscriberID+"&hash="+hash, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/contacts/"+c.UID+"/photo", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
 	srv.routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d (pairing auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("status = %d, want %d (device auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
