@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"llama-lab/backend/internal/fsutil"
+	"kypost-server/backend/internal/fsutil"
 
 	"gopkg.in/yaml.v3"
 )

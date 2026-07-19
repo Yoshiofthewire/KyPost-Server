@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/users"
 )
 
 // withAdmin layers an admin-role requirement on top of withAuth. Handlers

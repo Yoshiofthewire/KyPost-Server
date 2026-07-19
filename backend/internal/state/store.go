@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"llama-lab/backend/internal/fsutil"
+	"kypost-server/backend/internal/fsutil"
 )
 
 type Store struct {

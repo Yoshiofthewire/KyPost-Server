@@ -13,17 +13,17 @@ import (
 	"sync"
 	"time"
 
-	imapadapter "llama-lab/backend/internal/adapters/imap"
-	"llama-lab/backend/internal/adapters/llama"
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/health"
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/mailcache"
-	"llama-lab/backend/internal/redaction"
-	"llama-lab/backend/internal/retry"
-	"llama-lab/backend/internal/rules"
-	"llama-lab/backend/internal/state"
-	"llama-lab/backend/internal/users"
+	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"kypost-server/backend/internal/adapters/llama"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/health"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/mailcache"
+	"kypost-server/backend/internal/redaction"
+	"kypost-server/backend/internal/retry"
+	"kypost-server/backend/internal/rules"
+	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
 )
 
 // maxConcurrentUserTicks bounds how many user mailboxes are polled in

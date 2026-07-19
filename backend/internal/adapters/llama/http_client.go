@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/retry"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/retry"
 )
 
 const diagnosticLogMaxSize = 16 * 1024 * 1024

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"llama-lab/backend/internal/contacts"
-	"llama-lab/backend/internal/pgpmail"
+	"kypost-server/backend/internal/contacts"
+	"kypost-server/backend/internal/pgpmail"
 )
 
 func TestPGPQRTokenAndKeyRoundTrip(t *testing.T) {

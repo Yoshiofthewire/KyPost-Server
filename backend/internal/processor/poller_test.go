@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	imapadapter "llama-lab/backend/internal/adapters/imap"
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/rules"
-	"llama-lab/backend/internal/state"
+	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/rules"
+	"kypost-server/backend/internal/state"
 )
 
 // TestMailCacheEntriesFromMessages covers the pure conversion tickUser uses

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/users"
 )
 
 // pairApproverDevice registers a native device for userID and returns the

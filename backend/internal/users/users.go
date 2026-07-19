@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"llama-lab/backend/internal/fsutil"
+	"kypost-server/backend/internal/fsutil"
 
 	"golang.org/x/crypto/scrypt"
 )

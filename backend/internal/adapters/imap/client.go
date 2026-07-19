@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"llama-lab/backend/internal/cryptutil"
-	"llama-lab/backend/internal/mailmsg"
+	"kypost-server/backend/internal/cryptutil"
+	"kypost-server/backend/internal/mailmsg"
 
 	goimap "github.com/BrianLeishman/go-imap"
 	pgpcrypto "github.com/ProtonMail/gopenpgp/v3/crypto"

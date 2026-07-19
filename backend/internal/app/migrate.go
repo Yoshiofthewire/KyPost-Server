@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/fsutil"
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/fsutil"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/users"
 )
 
 // migrateLegacySingleUserData copies the pre-multi-user global files into

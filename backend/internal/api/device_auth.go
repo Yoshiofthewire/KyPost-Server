@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"llama-lab/backend/internal/state"
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
 )
 
 // Headers a paired native client presents on every ongoing request (mail

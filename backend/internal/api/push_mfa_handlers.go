@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"llama-lab/backend/internal/mfa"
-	"llama-lab/backend/internal/processor"
-	"llama-lab/backend/internal/state"
+	"kypost-server/backend/internal/mfa"
+	"kypost-server/backend/internal/processor"
+	"kypost-server/backend/internal/state"
 )
 
 // approverDevices returns the devices eligible to approve a push-2FA challenge

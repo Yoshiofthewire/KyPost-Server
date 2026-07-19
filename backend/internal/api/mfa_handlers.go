@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"llama-lab/backend/internal/mfa"
-	"llama-lab/backend/internal/totp"
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/mfa"
+	"kypost-server/backend/internal/totp"
+	"kypost-server/backend/internal/users"
 )
 
 // mfaTOTPIssuer is the issuer label shown by authenticator apps.

@@ -9,12 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	imapadapter "llama-lab/backend/internal/adapters/imap"
-	"llama-lab/backend/internal/contacts"
-	"llama-lab/backend/internal/groups"
-	"llama-lab/backend/internal/mailcache"
-	"llama-lab/backend/internal/rules"
-	"llama-lab/backend/internal/state"
+	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"kypost-server/backend/internal/contacts"
+	"kypost-server/backend/internal/groups"
+	"kypost-server/backend/internal/mailcache"
+	"kypost-server/backend/internal/rules"
+	"kypost-server/backend/internal/state"
 )
 
 // getOrCreateUserStore returns the cached per-user store, constructing and

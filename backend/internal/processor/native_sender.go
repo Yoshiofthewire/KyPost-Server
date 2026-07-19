@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"llama-lab/backend/internal/fsutil"
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/state"
+	"kypost-server/backend/internal/fsutil"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/state"
 )
 
 var ErrNativeDeviceStale = errors.New("native device token is stale")

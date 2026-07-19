@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"llama-lab/backend/internal/adapters/llama"
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/processor"
-	"llama-lab/backend/internal/state"
+	"kypost-server/backend/internal/adapters/llama"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/processor"
+	"kypost-server/backend/internal/state"
 )
 
 func TestHandlePollNowRejectsNonAdmin(t *testing.T) {

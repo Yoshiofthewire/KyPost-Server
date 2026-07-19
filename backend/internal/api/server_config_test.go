@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/users"
 )
 
 // TestConfigPutRequiresAdmin is a regression test: PUT /api/config used to be

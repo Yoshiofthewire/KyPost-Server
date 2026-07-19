@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/users"
 )
 
 // davCredentialTTL bounds how long a verified Basic Auth credential is

@@ -13,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"llama-lab/backend/internal/adapters/llama"
-	"llama-lab/backend/internal/api"
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/health"
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/processor"
-	"llama-lab/backend/internal/state"
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/adapters/llama"
+	"kypost-server/backend/internal/api"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/health"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/processor"
+	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
 )
 
 // Run dispatches the process mode and blocks until shutdown for long-running modes.

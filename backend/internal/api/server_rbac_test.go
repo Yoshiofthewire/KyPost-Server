@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/users"
 )
 
 // newTestUsers returns the bootstrap admin plus a fresh non-admin user.

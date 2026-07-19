@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"llama-lab/backend/internal/config"
-	"llama-lab/backend/internal/health"
-	"llama-lab/backend/internal/logging"
-	"llama-lab/backend/internal/pgpmail"
-	"llama-lab/backend/internal/state"
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/health"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/pgpmail"
+	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
 )
 
 func newTestServer(t *testing.T) *Server {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"llama-lab/backend/internal/users"
+	"kypost-server/backend/internal/users"
 )
 
 // authRequestAs simulates an authenticated request the way a real browser
