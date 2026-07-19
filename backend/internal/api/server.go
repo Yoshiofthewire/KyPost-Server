@@ -247,7 +247,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/mail/send", s.withMailAuth(s.handleMailSend))
 	mux.HandleFunc("GET /api/mail/attachments", s.withMailAuth(s.handleMailAttachmentList))
 	mux.HandleFunc("GET /api/mail/attachment", s.withMailAuth(s.handleMailAttachmentDownload))
-	mux.HandleFunc("POST /api/llama/test", s.withAuth(s.handleLlamaTest))
+	mux.HandleFunc("POST /api/classifier/test", s.withAuth(s.handleClassifierTest))
 	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
@@ -1268,14 +1268,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.RLock()
-		llamaChanged := next.Classifier != s.cfg.Classifier
+		classifierChanged := next.Classifier != s.cfg.Classifier
 		// VAPID key material is server-owned and json:"-" on the wire;
 		// carry it across the round-trip.
 		next.Notifications = s.cfg.Notifications
 		s.mu.RUnlock()
 		// Remote LLM settings are admin-only. Reject (rather than silently
 		// drop) a non-admin change so a broken save is never masked.
-		if ac, ok := authFromContext(r); llamaChanged && (!ok || ac.Role != users.RoleAdmin) {
+		if ac, ok := authFromContext(r); classifierChanged && (!ok || ac.Role != users.RoleAdmin) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "remote llm settings require admin access"})
 			return
 		}
@@ -1286,7 +1286,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.cfg = next
 		s.mu.Unlock()
-		if llamaChanged {
+		if classifierChanged {
 			classifier.ResetWarmupState()
 		}
 		if s.onConfigUpdated != nil {
@@ -3008,7 +3008,7 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to save tuning file", http.StatusInternalServerError)
 			return
 		}
-		// Tuning is now passed to the model per classify call, so no llama
+		// Tuning is now passed to the model per classify call, so no classifier
 		// process restart is needed for edits to take effect.
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": tuningPath, "restartOk": true, "restartError": ""})
 	}
@@ -3421,7 +3421,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) handleLlamaTest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
@@ -3436,10 +3436,10 @@ func (s *Server) handleLlamaTest(w http.ResponseWriter, r *http.Request) {
 
 	baseURL := strings.TrimSpace(cfg.Classifier.BaseURL)
 	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("LLAMA_BASE_URL"))
+		baseURL = strings.TrimSpace(os.Getenv("CLASSIFIER_BASE_URL"))
 	}
 	if baseURL == "" {
-		http.Error(w, "llama base url is not configured", http.StatusBadRequest)
+		http.Error(w, "classifier base url is not configured", http.StatusBadRequest)
 		return
 	}
 
@@ -3449,12 +3449,12 @@ func (s *Server) handleLlamaTest(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey := strings.TrimSpace(cfg.Classifier.APIKey)
 	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("LLAMA_API_KEY"))
+		apiKey = strings.TrimSpace(os.Getenv("CLASSIFIER_API_KEY"))
 	}
 
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
-		prompt = "Email Address: test@example.com  Subject Line: Llama connectivity test Return only the label Updates"
+		prompt = "Email Address: test@example.com  Subject Line: Classifier connectivity test Return only the label Updates"
 	}
 
 	allowed := cfg.Labels.Allowlist
