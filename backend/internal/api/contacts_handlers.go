@@ -351,14 +351,16 @@ type contactsSyncPushRequest struct {
 // handleContactsSync is the mobile two-way sync endpoint. It is unauthenticated
 // by web session — like handleNotificationNativePull, the caller proves
 // ownership with the subscriberId + subscriberHash minted during device
-// pairing (GET /api/notifications/pairing / POST /api/notifications/native/register).
+// pairing (GET /api/notifications/pairing / POST /api/notifications/native/register),
+// sent via the X-Kypost-Subscriber-Id/X-Kypost-Subscriber-Hash headers or,
+// as a legacy fallback, ?sub=&hash= query params (see
+// docs/superpowers/specs/2026-07-19-pairing-auth-headers-design.md).
 func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 	if s.pairingSecret == "" {
 		http.Error(w, "pairing is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	subscriberID := strings.TrimSpace(r.URL.Query().Get("sub"))
-	subscriberHash := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("hash")))
+	subscriberID, subscriberHash := pairingCredentialsFromRequest(r)
 	if subscriberID == "" || subscriberHash == "" {
 		http.Error(w, "sub and hash are required", http.StatusBadRequest)
 		return
