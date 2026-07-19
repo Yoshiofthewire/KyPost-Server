@@ -100,7 +100,7 @@ func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payl
 		body = bytes.NewReader(nil)
 	}
 	req := httptest.NewRequest(method, path, body)
-	req.AddCookie(&http.Cookie{Name: "llama_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
 	req.Header.Set("X-CSRF-Token", csrfToken)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -144,8 +144,8 @@ func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 		t.Fatalf("mfa/totp: status=%d body=%s", totpRec.Code, totpRec.Body.String())
 	}
 	cookies := totpRec.Result().Cookies()
-	if findCookie(cookies, "llama_session") == nil {
-		t.Fatalf("expected a llama_session cookie after second factor, got %+v", cookies)
+	if findCookie(cookies, "kypost_session") == nil {
+		t.Fatalf("expected a kypost_session cookie after second factor, got %+v", cookies)
 	}
 
 	// Replay: reusing the same challenge is rejected.

@@ -75,7 +75,7 @@ func authRequest(s *Server, req *http.Request) {
 	s.mu.Lock()
 	s.sessions[token] = Session{UserID: all[0].ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
-	req.AddCookie(&http.Cookie{Name: "llama_session", Value: token})
+	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
 	req.Header.Set("X-CSRF-Token", csrfToken)
 }
 

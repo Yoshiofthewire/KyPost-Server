@@ -118,7 +118,7 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
-	req.AddCookie(&http.Cookie{Name: "llama_session", Value: changingToken})
+	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: changingToken})
 	req.Header.Set("X-CSRF-Token", "csrf-a")
 	rec := httptest.NewRecorder()
 	srv.withAuth(srv.handleChangePassword)(rec, req)

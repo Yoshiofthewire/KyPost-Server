@@ -3183,7 +3183,7 @@ func (s *Server) handleCaptchaConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // startSession mints a session token for userID, records it, and sets the
-// llama_session cookie with exactly the flags the legacy password-only login
+// kypost_session cookie with exactly the flags the legacy password-only login
 // used. Shared by handleLogin and the second-factor endpoints.
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID string) error {
 	token, err := randomToken(24)
@@ -3198,7 +3198,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID str
 	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
 	secure := isRequestSecure(r)
-	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "kypost_session", Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 	// Deliberately NOT HttpOnly: the frontend must be able to read this and
 	// echo it back as the X-CSRF-Token header (double-submit pattern) — see
 	// csrfCheckOK. It carries no authority on its own without the paired
@@ -3312,24 +3312,24 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie("llama_session")
+	c, err := r.Cookie("kypost_session")
 	if err == nil {
 		s.mu.Lock()
 		delete(s.sessions, c.Value)
 		s.mu.Unlock()
 	}
 	secure := isRequestSecure(r)
-	http.SetCookie(w, &http.Cookie{Name: "llama_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "kypost_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 	http.SetCookie(w, &http.Cookie{Name: "csrf_token", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: false, Secure: secure, SameSite: http.SameSiteLaxMode})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// currentSessionToken returns the llama_session cookie value on r, or "" if
+// currentSessionToken returns the kypost_session cookie value on r, or "" if
 // absent — used alongside revokeUserSessions so a self-service credential
 // change revokes every *other* session without also logging out the request
 // that made the change.
 func currentSessionToken(r *http.Request) string {
-	if c, err := r.Cookie("llama_session"); err == nil {
+	if c, err := r.Cookie("kypost_session"); err == nil {
 		return c.Value
 	}
 	return ""
@@ -3525,7 +3525,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // csrfCheckOK enforces a double-submit CSRF check on cookie-authenticated,
 // state-changing (non-GET/HEAD/OPTIONS) requests: the X-CSRF-Token header
 // must match the csrf_token minted alongside the caller's session (see
-// startSession). It intentionally does nothing when no llama_session cookie
+// startSession). It intentionally does nothing when no kypost_session cookie
 // is present — mobile clients (X-Kypost-Device-Id/X-Kypost-Device-Secret
 // headers, see resolveMailAuthContext) and CardDAV (HTTP Basic Auth) never send that
 // cookie, so they carry no ambient, forgeable credential for CSRF to exploit
@@ -3536,7 +3536,7 @@ func (s *Server) csrfCheckOK(r *http.Request) bool {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
 	}
-	cookie, err := r.Cookie("llama_session")
+	cookie, err := r.Cookie("kypost_session")
 	if err != nil {
 		return true
 	}
@@ -3599,7 +3599,7 @@ func authContextFromContext(ctx context.Context) (AuthContext, bool) {
 // change or deactivation take effect on the request immediately following
 // it rather than only at next login.
 func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
-	cookie, err := r.Cookie("llama_session")
+	cookie, err := r.Cookie("kypost_session")
 	if err != nil {
 		return AuthContext{}, false
 	}
