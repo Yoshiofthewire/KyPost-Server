@@ -138,7 +138,7 @@ func (b *contactsDAVBackend) ListAddressBooks(ctx context.Context) ([]carddav.Ad
 	return []carddav.AddressBook{{
 		Path:        b.addressBookPath(ac),
 		Name:        "Contacts",
-		Description: "Llama Mail contacts",
+		Description: "KyPost contacts",
 	}}, nil
 }
 

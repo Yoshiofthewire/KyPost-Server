@@ -134,7 +134,7 @@ func resolveRelayKeyWithPrefix(log *logging.Logger, prefix, relayURL string, cli
 func registerWithRelay(relayURL string, client *http.Client) (string, error) {
 	label, _ := os.Hostname()
 	if strings.TrimSpace(label) == "" {
-		label = "llama-lab"
+		label = "kypost-server"
 	}
 	body, err := json.Marshal(map[string]string{"label": label})
 	if err != nil {

@@ -787,7 +787,7 @@ func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, 
 		"title": title,
 		"body":  body,
 		"url":   "/read?" + linkParams.Encode(),
-		"tag":   fmt.Sprintf("llama-mail-email-%s", strings.TrimSpace(msg.ID)),
+		"tag":   fmt.Sprintf("kypost-email-%s", strings.TrimSpace(msg.ID)),
 	})
 	if err != nil {
 		p.log.Error("failed to marshal notification payload", "error", err.Error())

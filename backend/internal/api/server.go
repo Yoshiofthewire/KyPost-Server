@@ -1464,7 +1464,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	title := strings.TrimSpace(payload.Title)
 	body := strings.TrimSpace(payload.Body)
 	if title == "" {
-		title = "Llama Mail Test Notification"
+		title = "KyPost Test Notification"
 	}
 	if body == "" {
 		body = "Push delivery is working across all subscribed devices."
@@ -1474,7 +1474,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		"title": title,
 		"body":  body,
 		"url":   "/notifications",
-		"tag":   "llama-mail-test",
+		"tag":   "kypost-test",
 	}
 	payloadBytes, err := json.Marshal(message)
 	if err != nil {

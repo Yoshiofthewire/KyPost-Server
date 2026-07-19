@@ -106,6 +106,6 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) requireDAVAuth(w http.ResponseWriter) {
-	w.Header().Set("WWW-Authenticate", `Basic realm="llama-mail"`)
+	w.Header().Set("WWW-Authenticate", `Basic realm="kypost"`)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
