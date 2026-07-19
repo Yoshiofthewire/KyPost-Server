@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/config"
 	"llama-lab/backend/internal/health"
 	"llama-lab/backend/internal/logging"
@@ -18,80 +16,6 @@ import (
 	"llama-lab/backend/internal/state"
 	"llama-lab/backend/internal/users"
 )
-
-type stubMailClient struct{}
-
-func (s *stubMailClient) ListUnreadInbox(_ context.Context, _ string) ([]imapadapter.Message, string, error) {
-	return nil, "", nil
-}
-
-func (s *stubMailClient) ListUnreadMessages(_ context.Context, _ string, _ int) ([]imapadapter.UnreadMessage, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) ListOverviews(_ context.Context, _ string, _ int) ([]imapadapter.Overview, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) SearchMessages(_ context.Context, _ string, _ string, _ string, _ int) ([]imapadapter.Overview, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) GetMessageBodies(_ context.Context, _ string, _ []int) (map[int]imapadapter.MessageContent, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) ListLabels(_ context.Context) ([]string, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) ListSubfolders(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) CreateFolder(_ context.Context, _ string, _ string) (string, error) {
-	return "", nil
-}
-
-func (s *stubMailClient) RenameFolder(_ context.Context, _ string, _ string) (string, error) {
-	return "", nil
-}
-
-func (s *stubMailClient) DeleteFolder(_ context.Context, _ string) error {
-	return nil
-}
-
-func (s *stubMailClient) EnsureLabel(_ context.Context, _ string) error {
-	return nil
-}
-
-func (s *stubMailClient) ApplyLabel(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
-func (s *stubMailClient) RemoveLabel(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
-func (s *stubMailClient) ApplyInboxAction(_ context.Context, _ string, _ string, _ string, _ string) error {
-	return nil
-}
-
-func (s *stubMailClient) ListAttachments(_ context.Context, _ string, _ int) ([]imapadapter.AttachmentInfo, error) {
-	return nil, nil
-}
-
-func (s *stubMailClient) GetAttachment(_ context.Context, _ string, _ int, _ int) (imapadapter.AttachmentInfo, []byte, error) {
-	return imapadapter.AttachmentInfo{}, nil, imapadapter.ErrAttachmentNotFound
-}
-
-func (s *stubMailClient) SaveDraft(_ context.Context, _ imapadapter.DraftMessage) error {
-	return nil
-}
-
-func (s *stubMailClient) SaveSent(_ context.Context, _ imapadapter.DraftMessage) error {
-	return nil
-}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()

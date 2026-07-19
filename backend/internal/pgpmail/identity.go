@@ -6,7 +6,6 @@
 package pgpmail
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -77,37 +76,17 @@ func (id *Identity) SealPrivateKey(keyPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("pgpmail: armor private key: %w", err)
 	}
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return "", err
-	}
-	env, err := cryptutil.Seal([]byte(armored), key)
-	if err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	return cryptutil.SealString(armored, keyPath)
 }
 
 // OpenPrivateKey reverses SealPrivateKey, returning a usable Identity.
 // Mirrors mfa.OpenTOTPSecret.
 func OpenPrivateKey(enc, keyPath string) (*Identity, error) {
-	env, ok := cryptutil.ParseEnvelope([]byte(enc))
-	if !ok {
-		return nil, errors.New("pgpmail: private key is not a valid envelope")
-	}
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
+	armored, err := cryptutil.OpenString(enc, keyPath, errors.New("pgpmail: private key is not a valid envelope"))
 	if err != nil {
 		return nil, err
 	}
-	plain, err := cryptutil.Open(env, key)
-	if err != nil {
-		return nil, err
-	}
-	unlockedKey, err := crypto.NewKeyFromArmored(string(plain))
+	unlockedKey, err := crypto.NewKeyFromArmored(armored)
 	if err != nil {
 		return nil, fmt.Errorf("pgpmail: parse stored private key: %w", err)
 	}

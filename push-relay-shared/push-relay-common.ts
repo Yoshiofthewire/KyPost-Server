@@ -6,9 +6,10 @@
  * per-minute rate limiting, usage analytics, and small crypto/HTTP helpers.
  *
  * Each worker keeps its own `Env` interface (extending CommonEnv with its
- * provider-specific secrets), its own `route()` / `handleSend()` / provider
- * config helpers, and its own `export default { fetch(...) }` wrapper — only
- * the leaf pieces that are identical between the two workers live here.
+ * provider-specific secrets) and its own `handleSend()` / provider config
+ * helpers; the route dispatch and `fetch()` wrapper around it are identical
+ * between the two workers, so createRelayFetchHandler below builds both from
+ * each worker's `handleSend`/`configured` pieces.
  */
 
 /** Cloudflare native rate-limiting binding (configured in wrangler.toml). */
@@ -109,15 +110,18 @@ export function bearer(request: Request): string {
 }
 
 /**
- * Constant-time-ish comparison for the admin secret.
+ * Constant-time comparison for the admin secret. Always walks the longer of
+ * the two strings' length rather than returning early on a length mismatch,
+ * so response timing doesn't leak how many characters of the presented
+ * value happened to match the configured secret's length.
  */
 export function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  const maxLen = Math.max(a.length, b.length);
+  let mismatch = a.length === b.length ? 0 : 1;
+  for (let i = 0; i < maxLen; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    mismatch |= ca ^ cb;
   }
   return mismatch === 0;
 }
@@ -438,4 +442,102 @@ export async function handleAdminRevoke(id: string, rc: RequestContext): Promise
   }
   rc.log({ level: "info", event: "key.revoked", keyId: id });
   return json({ ok: true });
+}
+
+// ---- router / fetch wrapper -------------------------------------------------
+//
+// The two workers' routing (health/send/register/admin-keys dispatch) and
+// their `export default { fetch(...) }` wrapper (request-id minting,
+// structured access logging, unhandled-error catch) are identical; only
+// `/health`'s `configured` flag and `/send`'s delivery logic are
+// provider-specific. createRelayFetchHandler takes those two pieces and
+// returns a ready-to-export `fetch` for each worker.
+
+export interface RelayRouterOptions<TEnv extends CommonEnv> {
+  /** Whether the provider (FCM/APNs) credentials are fully configured, surfaced on /health. */
+  configured: (env: TEnv) => boolean;
+  /** Provider-specific POST /send handler. */
+  handleSend: (request: Request, rc: RequestContext<TEnv>) => Promise<Response>;
+}
+
+async function routeRelay<TEnv extends CommonEnv>(
+  request: Request,
+  path: string,
+  rc: RequestContext<TEnv>,
+  opts: RelayRouterOptions<TEnv>,
+): Promise<Response> {
+  const { env } = rc;
+
+  if (path === "/health" && request.method === "GET") {
+    return json({
+      ok: true,
+      configured: opts.configured(env),
+      rateLimits: { perMinute: resolveLimit(env.RATE_LIMIT_PER_MINUTE, DEFAULT_LIMIT_PER_MINUTE) },
+      registrationEnabled: registrationEnabled(env),
+    });
+  }
+
+  if (path === "/send" && request.method === "POST") {
+    return opts.handleSend(request, rc);
+  }
+
+  if (path === "/register" && request.method === "POST") {
+    return handleRegister(request, rc);
+  }
+
+  if (path === "/admin/keys") {
+    if (!requireAdmin(request, env)) {
+      return fail(rc, 401, "unauthorized");
+    }
+    if (request.method === "POST") {
+      return handleAdminCreate(request, rc);
+    }
+    if (request.method === "GET") {
+      return handleAdminList(rc);
+    }
+    return fail(rc, 405, "method not allowed");
+  }
+
+  const revokeMatch = /^\/admin\/keys\/([^/]+)$/.exec(path);
+  if (revokeMatch && request.method === "DELETE") {
+    if (!requireAdmin(request, env)) {
+      return fail(rc, 401, "unauthorized");
+    }
+    return handleAdminRevoke(decodeURIComponent(revokeMatch[1]), rc);
+  }
+
+  return fail(rc, 404, "not found");
+}
+
+/** Builds the `fetch` export for a relay worker from its provider-specific pieces. */
+export function createRelayFetchHandler<TEnv extends CommonEnv>(opts: RelayRouterOptions<TEnv>) {
+  return async function fetch(request: Request, env: TEnv, ctx: ExecutionContext): Promise<Response> {
+    const requestId = crypto.randomUUID();
+    const start = Date.now();
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    const log = (fields: Record<string, unknown>) =>
+      console.log(JSON.stringify({ ts: new Date().toISOString(), requestId, ...fields }));
+
+    const rc: RequestContext<TEnv> = { env, ctx, requestId, log };
+
+    let response: Response;
+    try {
+      response = await routeRelay(request, path, rc, opts);
+    } catch (err) {
+      log({ level: "error", event: "unhandled", method: request.method, path, error: String((err as Error)?.message ?? err) });
+      response = json({ error: "internal error", requestId }, 500);
+    }
+
+    response.headers.set("X-Request-Id", requestId);
+    log({
+      level: response.status >= 500 ? "error" : "info",
+      event: "request",
+      method: request.method,
+      path,
+      status: response.status,
+      durationMs: Date.now() - start,
+    });
+    return response;
+  };
 }

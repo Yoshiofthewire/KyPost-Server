@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type rotatingWriter struct {
+	mu        sync.Mutex
 	path      string
 	maxSize   int64
 	maxFiles  int
@@ -19,6 +21,15 @@ func newRotatingWriter(path string, maxSize int64, maxFiles int) *rotatingWriter
 	w := &rotatingWriter{path: path, maxSize: maxSize, maxFiles: maxFiles}
 	_ = w.open()
 	return w
+}
+
+// NewRotatingWriter returns a size- and count-bounded rotating file writer,
+// safe for concurrent use. Exported so other packages that need their own
+// timestamped/prefixed line format (rather than Logger's structured
+// key=value output) can still share this rotation implementation instead of
+// hand-rolling their own.
+func NewRotatingWriter(path string, maxSize int64, maxFiles int) io.WriteCloser {
+	return newRotatingWriter(path, maxSize, maxFiles)
 }
 
 func (w *rotatingWriter) open() error {
@@ -62,6 +73,8 @@ func (w *rotatingWriter) rotate() error {
 }
 
 func (w *rotatingWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.current == nil {
 		if err := w.open(); err != nil {
 			return 0, err

@@ -115,6 +115,46 @@ func Seal(payload, key []byte) (EncryptedPayload, error) {
 	}, nil
 }
 
+// SealString AES-GCM seals plaintext with the master key at keyPath
+// (creating the key on first use) and returns the JSON envelope as a
+// string, ready to persist. Shared by every caller that seals a single
+// secret string as an encrypted-at-rest envelope (PGP private keys, TOTP
+// secrets).
+func SealString(plaintext, keyPath string) (string, error) {
+	key, err := LoadOrCreateKey(keyPath)
+	if err != nil {
+		return "", err
+	}
+	env, err := Seal([]byte(plaintext), key)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// OpenString reverses SealString, returning the plaintext. errNotEnvelope is
+// returned verbatim when enc isn't a well-formed envelope, so callers can
+// supply their own contextual message.
+func OpenString(enc, keyPath string, errNotEnvelope error) (string, error) {
+	env, ok := ParseEnvelope([]byte(enc))
+	if !ok {
+		return "", errNotEnvelope
+	}
+	key, err := LoadOrCreateKey(keyPath)
+	if err != nil {
+		return "", err
+	}
+	plain, err := Open(env, key)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
 // Open AES-GCM decrypts env with key.
 func Open(env EncryptedPayload, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)

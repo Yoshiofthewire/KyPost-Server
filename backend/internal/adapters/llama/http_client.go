@@ -13,8 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"llama-lab/backend/internal/logging"
 	"llama-lab/backend/internal/retry"
 )
+
+const diagnosticLogMaxSize = 16 * 1024 * 1024
+const diagnosticLogMaxFiles = 8
 
 const warmupRequestTimeout = 3 * time.Minute
 
@@ -56,6 +60,10 @@ type HTTPClient struct {
 
 	classifyMu   sync.Mutex
 	lastClassify time.Time
+
+	outputLog io.WriteCloser
+	serverLog io.WriteCloser
+	errorLog  io.WriteCloser
 }
 
 func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) *HTTPClient {
@@ -75,6 +83,11 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 
 	tuningTemplate := strings.TrimSpace(tuning)
 
+	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
+	if logDir == "" {
+		logDir = "/llama_lab/logs"
+	}
+
 	return &HTTPClient{
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		apiKey:         strings.TrimSpace(apiKey),
@@ -82,6 +95,9 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 		model:          model,
 		client:         &http.Client{Timeout: timeout},
 		tuningTemplate: tuningTemplate,
+		outputLog:      logging.NewRotatingWriter(filepath.Join(logDir, "llama.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
+		serverLog:      logging.NewRotatingWriter(filepath.Join(logDir, "llama-server.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
+		errorLog:       logging.NewRotatingWriter(filepath.Join(logDir, "llama.err.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
 	}
 }
 
@@ -91,7 +107,7 @@ func (c *HTTPClient) Warmup(ctx context.Context) error {
 
 func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sender, subject, body, tuning string) (string, error) {
 	if err := c.ensureWarm(ctx); err != nil {
-		appendLlamaErrorLog(err.Error())
+		c.logError(err.Error())
 		return "", err
 	}
 
@@ -103,7 +119,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	}
 	defer func() { c.lastClassify = time.Now() }()
 
-	appendLlamaServerLog(fmt.Sprintf("[CLASSIFY] From: %s | Subject: [%s]", sender, subject))
+	c.logServer(fmt.Sprintf("[CLASSIFY] From: %s | Subject: [%s]", sender, subject))
 
 	tuning = strings.TrimSpace(tuning)
 	if tuning == "" {
@@ -123,41 +139,41 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	classifyAttempt := func(attempt int) (string, error, bool) {
 		result, err := c.classifyOnce(ctx, prompt)
 		if err != nil {
-			appendLlamaErrorLog(err.Error())
+			c.logError(err.Error())
 			return "", err, false
 		}
 
 		normalized := strings.TrimSpace(result)
-		appendLlamaOutputLog(normalized)
+		c.logOutput(normalized)
 
 		if strings.Contains(strings.ToLower(normalized), "you've reached your weekly chat limit") {
-			appendLlamaErrorLog("AI credits exhausted: weekly chat limit response from model")
-			appendLlamaServerLog("[CLASSIFY FAILED] AI credits exhausted (weekly chat limit reached)")
+			c.logError("AI credits exhausted: weekly chat limit response from model")
+			c.logServer("[CLASSIFY FAILED] AI credits exhausted (weekly chat limit reached)")
 			return "", fmt.Errorf("%s\nuser has run out of ai credits", normalized), false
 		}
 
 		if isToolsOnlyResponse(normalized) {
-			appendLlamaServerLog(fmt.Sprintf("[CLASSIFY RETRY] tools-only response on attempt %d/%d, waiting before retry", attempt+1, 3))
+			c.logServer(fmt.Sprintf("[CLASSIFY RETRY] tools-only response on attempt %d/%d, waiting before retry", attempt+1, 3))
 			retrySubsequentBackoff = 15 * time.Second
 			if attempt < 2 {
 				return "", nil, true
 			}
-			appendLlamaServerLog("[CLASSIFY FAILED] tools-only response exhausted all inner retries")
+			c.logServer("[CLASSIFY FAILED] tools-only response exhausted all inner retries")
 			return "", fmt.Errorf("model returned tools-only response after %d attempts", attempt+1), false
 		}
 
 		if hasEmptyMessageNoise(normalized) || normalized == "" {
-			appendLlamaServerLog(fmt.Sprintf("[CLASSIFY RETRY] empty-message noise on attempt %d/%d, waiting before retry", attempt+1, 3))
+			c.logServer(fmt.Sprintf("[CLASSIFY RETRY] empty-message noise on attempt %d/%d, waiting before retry", attempt+1, 3))
 			retrySubsequentBackoff = classifyRetryBackoff
 			if attempt < 2 {
 				return "", nil, true
 			}
-			appendLlamaServerLog("[CLASSIFY FAILED] empty-message noise exhausted all inner retries")
+			c.logServer("[CLASSIFY FAILED] empty-message noise exhausted all inner retries")
 			return "", fmt.Errorf("model returned empty-message noise after %d attempts", attempt+1), false
 		}
 
 		searchText := stripTransientNoise(labelSearchScope(normalized))
-		appendLlamaServerLog(fmt.Sprintf("[CLASSIFY RESPONSE] %s", strings.SplitN(searchText, "\n", 2)[0]))
+		c.logServer(fmt.Sprintf("[CLASSIFY RESPONSE] %s", strings.SplitN(searchText, "\n", 2)[0]))
 
 		for _, line := range strings.Split(searchText, "\n") {
 			line = strings.TrimSpace(line)
@@ -265,7 +281,7 @@ func (c *HTTPClient) ensureWarm(ctx context.Context) error {
 }
 
 func (c *HTTPClient) runWarmup(ctx context.Context) error {
-	appendLlamaServerLog("[OLLAMA WARMUP] starting")
+	c.logServer("[OLLAMA WARMUP] starting")
 	warmCtx, cancel := context.WithTimeout(ctx, warmupRequestTimeout)
 	defer cancel()
 
@@ -277,7 +293,7 @@ func (c *HTTPClient) runWarmup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	appendLlamaServerLog("[OLLAMA WARMUP] model ready")
+	c.logServer("[OLLAMA WARMUP] model ready")
 	return nil
 }
 
@@ -310,7 +326,7 @@ func (c *HTTPClient) pullModel(ctx context.Context) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("ollama pull failed: status %d body: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	appendLlamaServerLog("[OLLAMA WARMUP] model pulled")
+	c.logServer("[OLLAMA WARMUP] model pulled")
 	return nil
 }
 
@@ -504,22 +520,11 @@ func LoadTuningText() string {
 	return ""
 }
 
-func appendLlamaLog(file, prefix, message string) {
+func (c *HTTPClient) logLine(w io.Writer, prefix, message string) {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
 		return
 	}
-	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
-	if logDir == "" {
-		logDir = "/llama_lab/logs"
-	}
-	path := filepath.Join(logDir, file)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
 	ts := time.Now().Format("2006-01-02 15:04:05")
 	for _, line := range strings.Split(trimmed, "\n") {
 		line = strings.TrimSpace(line)
@@ -527,21 +532,21 @@ func appendLlamaLog(file, prefix, message string) {
 			continue
 		}
 		if prefix != "" {
-			_, _ = fmt.Fprintf(f, "[%s] %s %s\n", ts, prefix, line)
+			_, _ = fmt.Fprintf(w, "[%s] %s %s\n", ts, prefix, line)
 		} else {
-			_, _ = fmt.Fprintf(f, "[%s] %s\n", ts, line)
+			_, _ = fmt.Fprintf(w, "[%s] %s\n", ts, line)
 		}
 	}
 }
 
-func appendLlamaOutputLog(result string) {
-	appendLlamaLog("llama.log", "[OLLAMA OUTPUT]", result)
+func (c *HTTPClient) logOutput(result string) {
+	c.logLine(c.outputLog, "[OLLAMA OUTPUT]", result)
 }
 
-func appendLlamaServerLog(message string) {
-	appendLlamaLog("llama-server.log", "", message)
+func (c *HTTPClient) logServer(message string) {
+	c.logLine(c.serverLog, "", message)
 }
 
-func appendLlamaErrorLog(message string) {
-	appendLlamaLog("llama.err.log", "[LLAMA ERROR]", message)
+func (c *HTTPClient) logError(message string) {
+	c.logLine(c.errorLog, "[LLAMA ERROR]", message)
 }

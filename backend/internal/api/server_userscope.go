@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	imapadapter "llama-lab/backend/internal/adapters/imap"
 	"llama-lab/backend/internal/contacts"
@@ -16,6 +17,25 @@ import (
 	"llama-lab/backend/internal/rules"
 	"llama-lab/backend/internal/state"
 )
+
+// getOrCreateUserStore returns the cached per-user store, constructing and
+// caching it on first access. Shared by the userStore/userContactsStore/
+// userGroupsStore/userRulesStore/userMailCacheStore getters below, which
+// otherwise differ only in which map and constructor they use.
+func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, userID string, construct func() (T, error)) (T, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	if st, ok := cache[userID]; ok {
+		return st, nil
+	}
+	st, err := construct()
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	cache[userID] = st
+	return st, nil
+}
 
 // errIMAPNotConfigured is returned when a caller has not stored IMAP
 // credentials yet; handlers translate it into a 400 with a clear message.
@@ -66,17 +86,9 @@ func (s *Server) userCardDAVClientConfigPath(userID string) string {
 }
 
 func (s *Server) userStore(userID string) (*state.Store, error) {
-	s.userMu.Lock()
-	defer s.userMu.Unlock()
-	if st, ok := s.userStores[userID]; ok {
-		return st, nil
-	}
-	st, err := state.New(s.userStateDir(userID))
-	if err != nil {
-		return nil, err
-	}
-	s.userStores[userID] = st
-	return st, nil
+	return getOrCreateUserStore(&s.userMu, s.userStores, userID, func() (*state.Store, error) {
+		return state.New(s.userStateDir(userID))
+	})
 }
 
 // storeFor resolves the calling user's state store from the request's
@@ -90,17 +102,9 @@ func (s *Server) storeFor(r *http.Request) (*state.Store, error) {
 }
 
 func (s *Server) userContactsStore(userID string) (*contacts.Store, error) {
-	s.userMu.Lock()
-	defer s.userMu.Unlock()
-	if st, ok := s.userContacts[userID]; ok {
-		return st, nil
-	}
-	st, err := contacts.New(s.userStateDir(userID))
-	if err != nil {
-		return nil, err
-	}
-	s.userContacts[userID] = st
-	return st, nil
+	return getOrCreateUserStore(&s.userMu, s.userContacts, userID, func() (*contacts.Store, error) {
+		return contacts.New(s.userStateDir(userID))
+	})
 }
 
 // contactsFor resolves the calling user's contacts store from the request's
@@ -115,17 +119,9 @@ func (s *Server) contactsFor(r *http.Request) (*contacts.Store, error) {
 }
 
 func (s *Server) userGroupsStore(userID string) (*groups.Store, error) {
-	s.userMu.Lock()
-	defer s.userMu.Unlock()
-	if st, ok := s.userGroups[userID]; ok {
-		return st, nil
-	}
-	st, err := groups.New(s.userStateDir(userID))
-	if err != nil {
-		return nil, err
-	}
-	s.userGroups[userID] = st
-	return st, nil
+	return getOrCreateUserStore(&s.userMu, s.userGroups, userID, func() (*groups.Store, error) {
+		return groups.New(s.userStateDir(userID))
+	})
 }
 
 // groupsFor resolves the calling user's groups store from the request's
@@ -139,17 +135,9 @@ func (s *Server) groupsFor(r *http.Request) (*groups.Store, error) {
 }
 
 func (s *Server) userRulesStore(userID string) (*rules.Store, error) {
-	s.userMu.Lock()
-	defer s.userMu.Unlock()
-	if st, ok := s.userRules[userID]; ok {
-		return st, nil
-	}
-	st, err := rules.New(s.userStateDir(userID))
-	if err != nil {
-		return nil, err
-	}
-	s.userRules[userID] = st
-	return st, nil
+	return getOrCreateUserStore(&s.userMu, s.userRules, userID, func() (*rules.Store, error) {
+		return rules.New(s.userStateDir(userID))
+	})
 }
 
 // rulesFor resolves the calling user's rules store from the request's
@@ -196,17 +184,9 @@ func (s *Server) userContactPhotoPath(userID, ref string) string {
 }
 
 func (s *Server) userMailCacheStore(userID string) (*mailcache.Store, error) {
-	s.userMu.Lock()
-	defer s.userMu.Unlock()
-	if st, ok := s.userMailCache[userID]; ok {
-		return st, nil
-	}
-	st, err := mailcache.New(s.userStateDir(userID))
-	if err != nil {
-		return nil, err
-	}
-	s.userMailCache[userID] = st
-	return st, nil
+	return getOrCreateUserStore(&s.userMu, s.userMailCache, userID, func() (*mailcache.Store, error) {
+		return mailcache.New(s.userStateDir(userID))
+	})
 }
 
 // mailCacheFor resolves the calling user's mail cache store from the

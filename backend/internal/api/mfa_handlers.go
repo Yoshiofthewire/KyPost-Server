@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,6 +148,7 @@ func (s *Server) handleMFADisable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to disable two-factor auth", http.StatusInternalServerError)
 		return
 	}
+	s.revokeUserSessions(u.ID, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -168,16 +170,30 @@ func (s *Server) handleMFARecoveryCodesRegenerate(w http.ResponseWriter, r *http
 		http.Error(w, "failed to store recovery codes", http.StatusInternalServerError)
 		return
 	}
+	s.revokeUserSessions(u.ID, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recoveryCodes": codes})
 }
 
 // requirePasswordConfirm decodes a {password} body, loads the caller, and
 // re-verifies their password. On any failure it writes the response and
-// returns ok=false.
+// returns ok=false. Subject to the same three-strikes/15-minute lockout as
+// handleLogin (keyed by the caller's own username, since they're already
+// authenticated) — without it, an attacker holding a stolen but
+// non-privileged session could use this as an unrate-limited oracle to
+// brute-force the account's real login password.
 func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) (users.User, bool) {
 	ac, ok := authFromContext(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return users.User{}, false
+	}
+	if allowed, retryAfter := s.loginLockout.allowed(ac.Username); !allowed {
+		retrySeconds := int(retryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "too many failed attempts, try again later",
+			"retryAfterSeconds": retrySeconds,
+		})
 		return users.User{}, false
 	}
 	var req struct {
@@ -193,9 +209,11 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 		return users.User{}, false
 	}
 	if !users.VerifyPassword(u, req.Password) {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		s.loginLockout.recordFailure(ac.Username)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
 		return users.User{}, false
 	}
+	s.loginLockout.recordSuccess(ac.Username)
 	return u, true
 }
 

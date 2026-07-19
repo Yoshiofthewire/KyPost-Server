@@ -122,6 +122,10 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 		writeUserStoreError(w, err)
 		return
 	}
+	// The admin's own session isn't among this account's sessions, so there's
+	// no "current session" to keep — every one of the target's live sessions
+	// (e.g. a stolen cookie the reset is meant to shut out) is revoked.
+	s.revokeUserSessions(u.ID, "")
 	s.logger.Info("user password reset by admin", "user_id", u.ID)
 	writeJSON(w, http.StatusOK, u.Public())
 }
@@ -165,6 +169,7 @@ func (s *Server) handleUsersClearMFA(w http.ResponseWriter, r *http.Request) {
 		writeUserStoreError(w, err)
 		return
 	}
+	s.revokeUserSessions(u.ID, "")
 	s.logger.Info("user MFA cleared by admin", "user_id", u.ID)
 	writeJSON(w, http.StatusOK, u.Public())
 }

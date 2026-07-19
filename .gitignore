@@ -25,6 +25,7 @@ frontend/dist/
 # Go / backend
 backend/bin/
 backend/.cache/
+backend/main
 
 # Node / Scripts
 scripts/node_modules/

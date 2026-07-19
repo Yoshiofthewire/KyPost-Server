@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+import { useDialogOpen } from "../hooks/useDialogOpen";
 
 type RulesHelpModalProps = {
   isOpen: boolean;
@@ -8,15 +9,7 @@ type RulesHelpModalProps = {
 export function RulesHelpModal({ isOpen, onClose }: RulesHelpModalProps) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (isOpen && !dialog.open) {
-      dialog.showModal();
-    } else if (!isOpen && dialog.open) {
-      dialog.close();
-    }
-  }, [isOpen]);
+  useDialogOpen(dialogRef, isOpen);
 
   return (
     <dialog

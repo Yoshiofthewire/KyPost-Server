@@ -8,7 +8,6 @@ const REFRESH_OPTIONS = [
   { label: "10s", value: 10 },
   { label: "30s", value: 30 },
 ];
-const HIDDEN_LOG_PREFIXES = ["bootstrap"];
 const HIDDEN_LOG_FILES = ["llama.log"];
 
 // Files that should always appear first, in this order.
@@ -129,10 +128,7 @@ export function LogsPage() {
     getJSON<{ files: string[] }>("/api/logs/list")
       .then((d) => {
         const list = sortLogFiles(
-          (d.files ?? []).filter(
-            (name) => !HIDDEN_LOG_PREFIXES.some((prefix) => name.startsWith(prefix))
-              && !HIDDEN_LOG_FILES.includes(name)
-          )
+          (d.files ?? []).filter((name) => !HIDDEN_LOG_FILES.includes(name))
         );
         setFiles(list);
         if (list.length > 0 && !list.includes(active)) setActive(list[0]);

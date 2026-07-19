@@ -208,22 +208,10 @@ func clearAllMFAIfRequested(logger *logging.Logger, usersStore *users.Store) {
 	logger.Error("MFA_CLEAR_ALL: unset this variable and restart once users have re-enrolled, or it will keep clearing MFA on every boot")
 }
 
-func envDurationSeconds(name string, fallback int) int {
-	raw := os.Getenv(name)
-	if raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil || v <= 0 {
-		return fallback
-	}
-	return v
-}
-
 func monitorHealth(logger *logging.Logger, healthSvc *health.Service) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
-	threshold := envDurationSeconds("UNHEALTHY_RESTART_SECONDS", 300)
+	threshold := config.EnvInt("UNHEALTHY_RESTART_SECONDS", 300)
 	for range ticker.C {
 		st := healthSvc.GetStatus()
 		if st.Healthy {

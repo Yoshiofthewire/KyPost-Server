@@ -14,6 +14,16 @@ import (
 const (
 	loginMaxFailures = 3
 	loginLockoutFor  = 15 * time.Minute
+
+	// loginLockoutSweepThreshold bounds how large loginLockout.entries can
+	// grow before a housekeeping sweep runs. An attacker submitting a stream
+	// of distinct, nonexistent usernames each gets its own entry that never
+	// reaches the lockout threshold and is otherwise never removed —
+	// unbounded memory growth over a sustained attack. Sweeping out every
+	// not-currently-locked entry once the map gets this large keeps memory
+	// bounded without a background goroutine; legitimate locked-out entries
+	// (the ones actually worth remembering) are untouched.
+	loginLockoutSweepThreshold = 10_000
 )
 
 type loginLockoutEntry struct {
@@ -55,6 +65,14 @@ func (l *loginLockout) allowed(username string) (ok bool, retryAfter time.Durati
 func (l *loginLockout) recordFailure(username string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if len(l.entries) >= loginLockoutSweepThreshold {
+		now := time.Now()
+		for k, e := range l.entries {
+			if e.lockedUntil.IsZero() || !now.Before(e.lockedUntil) {
+				delete(l.entries, k)
+			}
+		}
+	}
 	e, exists := l.entries[username]
 	if !exists {
 		e = &loginLockoutEntry{}

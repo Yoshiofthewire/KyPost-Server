@@ -349,9 +349,16 @@ func NewNativePushDispatcher(log *logging.Logger) *NativePushDispatcher {
 	}
 }
 
+// nativeSender is implemented by every native push transport (*RelaySender,
+// *UnifiedPushSender), letting selectSender return one without a type switch
+// at each call site.
+type nativeSender interface {
+	Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error
+}
+
 // selectSender returns the appropriate sender for a device based on its Transport
 // and Platform, or an error if no sender is available.
-func (d *NativePushDispatcher) selectSender(device state.NativeDevice) (interface{}, error) {
+func (d *NativePushDispatcher) selectSender(device state.NativeDevice) (nativeSender, error) {
 	transport := strings.ToLower(strings.TrimSpace(device.Transport))
 
 	// If transport is explicit, use it; otherwise derive from platform (legacy).
@@ -388,15 +395,7 @@ func (d *NativePushDispatcher) Send(ctx context.Context, device state.NativeDevi
 	if err != nil {
 		return err
 	}
-
-	switch s := sender.(type) {
-	case *UnifiedPushSender:
-		return s.Send(ctx, device, message)
-	case *RelaySender:
-		return s.Send(ctx, device, message)
-	default:
-		return fmt.Errorf("unknown sender type")
-	}
+	return sender.Send(ctx, device, message)
 }
 
 func (s *RelaySender) Send(ctx context.Context, device state.NativeDevice, message NativePushMessage) error {

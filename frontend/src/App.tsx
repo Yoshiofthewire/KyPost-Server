@@ -7,6 +7,7 @@ import { checkPGPRecipients } from "./api/pgp";
 import { AuthContext, type AuthState } from "./auth";
 import { ContactPickerModal } from "./components/ContactPickerModal";
 import { RecipientField } from "./components/RecipientField";
+import { useDialogOpen } from "./hooks/useDialogOpen";
 import { contactToToken, isDuplicateInField, parseRecipientField, serializeRecipientField } from "./lib/recipients";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
 import { ConfigPage } from "./pages/ConfigPage";
@@ -193,10 +194,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
     const standalone = window.matchMedia("(display-mode: standalone)").matches ||
       (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
     setPwaInstalled(standalone);
@@ -301,9 +298,7 @@ export function App() {
 
   async function deleteInboxFolder(folder: InboxFolder) {
     if (!folder.deletable || deleteFolderLoading || renameFolderLoading) return;
-    const confirmed = typeof window === "undefined"
-      ? true
-      : window.confirm(`Delete ${mailboxLabel(folder.path)} and move its emails to ${mailboxLabel(folder.path.slice(0, Math.max(folder.path.lastIndexOf("/"), folder.path.lastIndexOf(".")))) || "the parent folder"}?`);
+    const confirmed = window.confirm(`Delete ${mailboxLabel(folder.path)} and move its emails to ${mailboxLabel(folder.path.slice(0, Math.max(folder.path.lastIndexOf("/"), folder.path.lastIndexOf(".")))) || "the parent folder"}?`);
     if (!confirmed) return;
 
     setDeleteFolderLoading(folder.path);
@@ -328,7 +323,7 @@ export function App() {
   async function renameInboxFolder(folder: InboxFolder) {
     if (!folder.deletable || renameFolderLoading || deleteFolderLoading) return;
     const current = mailboxLabel(folder.path);
-    const nextName = typeof window === "undefined" ? "" : window.prompt("Rename folder", current) ?? "";
+    const nextName = window.prompt("Rename folder", current) ?? "";
     const name = nextName.trim();
     if (!name || name === current) {
       setFolderMenuPath("");
@@ -389,14 +384,12 @@ export function App() {
       if (response.failed.length > 0) {
         throw new Error(response.failed[0]?.error || "some emails could not be moved");
       }
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("mailbox-move-complete", {
-          detail: {
-            sourceMailbox: payload.mailbox,
-            targetMailbox
-          }
-        }));
-      }
+      window.dispatchEvent(new CustomEvent("mailbox-move-complete", {
+        detail: {
+          sourceMailbox: payload.mailbox,
+          targetMailbox
+        }
+      }));
     } catch (e) {
       const message = toErrorMessage(e, "failed to move email");
       setDeleteFolderError(message);
@@ -446,25 +439,8 @@ export function App() {
     }
   }, [composeOpen, composeHtmlBody]);
 
-  useEffect(() => {
-    const dialog = composeDialogRef.current;
-    if (!dialog) return;
-    if (composeOpen && !dialog.open) {
-      dialog.showModal();
-    } else if (!composeOpen && dialog.open) {
-      dialog.close();
-    }
-  }, [composeOpen]);
-
-  useEffect(() => {
-    const dialog = licenseDialogRef.current;
-    if (!dialog) return;
-    if (licenseOpen && !dialog.open) {
-      dialog.showModal();
-    } else if (!licenseOpen && dialog.open) {
-      dialog.close();
-    }
-  }, [licenseOpen]);
+  useDialogOpen(composeDialogRef, composeOpen);
+  useDialogOpen(licenseDialogRef, licenseOpen);
 
   function resetComposeForm() {
     setComposeTo({ tokens: [], draft: "" });

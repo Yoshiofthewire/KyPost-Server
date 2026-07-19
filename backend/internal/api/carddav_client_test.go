@@ -241,3 +241,35 @@ func TestFetchAddressBookCardsToleratesMalformedETag(t *testing.T) {
 		t.Errorf("FN = %q, want %q", fn, "Weak Etag Person")
 	}
 }
+
+// TestResolveCardDAVPathPinsHost guards against a credential-exfiltration
+// regression: every request built from resolveCardDAVPath's result carries
+// this account's CardDAV Basic Auth credentials (see fetchAddressBookCards /
+// syncCardDAVClient), so an absolute or protocol-relative p — whether from a
+// user-supplied AddressBookPath or, in principle, a value returned by a
+// compromised remote server during discovery — must never redirect those
+// credentials to a different host than the configured CardDAV server.
+func TestResolveCardDAVPathPinsHost(t *testing.T) {
+	cases := []struct {
+		name     string
+		hostRoot string
+		path     string
+		want     string
+	}{
+		{"relative path", "https://carddav.example.com", "/dav/contacts/", "https://carddav.example.com/dav/contacts/"},
+		{"absolute path same scheme+host", "https://carddav.example.com", "https://carddav.example.com/dav/other/", "https://carddav.example.com/dav/other/"},
+		{"absolute URL to a different host is pinned back to hostRoot", "https://carddav.example.com", "http://attacker.example/steal", "https://carddav.example.com/steal"},
+		{"protocol-relative host is pinned back to hostRoot", "https://carddav.example.com", "//attacker.example/steal", "https://carddav.example.com/steal"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveCardDAVPath(c.hostRoot, c.path)
+			if err != nil {
+				t.Fatalf("resolveCardDAVPath: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("resolveCardDAVPath(%q, %q) = %q, want %q", c.hostRoot, c.path, got, c.want)
+			}
+		})
+	}
+}

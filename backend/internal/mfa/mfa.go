@@ -6,7 +6,6 @@ package mfa
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -253,34 +252,10 @@ func GenerateRecoveryCodes(n int) ([]string, error) {
 // the key on first use) and returns the JSON envelope as a string, ready to
 // store on User.TOTPSecretEnc.
 func SealTOTPSecret(base32Secret, keyPath string) (string, error) {
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return "", err
-	}
-	env, err := cryptutil.Seal([]byte(base32Secret), key)
-	if err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	return cryptutil.SealString(base32Secret, keyPath)
 }
 
 // OpenTOTPSecret reverses SealTOTPSecret, returning the base32 secret.
 func OpenTOTPSecret(enc, keyPath string) (string, error) {
-	env, ok := cryptutil.ParseEnvelope([]byte(enc))
-	if !ok {
-		return "", errors.New("mfa: totp secret is not a valid envelope")
-	}
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return "", err
-	}
-	plain, err := cryptutil.Open(env, key)
-	if err != nil {
-		return "", err
-	}
-	return string(plain), nil
+	return cryptutil.OpenString(enc, keyPath, errors.New("mfa: totp secret is not a valid envelope"))
 }

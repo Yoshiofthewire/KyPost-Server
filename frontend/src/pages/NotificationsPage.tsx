@@ -322,12 +322,7 @@ export function NotificationsPage() {
   function base64URLToUint8Array(base64URL: string): Uint8Array<ArrayBuffer> {
     const normalized = base64URL.replace(/-/g, "+").replace(/_/g, "/");
     const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const raw = window.atob(padded);
-    const out = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i += 1) {
-      out[i] = raw.charCodeAt(i);
-    }
-    return out;
+    return Uint8Array.from(window.atob(padded), (c) => c.charCodeAt(0));
   }
 
   async function registerDeviceForPush(): Promise<void> {

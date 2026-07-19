@@ -2,6 +2,8 @@ package fsutil
 
 import (
 	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +37,42 @@ func AtomicWriteFile(path string, payload []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// LoadJSONFile reads path and json-unmarshals it into a fresh V, passing it
+// to apply on success. If the file doesn't exist, it calls onMissing instead
+// (nil to treat a missing file as a no-op) — callers use this to distinguish
+// first-run seeding (persist an initial empty file) from an in-run refresh
+// (keep the current in-memory state). Shared by the per-user JSON stores
+// (rules/groups/contacts/mailcache), which otherwise duplicate this
+// read-or-seed branch identically for both their load and refresh paths.
+func LoadJSONFile[V any](path string, apply func(V), onMissing func() error) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if onMissing != nil {
+				return onMissing()
+			}
+			return nil
+		}
+		return err
+	}
+	var v V
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	apply(v)
+	return nil
+}
+
+// PersistJSONFile marshals v as indented JSON and atomically writes it to
+// path with owner-only permissions.
+func PersistJSONFile[V any](path string, v V) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return AtomicWriteFile(path, b, 0o600)
 }
 
 // NewUUIDv4 returns a random RFC 4122 version-4 UUID string.

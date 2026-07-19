@@ -217,7 +217,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/password", s.withAuth(s.handleChangePassword))
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/config", s.withAuth(s.handleConfig))
-	mux.HandleFunc("PUT /api/config", s.withAuth(s.handleConfig))
+	mux.HandleFunc("PUT /api/config", s.withAdmin(s.handleConfig))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("GET /api/decisions", s.withAuth(s.handleDecisions))
 	mux.HandleFunc("GET /api/inbox", s.withMailAuth(s.handleInbox))
@@ -316,7 +316,7 @@ func (s *Server) routes() http.Handler {
 }
 
 func (s *Server) Run() error {
-	port := envInt("WEB_PORT", 5866)
+	port := config.EnvInt("WEB_PORT", 5866)
 	s.logger.Info("api server starting", "port", strconv.Itoa(port))
 	return http.ListenAndServe(":"+strconv.Itoa(port), s.routes())
 }
@@ -896,7 +896,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	smtpPort := payload.SMTPPort
 	if smtpPort <= 0 {
-		smtpPort = envInt("SMTP_PORT", 587)
+		smtpPort = config.EnvInt("SMTP_PORT", 587)
 	}
 	if smtpPort <= 0 {
 		smtpPort = 587
@@ -1251,6 +1251,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()
 		cfg := s.cfg
 		s.mu.RUnlock()
+		// Remote LLM settings (including the API key) are admin-only to
+		// edit; don't hand the plaintext key to a non-admin session either.
+		if ac, ok := authFromContext(r); !ok || ac.Role != users.RoleAdmin {
+			cfg.Llama.APIKey = ""
+		}
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
 		var next config.Config
@@ -1997,76 +2002,65 @@ func (s *Server) createPairingToken(subscriberID string, ttl time.Duration) (str
 	return token, expiresAt, nil
 }
 
-func (s *Server) validatePairingToken(subscriberID, token string, now time.Time) error {
+// decodeAndVerifyPairingToken decodes token (in the shape produced by
+// createPairingToken), verifies its HMAC signature, and checks expiry,
+// returning its claims. Shared by validatePairingToken (which additionally
+// checks the subject against a caller-supplied expectation) and
+// parsePairingTokenUserID (which returns the subject to the caller instead).
+func (s *Server) decodeAndVerifyPairingToken(token string, now time.Time) (pairingTokenClaims, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 2 {
-		return errors.New("invalid token format")
+		return pairingTokenClaims{}, errors.New("invalid token format")
 	}
 
 	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return errors.New("invalid token payload")
+		return pairingTokenClaims{}, errors.New("invalid token payload")
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return errors.New("invalid token signature")
+		return pairingTokenClaims{}, errors.New("invalid token signature")
 	}
 
 	mac := hmac.New(sha256.New, []byte(s.pairingSecret))
 	mac.Write(payload)
 	expectedSig := mac.Sum(nil)
 	if subtle.ConstantTimeCompare(sig, expectedSig) != 1 {
-		return errors.New("signature mismatch")
+		return pairingTokenClaims{}, errors.New("signature mismatch")
 	}
 
 	var claims pairingTokenClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return errors.New("invalid token claims")
+		return pairingTokenClaims{}, errors.New("invalid token claims")
+	}
+	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
+		return pairingTokenClaims{}, errors.New("token expired")
+	}
+
+	return claims, nil
+}
+
+func (s *Server) validatePairingToken(subscriberID, token string, now time.Time) error {
+	claims, err := s.decodeAndVerifyPairingToken(token, now)
+	if err != nil {
+		return err
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(strings.TrimSpace(subscriberID))) != 1 {
 		return errors.New("subscriber mismatch")
 	}
-	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
-		return errors.New("token expired")
-	}
-
 	return nil
 }
 
-// parsePairingTokenUserID decodes and HMAC-verifies token (in the same
-// shape as createPairingToken/validatePairingToken) without requiring the
-// caller to already know the expected subject, returning the subject the
-// token was minted for. Used by the QR key-fetch endpoint, which must learn
-// which user a token belongs to rather than confirm a known one — unlike
-// validatePairingToken (used for pickup links, where the URL path already
-// carries the expected ID to check against).
+// parsePairingTokenUserID decodes and HMAC-verifies token without requiring
+// the caller to already know the expected subject, returning the subject
+// the token was minted for. Used by the QR key-fetch endpoint, which must
+// learn which user a token belongs to rather than confirm a known one —
+// unlike validatePairingToken (used for pickup links, where the URL path
+// already carries the expected ID to check against).
 func (s *Server) parsePairingTokenUserID(token string, now time.Time) (string, error) {
-	parts := strings.Split(strings.TrimSpace(token), ".")
-	if len(parts) != 2 {
-		return "", errors.New("invalid token format")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	claims, err := s.decodeAndVerifyPairingToken(token, now)
 	if err != nil {
-		return "", errors.New("invalid token payload")
-	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", errors.New("invalid token signature")
-	}
-
-	mac := hmac.New(sha256.New, []byte(s.pairingSecret))
-	mac.Write(payload)
-	expectedSig := mac.Sum(nil)
-	if subtle.ConstantTimeCompare(sig, expectedSig) != 1 {
-		return "", errors.New("signature mismatch")
-	}
-
-	var claims pairingTokenClaims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", errors.New("invalid token claims")
-	}
-	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
-		return "", errors.New("token expired")
+		return "", err
 	}
 	return claims.Sub, nil
 }
@@ -3298,6 +3292,35 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// currentSessionToken returns the llama_session cookie value on r, or "" if
+// absent — used alongside revokeUserSessions so a self-service credential
+// change revokes every *other* session without also logging out the request
+// that made the change.
+func currentSessionToken(r *http.Request) string {
+	if c, err := r.Cookie("llama_session"); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+// revokeUserSessions deletes every live session belonging to userID, except
+// keepToken if non-empty (the caller's own session, when the caller and the
+// affected account are the same — e.g. a user changing their own password).
+// Called after a password change/reset or MFA disable/regeneration so a
+// stolen session cookie for that account is cut off from continued access
+// as soon as the legitimate user (or an admin, on their behalf) takes one of
+// those recovery actions, rather than remaining valid for up to the
+// remaining 24h sliding-expiry window.
+func (s *Server) revokeUserSessions(userID, keepToken string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, sess := range s.sessions {
+		if sess.UserID == userID && token != keepToken {
+			delete(s.sessions, token)
+		}
+	}
+}
+
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	ac, ok := s.currentUser(r)
 	if !ok {
@@ -3358,6 +3381,11 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to update password", http.StatusInternalServerError)
 		return
 	}
+	// A password change should cut off any other session on this account —
+	// e.g. a stolen cookie the legitimate user is trying to lock out by
+	// changing their password — while leaving the session making this very
+	// request (presumably the legitimate user) logged in.
+	s.revokeUserSessions(u.ID, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -3589,18 +3617,6 @@ func scheduleContainerRestart(logger *logging.Logger, reason string, delay time.
 	}()
 }
 
-func envInt(name string, fallback int) int {
-	raw := os.Getenv(name)
-	if raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return fallback
-	}
-	return v
-}
-
 func tailLines(path string, limit int) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -3627,5 +3643,5 @@ func randomToken(size int) (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%x", b), nil
+	return hex.EncodeToString(b), nil
 }

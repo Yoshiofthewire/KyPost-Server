@@ -1,8 +1,6 @@
 package rules
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,19 +44,7 @@ func (s *Store) path() string {
 }
 
 func (s *Store) load() error {
-	b, err := os.ReadFile(s.path())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return s.persistLocked()
-		}
-		return err
-	}
-	var rf rulesFile
-	if err := json.Unmarshal(b, &rf); err != nil {
-		return err
-	}
-	s.applyFile(rf)
-	return nil
+	return fsutil.LoadJSONFile(s.path(), s.applyFile, s.persistLocked)
 }
 
 func (s *Store) applyFile(rf rulesFile) {
@@ -67,27 +53,11 @@ func (s *Store) applyFile(rf rulesFile) {
 }
 
 func (s *Store) refreshFromDiskLocked() error {
-	b, err := os.ReadFile(s.path())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	var rf rulesFile
-	if err := json.Unmarshal(b, &rf); err != nil {
-		return err
-	}
-	s.applyFile(rf)
-	return nil
+	return fsutil.LoadJSONFile(s.path(), s.applyFile, nil)
 }
 
 func (s *Store) persistLocked() error {
-	b, err := json.MarshalIndent(rulesFile{Rules: s.rules, Seq: s.seq}, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := fsutil.AtomicWriteFile(s.path(), b, 0o600); err != nil {
+	if err := fsutil.PersistJSONFile(s.path(), rulesFile{Rules: s.rules, Seq: s.seq}); err != nil {
 		return fmt.Errorf("write rules: %w", err)
 	}
 	return nil

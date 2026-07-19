@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listContacts, type Contact } from "../api/contacts";
 import { toErrorMessage } from "../api/client";
 import { isDuplicateInField, type RecipientToken } from "../lib/recipients";
+import { useDialogOpen } from "../hooks/useDialogOpen";
 
 type RecipientFieldKey = "to" | "cc" | "bcc";
 
@@ -27,15 +28,7 @@ export function ContactPickerModal({ isOpen, onClose, toTokens, ccTokens, bccTok
   const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (isOpen && !dialog.open) {
-      dialog.showModal();
-    } else if (!isOpen && dialog.open) {
-      dialog.close();
-    }
-  }, [isOpen]);
+  useDialogOpen(dialogRef, isOpen);
 
   // Fetch the full contact list once per modal open (not per keystroke, not
   // per render) — the picker filters client-side, matching ContactsPage.tsx.

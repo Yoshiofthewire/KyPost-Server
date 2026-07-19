@@ -374,7 +374,7 @@ func (s *Store) GetOrCreateSubscriberID() (string, error) {
 		return s.subscriberID, nil
 	}
 
-	id, err := newUUIDv4()
+	id, err := fsutil.NewUUIDv4()
 	if err != nil {
 		return "", err
 	}
@@ -598,7 +598,7 @@ func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 	device.Platform = strings.ToLower(strings.TrimSpace(device.Platform))
 	device.PushToken = strings.TrimSpace(device.PushToken)
 	if device.DeviceID == "" {
-		id, err := newUUIDv4()
+		id, err := fsutil.NewUUIDv4()
 		if err != nil {
 			return err
 		}
@@ -914,8 +914,4 @@ func (s *Store) RecordDesktopPairingAttempt(code string, success bool) error {
 
 	s.pairingAttemptsDirty = true
 	return s.persistLocked()
-}
-
-func newUUIDv4() (string, error) {
-	return fsutil.NewUUIDv4()
 }

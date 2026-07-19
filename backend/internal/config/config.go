@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"llama-lab/backend/internal/fsutil"
@@ -30,6 +31,20 @@ func EnvOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// EnvInt returns the environment variable key parsed as a positive int, or
+// fallback if it is unset, unparseable, or not positive.
+func EnvInt(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
 }
 
 type Config struct {

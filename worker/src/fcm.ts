@@ -6,7 +6,7 @@
  * secrets; the short-lived Google access token is cached in KV.
  */
 
-import { base64UrlEncode, base64UrlEncodeString } from "../../push-relay-shared/base64url";
+import { base64UrlEncode, base64UrlEncodeString, pemToDer } from "../../push-relay-shared/base64url";
 
 const FCM_OAUTH_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -23,7 +23,6 @@ export interface FcmMessage {
   title: string;
   body: string;
   data?: Record<string, string>;
-  platform?: string;
 }
 
 export type FcmResult =
@@ -35,15 +34,9 @@ export type FcmResult =
  * Import a PKCS8 PEM RSA private key for RS256 signing.
  */
 async function importPrivateKey(pem: string): Promise<CryptoKey> {
-  const normalized = pem.replace(/\\n/g, "\n").trim();
-  const body = normalized
-    .replace(/-----BEGIN [^-]+-----/, "")
-    .replace(/-----END [^-]+-----/, "")
-    .replace(/\s+/g, "");
-  const der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
   return crypto.subtle.importKey(
     "pkcs8",
-    der,
+    pemToDer(pem),
     { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"],

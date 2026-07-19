@@ -1,18 +1,14 @@
 package logging
 
 import (
-	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 )
 
 type Logger struct {
-	mu     sync.Mutex
-	logger *log.Logger
+	logger *slog.Logger
 	writer *rotatingWriter
 }
 
@@ -23,7 +19,7 @@ func New(logDir string) (*Logger, error) {
 	w := newRotatingWriter(filepath.Join(logDir, "app.log"), 16*1024*1024, 8)
 	mw := io.MultiWriter(os.Stdout, w)
 	return &Logger{
-		logger: log.New(mw, "", 0),
+		logger: slog.New(slog.NewTextHandler(mw, nil)),
 		writer: w,
 	}, nil
 }
@@ -33,20 +29,20 @@ func (l *Logger) Close() error {
 }
 
 func (l *Logger) Info(msg string, kv ...string) {
-	l.log("INFO", msg, kv...)
+	l.logger.Info(msg, stringsToArgs(kv)...)
 }
 
 func (l *Logger) Error(msg string, kv ...string) {
-	l.log("ERROR", msg, kv...)
+	l.logger.Error(msg, stringsToArgs(kv)...)
 }
 
-func (l *Logger) log(level, msg string, kv ...string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	ts := time.Now().Format(time.RFC3339)
-	line := fmt.Sprintf("%s level=%s msg=%q", ts, level, msg)
-	for i := 0; i+1 < len(kv); i += 2 {
-		line += fmt.Sprintf(" %s=%q", kv[i], kv[i+1])
+// stringsToArgs adapts the Logger.Info/Error flat-string-pairs API (kept for
+// caller convenience — every call site already has string values) onto
+// slog's ...any args.
+func stringsToArgs(kv []string) []any {
+	args := make([]any, len(kv))
+	for i, v := range kv {
+		args[i] = v
 	}
-	l.logger.Println(line)
+	return args
 }

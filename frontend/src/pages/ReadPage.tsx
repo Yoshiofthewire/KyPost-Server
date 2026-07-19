@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import DOMPurify from "dompurify";
 import { getJSON, postJSON, toErrorMessage } from "../api/client";
 import { usePagination } from "../hooks/usePagination";
+import { useDialogOpen } from "../hooks/useDialogOpen";
 import { PageTabs } from "../components/PageTabs";
 
 type InboxEmail = {
@@ -140,13 +141,6 @@ function processEmailHtml(html: string, showImages: boolean): string {
   // Extract body content if it's a full HTML document
   const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
   const content = bodyMatch ? bodyMatch[1] : html;
-
-  if (typeof window === "undefined") {
-    // No DOM available to sanitize against (DOMPurify requires one); this
-    // path exists only as a defensive SSR guard and never renders directly.
-    if (showImages) return content;
-    return content.replace(/<img[^>]*>/gi, "[Image Blocked]");
-  }
 
   const parser = new DOMParser();
   const document = parser.parseFromString(`<div>${content}</div>`, "text/html");
@@ -304,9 +298,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [searching, setSearching] = useState(false);
   const [swipeRemovedIds, setSwipeRemovedIds] = useState<string[]>([]);
   const [swipeHapticsEnabled, setSwipeHapticsEnabled] = useState<boolean>(() => {
-    if (typeof window === "undefined") {
-      return true;
-    }
     try {
       return window.localStorage.getItem(SWIPE_HAPTICS_STORAGE_KEY) !== "false";
     } catch {
@@ -330,7 +321,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const swipeLiveRef = useRef<Record<string, Omit<SwipeRowState, "phase">>>({});
   const swipeClickSuppressRef = useRef<Set<string>>(new Set());
   const isTouchSwipeEnabled =
-    typeof window !== "undefined" &&
     window.matchMedia("(pointer: coarse)").matches &&
     !isDraftMailbox;
   const hapticsSupported =
@@ -338,9 +328,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     typeof (navigator as Navigator & { vibrate?: (pulse: number | number[]) => boolean }).vibrate === "function";
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
     try {
       window.localStorage.setItem(SWIPE_HAPTICS_STORAGE_KEY, swipeHapticsEnabled ? "true" : "false");
     } catch {
@@ -426,15 +413,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     return () => clearInterval(timer);
   }, [mailbox]);
 
-  useEffect(() => {
-    const dialog = emailReaderDialogRef.current;
-    if (!dialog) return;
-    if (selected && !dialog.open) {
-      dialog.showModal();
-    } else if (!selected && dialog.open) {
-      dialog.close();
-    }
-  }, [selected]);
+  useDialogOpen(emailReaderDialogRef, selected);
 
   // Deep-link support: a push notification click lands here with
   // ?message=<id>&tab=<label> (see maybeSendPushNotification on the
@@ -482,7 +461,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
     const handleMailboxMove = () => {
       void loadInbox();
     };
@@ -1033,7 +1011,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   }
 
   function printEmails(items: InboxEmail[]) {
-    if (items.length === 0 || typeof window === "undefined") return;
+    if (items.length === 0) return;
     const sections = items
       .map((item) => {
         const body = item.body || "No message body available.";

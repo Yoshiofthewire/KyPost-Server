@@ -283,7 +283,14 @@ type davProp struct {
 
 // resolveCardDAVPath resolves p (an absolute or relative resource path, as
 // returned by address book discovery or configured directly) against
-// hostRoot, producing a full request URL.
+// hostRoot, producing a full request URL. The result's scheme/host are
+// always pinned to hostRoot's — p only ever contributes path/query/fragment
+// — because p can be a user-supplied AddressBookPath (or, in principle, a
+// value smuggled back from a compromised remote server during discovery),
+// and every request built from it carries this account's CardDAV Basic Auth
+// credentials (see syncCardDAVClient); without pinning, an absolute p like
+// "http://attacker.example/steal" would silently redirect those credentials
+// to an arbitrary host that validateOutboundURL never gets a chance to check.
 func resolveCardDAVPath(hostRoot, p string) (string, error) {
 	base, err := url.Parse(hostRoot)
 	if err != nil {
@@ -293,7 +300,10 @@ func resolveCardDAVPath(hostRoot, p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return base.ResolveReference(ref).String(), nil
+	resolved := base.ResolveReference(ref)
+	resolved.Scheme = base.Scheme
+	resolved.Host = base.Host
+	return resolved.String(), nil
 }
 
 // fetchAddressBookCards issues a minimal addressbook-query REPORT against

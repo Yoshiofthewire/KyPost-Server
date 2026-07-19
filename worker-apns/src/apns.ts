@@ -4,7 +4,7 @@
  * Generates ES256 provider tokens and sends to Apple's push service.
  */
 
-import { base64UrlEncode, base64UrlEncodeString } from "../../push-relay-shared/base64url";
+import { base64UrlEncode, base64UrlEncodeString, pemToDer } from "../../push-relay-shared/base64url";
 
 const APNS_PRODUCTION_HOST = "api.push.apple.com";
 const APNS_SANDBOX_HOST = "api.sandbox.push.apple.com";
@@ -33,16 +33,9 @@ export type ApnsResult =
  * Import a PKCS#8 PEM ES256 private key for APNs provider-token signing.
  */
 async function importApnsPrivateKey(pem: string): Promise<CryptoKey> {
-  const normalized = pem.replace(/\\n/g, "\n").trim();
-  const body = normalized
-    .replace(/-----BEGIN PRIVATE KEY-----/, "")
-    .replace(/-----END PRIVATE KEY-----/, "")
-    .replace(/\s+/g, "");
-  const der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
-
   return crypto.subtle.importKey(
     "pkcs8",
-    der,
+    pemToDer(pem),
     { name: "ECDSA", namedCurve: "P-256" },
     false,
     ["sign"],

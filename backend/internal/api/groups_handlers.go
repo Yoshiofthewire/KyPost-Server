@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"llama-lab/backend/internal/groups"
@@ -111,32 +112,13 @@ func (s *Server) removeGroupFromContacts(r *http.Request, groupID string) error 
 		return err
 	}
 	for _, c := range contactsStore.List() {
-		if !containsString(c.GroupIDs, groupID) {
+		if !slices.Contains(c.GroupIDs, groupID) {
 			continue
 		}
-		c.GroupIDs = removeString(c.GroupIDs, groupID)
+		c.GroupIDs = slices.DeleteFunc(slices.Clone(c.GroupIDs), func(id string) bool { return id == groupID })
 		if _, err := contactsStore.Upsert(c); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func containsString(ss []string, v string) bool {
-	for _, s := range ss {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
-func removeString(ss []string, v string) []string {
-	out := make([]string, 0, len(ss))
-	for _, s := range ss {
-		if s != v {
-			out = append(out, s)
-		}
-	}
-	return out
 }

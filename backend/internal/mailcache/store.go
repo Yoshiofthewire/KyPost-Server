@@ -1,8 +1,6 @@
 package mailcache
 
 import (
-	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -60,19 +58,7 @@ func (s *Store) path() string {
 }
 
 func (s *Store) load() error {
-	b, err := os.ReadFile(s.path())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return s.persistLocked()
-		}
-		return err
-	}
-	var cf mailCacheFile
-	if err := json.Unmarshal(b, &cf); err != nil {
-		return err
-	}
-	s.applyFile(cf)
-	return nil
+	return fsutil.LoadJSONFile(s.path(), s.applyFile, s.persistLocked)
 }
 
 func (s *Store) applyFile(cf mailCacheFile) {
@@ -83,27 +69,11 @@ func (s *Store) applyFile(cf mailCacheFile) {
 }
 
 func (s *Store) refreshFromDiskLocked() error {
-	b, err := os.ReadFile(s.path())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	var cf mailCacheFile
-	if err := json.Unmarshal(b, &cf); err != nil {
-		return err
-	}
-	s.applyFile(cf)
-	return nil
+	return fsutil.LoadJSONFile(s.path(), s.applyFile, nil)
 }
 
 func (s *Store) persistLocked() error {
-	b, err := json.MarshalIndent(mailCacheFile{Mailboxes: s.mailboxes}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fsutil.AtomicWriteFile(s.path(), b, 0o600)
+	return fsutil.PersistJSONFile(s.path(), mailCacheFile{Mailboxes: s.mailboxes})
 }
 
 // Snapshot returns up to limit cached entries for mailboxKey (the limit

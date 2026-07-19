@@ -28,6 +28,7 @@ import {
 import { createGroup, deleteGroup, listGroups, renameGroup, type Group } from "../api/groups";
 import { lookupPGPKeyserver } from "../api/pgp";
 import { usePagination } from "../hooks/usePagination";
+import { useDialogOpen } from "../hooks/useDialogOpen";
 import { PageTabs } from "../components/PageTabs";
 import { MultiValueField } from "../components/MultiValueField";
 
@@ -321,25 +322,8 @@ export function ContactsPage() {
       .catch(() => {});
   }, []);
 
-  useEffect(() => {
-    const dialog = contactDialogRef.current;
-    if (!dialog) return;
-    if (selectedContact && !dialog.open) {
-      dialog.showModal();
-    } else if (!selectedContact && dialog.open) {
-      dialog.close();
-    }
-  }, [selectedContact]);
-
-  useEffect(() => {
-    const dialog = contactFormDialogRef.current;
-    if (!dialog) return;
-    if (formOpen && !dialog.open) {
-      dialog.showModal();
-    } else if (!formOpen && dialog.open) {
-      dialog.close();
-    }
-  }, [formOpen]);
+  useDialogOpen(contactDialogRef, selectedContact);
+  useDialogOpen(contactFormDialogRef, formOpen);
 
   function startCreate() {
     setEditingUid("");

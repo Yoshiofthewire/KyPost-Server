@@ -39,16 +39,11 @@ import {
   bindToken,
   checkMinuteLimit,
   checkTokenBinding,
+  createRelayFetchHandler,
   fail,
-  handleAdminCreate,
-  handleAdminList,
-  handleAdminRevoke,
-  handleRegister,
   isExpired,
   json,
   recordUsageAnalytics,
-  registrationEnabled,
-  requireAdmin,
   resolveLimit,
   sha256Hex,
 } from "../../push-relay-shared/push-relay-common";
@@ -167,80 +162,15 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   return fail(rc, 502, `apns send failed: status=${result.status} response=${result.detail}`);
 }
 
-// ---- router ----------------------------------------------------------------
-
-async function route(request: Request, path: string, rc: RequestContext<Env>): Promise<Response> {
-  const { env } = rc;
-
-  if (path === "/health" && request.method === "GET") {
-    return json({
-      ok: true,
-      configured: apnsConfigured(env),
-      rateLimits: { perMinute: resolveLimit(env.RATE_LIMIT_PER_MINUTE, DEFAULT_LIMIT_PER_MINUTE) },
-      registrationEnabled: registrationEnabled(env),
-    });
-  }
-
-  if (path === "/send" && request.method === "POST") {
-    return handleSend(request, rc);
-  }
-
-  if (path === "/register" && request.method === "POST") {
-    return handleRegister(request, rc);
-  }
-
-  if (path === "/admin/keys") {
-    if (!requireAdmin(request, env)) {
-      return fail(rc, 401, "unauthorized");
-    }
-    if (request.method === "POST") {
-      return handleAdminCreate(request, rc);
-    }
-    if (request.method === "GET") {
-      return handleAdminList(rc);
-    }
-    return fail(rc, 405, "method not allowed");
-  }
-
-  const revokeMatch = /^\/admin\/keys\/([^/]+)$/.exec(path);
-  if (revokeMatch && request.method === "DELETE") {
-    if (!requireAdmin(request, env)) {
-      return fail(rc, 401, "unauthorized");
-    }
-    return handleAdminRevoke(decodeURIComponent(revokeMatch[1]), rc);
-  }
-
-  return fail(rc, 404, "not found");
-}
+// ---- router ------------------------------------------------------------
+//
+// Route dispatch and the fetch() wrapper (request-id, access logging,
+// unhandled-error catch) are identical across both relay workers — see
+// createRelayFetchHandler in push-relay-common.ts.
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const requestId = crypto.randomUUID();
-    const start = Date.now();
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-    const log = (fields: Record<string, unknown>) =>
-      console.log(JSON.stringify({ ts: new Date().toISOString(), requestId, ...fields }));
-
-    const rc: RequestContext<Env> = { env, ctx, requestId, log };
-
-    let response: Response;
-    try {
-      response = await route(request, path, rc);
-    } catch (err) {
-      log({ level: "error", event: "unhandled", method: request.method, path, error: String((err as Error)?.message ?? err) });
-      response = json({ error: "internal error", requestId }, 500);
-    }
-
-    response.headers.set("X-Request-Id", requestId);
-    log({
-      level: response.status >= 500 ? "error" : "info",
-      event: "request",
-      method: request.method,
-      path,
-      status: response.status,
-      durationMs: Date.now() - start,
-    });
-    return response;
-  },
+  fetch: createRelayFetchHandler<Env>({
+    configured: apnsConfigured,
+    handleSend,
+  }),
 };

@@ -172,7 +172,7 @@ export function RulesPage() {
 
   function beginEdit(rule: Rule) {
     setExpandedId(rule.id);
-    setDraft(JSON.parse(JSON.stringify(rule)));
+    setDraft(structuredClone(rule));
   }
 
   function updateDraftMatch(next: MatchGroup) {
