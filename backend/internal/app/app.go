@@ -25,7 +25,7 @@ import (
 
 // Run dispatches the process mode and blocks until shutdown for long-running modes.
 func Run(args []string) error {
-	fs := flag.NewFlagSet("llama-lab", flag.ContinueOnError)
+	fs := flag.NewFlagSet("kypost-server", flag.ContinueOnError)
 	mode := fs.String("mode", "all", "process mode: daemon, server, all")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -272,12 +272,12 @@ func warmupClassifierOnStartup(logger *logging.Logger, client *classifier.HTTPCl
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		logger.Info("llama startup warmup requested")
+		logger.Info("classifier startup warmup requested")
 		if err := client.Warmup(ctx); err != nil {
-			logger.Error("llama startup warmup failed", "error", err.Error())
+			logger.Error("classifier startup warmup failed", "error", err.Error())
 			return
 		}
-		logger.Info("llama startup warmup completed")
+		logger.Info("classifier startup warmup completed")
 		logger.Info("processing unread unlabeled mail after startup warmup")
 		poller.TriggerUnreadSweep()
 	}()

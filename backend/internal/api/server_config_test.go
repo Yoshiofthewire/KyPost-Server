@@ -15,7 +15,7 @@ import (
 // TestConfigPutRequiresAdmin is a regression test: PUT /api/config used to be
 // reachable by any authenticated user, not just admins, letting a non-admin
 // account overwrite install-wide settings (redaction patterns, rate limits,
-// label allowlist) that only the Llama sub-struct was ever meant to gate.
+// label allowlist) that only the Classifier sub-struct was ever meant to gate.
 func TestConfigPutRequiresAdmin(t *testing.T) {
 	srv := newTestServer(t)
 	admin, regular := newTestUsers(t, srv)

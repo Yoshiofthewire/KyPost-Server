@@ -55,8 +55,8 @@ func TestHandlePollNowTriggersPoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
-	llamaClient := classifier.NewHTTPClient("http://127.0.0.1:0", "", "", "", time.Second)
-	poller, err := processor.New(config.Default(), srv.logger, globalStore, srv.users, srv.stateDir, srv.configDir, srv.health, llamaClient)
+	classifierClient := classifier.NewHTTPClient("http://127.0.0.1:0", "", "", "", time.Second)
+	poller, err := processor.New(config.Default(), srv.logger, globalStore, srv.users, srv.stateDir, srv.configDir, srv.health, classifierClient)
 	if err != nil {
 		t.Fatalf("processor.New: %v", err)
 	}
