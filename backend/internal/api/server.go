@@ -318,7 +318,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
 	mux.HandleFunc("/", s.handleFrontend)
 
-	return mux
+	return withSecurityHeaders(mux)
 }
 
 func (s *Server) Run() error {
