@@ -279,6 +279,53 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 	}
 }
 
+// TestLoginDoesNotRedispatchPushWithinCooldown covers the MFA-fatigue mitigation:
+// repeated logins for the same push-enabled account within mfaPushCooldownFor
+// must not each re-arm the push cooldown, or a stream of logins could still
+// bypass the intended one-push-per-window limit. The login/challenge flow
+// itself must keep working throughout (a user who mistyped a TOTP code must
+// still be able to retry) — only the underlying push dispatch is rate-limited.
+func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("uma", "pw-uma", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	pairApproverDevice(t, srv, u.ID, "dev-uma")
+	enablePush(t, srv, u.ID)
+
+	if ok, _ := srv.mfaPushCooldown.allowed(u.ID); !ok {
+		t.Fatal("expected push allowed before any login")
+	}
+
+	first, methods := loginChallenge(t, srv, "uma", "pw-uma")
+	if !methodsContain(methods, "push") {
+		t.Fatalf("methods = %v, want push offered on first login", methods)
+	}
+	if ok, _ := srv.mfaPushCooldown.allowed(u.ID); ok {
+		t.Fatal("expected push cooldown armed after first login's dispatch")
+	}
+	firstSentAt := srv.mfaPushCooldown.lastSent[u.ID]
+
+	// A second login attempt shortly after must still succeed and issue a
+	// fresh challenge (TOTP retry must never be blocked) but must not push
+	// again — the cooldown timestamp must not move.
+	second, methods := loginChallenge(t, srv, "uma", "pw-uma")
+	if second == first {
+		t.Fatal("expected a distinct challenge id for the second login")
+	}
+	if !methodsContain(methods, "push") {
+		t.Fatalf("methods = %v, want push still offered as a login method", methods)
+	}
+	if ok, _ := srv.mfaPushCooldown.allowed(u.ID); ok {
+		t.Fatal("expected push still in cooldown after second login")
+	}
+	if !srv.mfaPushCooldown.lastSent[u.ID].Equal(firstSentAt) {
+		t.Fatal("second login within the cooldown window must not re-arm it")
+	}
+}
+
 func TestPushFirstResponseWins(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create("sam", "pw-sam", users.RoleUser)
