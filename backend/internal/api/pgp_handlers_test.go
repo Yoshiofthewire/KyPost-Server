@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
@@ -13,6 +14,15 @@ import (
 
 func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 	srv := newTestServer(t)
+	srv.imapConfigKeyPath = filepath.Join(t.TempDir(), "imap-config.key")
+	all, _ := srv.users.List()
+	userID := all[0].ID
+	if err := writeIMAPConfigPayload(srv.userIMAPConfigPath(userID), srv.imapConfigKeyPath, imapConfigPayload{
+		Host: "imap.example.com", Port: 993, Username: "alice@example.com", Password: "pw",
+		Mailbox: "INBOX", UpdatedAt: "test",
+	}); err != nil {
+		t.Fatalf("writeIMAPConfigPayload: %v", err)
+	}
 
 	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", nil)
 	authRequest(srv, genReq)
@@ -30,6 +40,19 @@ func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 	}
 	if genResp.Revoked || genResp.Expired {
 		t.Fatalf("expected a freshly generated identity to be neither revoked nor expired, got %+v", genResp)
+	}
+	pubKey, err := crypto.NewKeyFromArmored(genResp.PublicKey)
+	if err != nil {
+		t.Fatalf("parse generated public key: %v", err)
+	}
+	foundMailIdentity := false
+	for _, identity := range pubKey.GetEntity().Identities {
+		if identity.UserId.Email == "alice@example.com" {
+			foundMailIdentity = true
+		}
+	}
+	if !foundMailIdentity {
+		t.Fatalf("expected generated key's UID email to be the configured mail address, got identities: %+v", pubKey.GetEntity().Identities)
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/pgp/identity", nil)
