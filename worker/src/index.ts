@@ -1,9 +1,9 @@
 /**
- * Llama Labels push relay — a Cloudflare Worker that centralizes FCM delivery.
+ * KyPost push relay — a Cloudflare Worker that centralizes FCM delivery.
  *
  * The published mobile app is bound at build time to a single Firebase project.
  * This Worker holds that project's service account (as secrets) and delivers
- * push notifications on behalf of many self-hosted Llama Labels servers, each
+ * push notifications on behalf of many self-hosted KyPost servers, each
  * authenticated with its own API key. Self-hosters therefore never need a
  * Firebase account and never recompile the app.
  *

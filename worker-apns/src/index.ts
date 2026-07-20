@@ -1,9 +1,9 @@
 /**
- * Llama Labels push relay — a Cloudflare Worker that delivers APNs push notifications.
+ * KyPost push relay — a Cloudflare Worker that delivers APNs push notifications.
  *
  * This Worker delivers native push notifications to iOS devices via Apple Push
  * Notification service (APNs), holding the APNs auth key (.p8) and issuing provider
- * tokens on behalf of many self-hosted Llama Labels servers, each authenticated with
+ * tokens on behalf of many self-hosted KyPost servers, each authenticated with
  * its own API key. Self-hosters therefore never need an Apple Developer account at
  * the server level and never recompile the app (only update its APNs device token).
  *
