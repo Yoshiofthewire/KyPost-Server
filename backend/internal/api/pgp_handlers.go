@@ -31,7 +31,23 @@ func (s *Server) handlePGPIdentityGenerate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id, err := pgpmail.GenerateIdentity(u.Username, u.Username)
+	// The OpenPGP User ID's email must be the address this account actually
+	// sends/receives mail as (the configured IMAP username, same address
+	// used as the SMTP From in handleMailSend) — not the KyPost login name,
+	// which for accounts like "admin" isn't an email address at all and
+	// leaves the generated key with no way to tie back to the user's real
+	// mailbox.
+	imapPayload, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
+	if err != nil {
+		http.Error(w, "failed to read mail configuration", http.StatusInternalServerError)
+		return
+	}
+	if !exists || imapPayload.Username == "" {
+		http.Error(w, "configure your mail account before generating a pgp identity", http.StatusBadRequest)
+		return
+	}
+
+	id, err := pgpmail.GenerateIdentity(u.Username, imapPayload.Username)
 	if err != nil {
 		http.Error(w, "failed to generate pgp identity", http.StatusInternalServerError)
 		return
