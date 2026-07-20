@@ -2099,8 +2099,21 @@ func (s *Server) parsePairingTokenUserID(token string, now time.Time) (string, e
 	return claims.Sub, nil
 }
 
+// trustProxyHeaders reports whether X-Forwarded-Proto/Host/For may be
+// believed. Defaults to true — the documented deployment puts the container
+// behind a TLS-terminating reverse proxy that sets them — but a deployment
+// that exposes the container directly should set TRUST_PROXY_HEADERS=false
+// so clients can't influence scheme/host/IP decisions with forged headers.
+func trustProxyHeaders() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "false")
+}
+
 func externalBaseURL(r *http.Request) string {
-	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	var proto, host string
+	if trustProxyHeaders() {
+		proto = strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+		host = strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0])
+	}
 	if proto == "" {
 		if r.TLS != nil {
 			proto = "https"
@@ -2108,7 +2121,6 @@ func externalBaseURL(r *http.Request) string {
 			proto = "http"
 		}
 	}
-	host := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0])
 	if host == "" {
 		host = strings.TrimSpace(r.Host)
 	}
@@ -2118,14 +2130,19 @@ func externalBaseURL(r *http.Request) string {
 	return proto + "://" + host
 }
 
-// clientIP best-effort resolves the caller's IP for logging/CAPTCHA context
-// (never for security decisions): X-Forwarded-For's first hop when present
-// (this app already trusts X-Forwarded-* for scheme/host, see
-// externalBaseURL/isRequestSecure), falling back to the raw connection
-// address with its port stripped.
+// clientIP best-effort resolves the caller's IP for logging, CAPTCHA
+// context, and lockout keying: X-Forwarded-For's first hop when proxy
+// headers are trusted (see trustProxyHeaders — this app then also trusts
+// X-Forwarded-* for scheme/host in externalBaseURL/isRequestSecure), falling
+// back to the raw connection address with its port stripped. When used as a
+// lockout key, a client forging X-Forwarded-For on a directly-exposed
+// deployment could dodge or misdirect lockouts — set TRUST_PROXY_HEADERS=false
+// there.
 func clientIP(r *http.Request) string {
-	if fwd := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); fwd != "" {
-		return fwd
+	if trustProxyHeaders() {
+		if fwd := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); fwd != "" {
+			return fwd
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -2139,8 +2156,10 @@ func clientIP(r *http.Request) string {
 // Used to decide whether the session cookie can carry the Secure attribute
 // without breaking plain-HTTP local/dev deployments.
 func isRequestSecure(r *http.Request) bool {
-	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
-		return strings.EqualFold(proto, "https")
+	if trustProxyHeaders() {
+		if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
+			return strings.EqualFold(proto, "https")
+		}
 	}
 	return r.TLS != nil
 }
