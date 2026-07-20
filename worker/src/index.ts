@@ -141,6 +141,13 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   try {
     result = await sendFcmMessage(config, env.OAUTH_CACHE, message);
   } catch (err) {
+    // A thrown exception (e.g. a transient Google OAuth failure) means
+    // delivery never happened, same as the result.stale/failure branches
+    // below — release a claim we made this request so it doesn't stay
+    // permanently bound to a key that never delivered.
+    if (binding.newlyClaimed) {
+      rc.ctx.waitUntil(releaseToken(env, token));
+    }
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
     return fail(rc, 502, `relay send failed: ${(err as Error).message}`);
   }

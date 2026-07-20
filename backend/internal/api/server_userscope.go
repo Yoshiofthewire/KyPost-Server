@@ -335,9 +335,43 @@ func (s *Server) lookupUserByDevice(deviceID string) (string, bool) {
 // DeviceID; without this check an attacker could register a device using a
 // victim's device id and hijack the global deviceIndex entry, denying the
 // victim's device service (its secret then fails against the attacker's row).
+//
+// Deprecated: this check-then-act pattern is racy when called separately from
+// the write that follows it — two concurrent registrations for the same
+// deviceId from different owners can both pass before either writes. Use
+// reserveDeviceID instead, which performs the check and the reservation
+// atomically.
 func (s *Server) deviceIDOwnedByAnother(ownerID, deviceID string) bool {
 	owner, ok := s.lookupUserByDevice(deviceID)
 	return ok && owner != ownerID
+}
+
+// reserveDeviceID atomically reserves deviceID for ownerID in the shared
+// deviceIndex, refusing if it's already reserved by a different owner. The
+// check and the reservation happen in the same critical section, so two
+// concurrent registrations for the same client-chosen deviceId from two
+// different owners can't both succeed — the second call returns false
+// instead of both callers proceeding and leaving deviceIndex pointing at
+// only one of them (silently orphaning the other's device). An empty
+// deviceID is a no-op (true, nothing to reserve) since the server mints a
+// fresh random UUID for those.
+func (s *Server) reserveDeviceID(ownerID, deviceID string) bool {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return true
+	}
+	// Warm the index from disk on a miss (same as deviceIDOwnedByAnother
+	// did), so a device registered before this process started, or by a
+	// prior request, is still honored by the check below.
+	s.lookupUserByDevice(deviceID)
+
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	if existing, ok := s.deviceIndex[deviceID]; ok && existing != ownerID {
+		return false
+	}
+	s.deviceIndex[deviceID] = ownerID
+	return true
 }
 
 // revokeUserDevices removes every paired native device for userID from both

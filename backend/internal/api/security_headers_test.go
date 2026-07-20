@@ -57,6 +57,7 @@ func TestSecurityHeadersOnAllResponses(t *testing.T) {
 }
 
 func TestHSTSOnSecureRequestsOnly(t *testing.T) {
+	t.Setenv("TRUST_PROXY_HEADERS", "true")
 	srv := newTestServer(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)

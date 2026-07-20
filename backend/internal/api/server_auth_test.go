@@ -134,6 +134,7 @@ func TestLoginMeLogoutFlow(t *testing.T) {
 // whenever the request arrived over HTTPS, including via a TLS-terminating
 // reverse proxy that signals this with X-Forwarded-Proto.
 func TestSessionCookieSecureFlag(t *testing.T) {
+	t.Setenv("TRUST_PROXY_HEADERS", "true")
 	srv := newTestServer(t)
 	u, err := srv.users.Create("carol", "correct-horse-battery", users.RoleUser)
 	if err != nil {

@@ -133,8 +133,21 @@ function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
 // into DOM (the read view, and reply/forward quoting into the compose
 // editor) must route through this as the *last* transformation step, so
 // nothing added earlier survives untouched.
-function sanitizeEmailHtml(html: string): string {
-  return DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+//
+// blockRemoteContent additionally forbids style/background attributes and
+// <style> elements. Stripping <img> tags alone does not block remote-resource
+// loading: a legacy background="..." attribute, an inline
+// style="background-image:url(...)", or a <style> block are all in
+// DOMPurify's default allowlist and load exactly like <img src> does, so they
+// bypass the "Show Images" control (and its anti-tracking-pixel intent)
+// unless explicitly forbidden here too.
+function sanitizeEmailHtml(html: string, blockRemoteContent = false): string {
+  return DOMPurify.sanitize(
+    html,
+    blockRemoteContent
+      ? { ADD_ATTR: ["target"], FORBID_ATTR: ["style", "background"], FORBID_TAGS: ["style"] }
+      : { ADD_ATTR: ["target"] }
+  );
 }
 
 function processEmailHtml(html: string, showImages: boolean): string {
@@ -146,7 +159,7 @@ function processEmailHtml(html: string, showImages: boolean): string {
   const document = parser.parseFromString(`<div>${content}</div>`, "text/html");
   const root = document.body.firstElementChild;
   if (!root) {
-    return sanitizeEmailHtml(content);
+    return sanitizeEmailHtml(content, !showImages);
   }
 
   root.querySelectorAll("a[href]").forEach((anchor) => {
@@ -160,7 +173,7 @@ function processEmailHtml(html: string, showImages: boolean): string {
     });
   }
 
-  return sanitizeEmailHtml(root.innerHTML);
+  return sanitizeEmailHtml(root.innerHTML, !showImages);
 }
 
 function firstAddressFromText(value: string): string {

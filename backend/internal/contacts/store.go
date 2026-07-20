@@ -1,6 +1,7 @@
 package contacts
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,14 +111,71 @@ func (s *Store) Get(uid string) (Contact, bool) {
 // Upsert creates (when c.UID is empty) or replaces a contact, stamping a new
 // Rev/UpdatedAt. Conflict detection (e.g. CardDAV If-Match, mobile-sync
 // last-write-wins bookkeeping) is the caller's responsibility, applied before
-// calling Upsert; the store itself always accepts the write.
+// calling Upsert; the store itself always accepts the write. Callers that
+// need the precondition check to be atomic with the write (so a concurrent
+// writer can't slip in between) must use UpsertIfMatch instead.
 func (s *Store) Upsert(c Contact) (Contact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Contact{}, err
 	}
+	return s.upsertLocked(c)
+}
 
+// ErrPreconditionFailed is returned by UpsertWithPrecondition when the
+// caller's precondition (If-Match / If-None-Match) doesn't hold.
+var ErrPreconditionFailed = errors.New("contact precondition failed")
+
+// ContactPrecondition expresses a CardDAV-style conditional-write check to be
+// evaluated atomically with the write in UpsertWithPrecondition.
+type ContactPrecondition struct {
+	// RequireAbsent corresponds to If-None-Match: * — the write fails if a
+	// non-deleted contact with this UID already exists.
+	RequireAbsent bool
+	// RequireETag corresponds to If-Match: <etag> — the write fails unless a
+	// contact with this UID currently exists and its ETag equals this value.
+	// Empty means no If-Match check.
+	RequireETag string
+}
+
+// UpsertWithPrecondition evaluates precondition and performs the write in the
+// same critical section, so two concurrent requests racing the same
+// precondition (e.g. two clients both PUTting with If-Match set to an ETag
+// they both read moments earlier) can't both pass the check and silently
+// clobber each other — the second one gets ErrPreconditionFailed instead.
+func (s *Store) UpsertWithPrecondition(c Contact, precondition ContactPrecondition) (Contact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Contact{}, err
+	}
+	existing, exists := s.getLocked(c.UID)
+	if precondition.RequireAbsent && exists && !existing.Deleted {
+		return Contact{}, ErrPreconditionFailed
+	}
+	if precondition.RequireETag != "" && (!exists || existing.ETag() != precondition.RequireETag) {
+		return Contact{}, ErrPreconditionFailed
+	}
+	return s.upsertLocked(c)
+}
+
+// getLocked is Get's body without the disk refresh or locking, for callers
+// that already hold s.mu and have already refreshed from disk this call.
+func (s *Store) getLocked(uid string) (Contact, bool) {
+	for _, c := range s.contacts {
+		if c.UID == uid {
+			return c, true
+		}
+	}
+	return Contact{}, false
+}
+
+// upsertLocked performs the write. Callers must hold s.mu and must already
+// have called refreshFromDiskLocked this call (Upsert and UpsertIfMatch both
+// do so before any precondition check, so the check and the write below see
+// the same, current-as-of-lock-acquisition state).
+func (s *Store) upsertLocked(c Contact) (Contact, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.seq++
 	c.Rev = s.seq

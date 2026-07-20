@@ -1681,10 +1681,11 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	}
 
 	// A device id is global (the deviceIndex maps it to exactly one owner), but
-	// the id is client-supplied. Refuse to register one already owned by a
-	// different user, so a caller can't hijack a victim's device-index entry
-	// and deny that device service.
-	if strings.TrimSpace(req.DeviceID) != "" && s.deviceIDOwnedByAnother(ownerID, strings.TrimSpace(req.DeviceID)) {
+	// the id is client-supplied. Reserve it atomically (check-and-set under
+	// one lock, not a separate check followed by a later write) so a caller
+	// can't hijack a victim's device-index entry and deny that device
+	// service, even under concurrent registration requests.
+	if !s.reserveDeviceID(ownerID, strings.TrimSpace(req.DeviceID)) {
 		http.Error(w, "device id already registered", http.StatusConflict)
 		return
 	}
@@ -2113,12 +2114,13 @@ func (s *Server) parsePairingTokenUserID(token string, now time.Time) (string, e
 }
 
 // trustProxyHeaders reports whether X-Forwarded-Proto/Host/For may be
-// believed. Defaults to true — the documented deployment puts the container
-// behind a TLS-terminating reverse proxy that sets them — but a deployment
-// that exposes the container directly should set TRUST_PROXY_HEADERS=false
-// so clients can't influence scheme/host/IP decisions with forged headers.
+// believed. Defaults to false (fail closed) — the shipped docker-compose.yml
+// exposes the container directly with no reverse proxy in front, so trusting
+// these headers by default would let any client forge its own IP and defeat
+// the login/CardDAV lockouts. Deployments that do put a TLS-terminating
+// reverse proxy in front must explicitly set TRUST_PROXY_HEADERS=true.
 func trustProxyHeaders() bool {
-	return !strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "false")
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")), "true")
 }
 
 func externalBaseURL(r *http.Request) string {
@@ -3102,18 +3104,20 @@ func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
 
+// handleSetup is unauthenticated by necessity (the frontend's first-run
+// wizard needs to know whether setup is needed before anyone can log in), so
+// it must never return more than the boolean it exists to answer. It used to
+// also return the real admin username and must-change-password state; the
+// frontend never actually consumed those fields, and returning them let any
+// anonymous caller learn the admin's username indefinitely — defeating the
+// hardening value of an operator choosing a non-default admin username.
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	all, err := s.users.List()
 	if err != nil {
 		http.Error(w, "failed to read setup state", http.StatusInternalServerError)
 		return
 	}
-	if len(all) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"configured": false})
-		return
-	}
-	admin := users.FirstAdminFrom(all)
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "setup": map[string]any{"admin_user": admin.Username, "must_change_password": admin.MustChangePassword}})
+	writeJSON(w, http.StatusOK, map[string]any{"configured": len(all) > 0})
 }
 
 func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {

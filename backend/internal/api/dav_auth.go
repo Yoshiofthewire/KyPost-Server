@@ -105,12 +105,25 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 
 		u, err := s.users.GetByUsername(username)
 		if err != nil || !u.Active {
+			// Pay the same scrypt cost a real password check would, so
+			// response timing doesn't reveal whether the username exists —
+			// mirrors equalizeLoginTiming's use on the login endpoint.
+			equalizeLoginTiming(password)
 			s.davLockout.recordFailure(ip)
 			s.requireDAVAuth(w)
 			return
 		}
 		passFile, exists, err := s.readDAVPassword(u.ID)
-		if err != nil || !exists || !users.VerifySecretHash(passFile.Hash, password) {
+		if err != nil || !exists {
+			// No CardDAV app-password configured for this account: still pay
+			// the scrypt cost so this path isn't distinguishable by timing
+			// from a wrong-password attempt against a configured account.
+			equalizeLoginTiming(password)
+			s.davLockout.recordFailure(ip)
+			s.requireDAVAuth(w)
+			return
+		}
+		if !users.VerifySecretHash(passFile.Hash, password) {
 			s.davLockout.recordFailure(ip)
 			s.requireDAVAuth(w)
 			return

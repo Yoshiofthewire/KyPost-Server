@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/retry"
 )
 
@@ -119,7 +121,14 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	}
 	defer func() { c.lastClassify = time.Now() }()
 
-	c.logServer(fmt.Sprintf("[CLASSIFY] From: %s | Subject: [%s]", sender, subject))
+	// sender/subject are decoded from attacker-controlled email headers via
+	// mime.WordDecoder (RFC 2047), which does not filter control characters —
+	// an encoded-word can legally decode to a string containing a raw
+	// newline. logLine below writes each line with a fresh, real timestamp
+	// and no escaping, so an unsanitized value here would let a crafted
+	// header forge fake, genuinely-timestamped log entries. Flatten CR/LF
+	// before logging, the same way outbound mail headers already are.
+	c.logServer(fmt.Sprintf("[CLASSIFY] From: %s | Subject: [%s]", mailmsg.SanitizeHeaderValue(sender), mailmsg.SanitizeHeaderValue(subject)))
 
 	tuning = strings.TrimSpace(tuning)
 	if tuning == "" {
@@ -373,10 +382,28 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// untrustedEmailBeginMarker and untrustedEmailEndMarker fence the untrusted
+// email content below in buildRuntimePrompt. Because email content is fully
+// attacker-controlled, it must never be allowed to contain these exact
+// strings — otherwise a crafted email could forge a fake closing/reopening
+// fence and inject text the model would treat as a legitimate instruction
+// rather than data. stripFenceMarkers neutralizes any literal occurrence
+// (case-insensitively) before the real fence is applied.
+const (
+	untrustedEmailBeginMarker = "-----BEGIN UNTRUSTED EMAIL-----"
+	untrustedEmailEndMarker   = "-----END UNTRUSTED EMAIL-----"
+)
+
+var fenceMarkerPattern = regexp.MustCompile(`(?i)-----(BEGIN|END) UNTRUSTED EMAIL-----`)
+
+func stripFenceMarkers(s string) string {
+	return fenceMarkerPattern.ReplaceAllString(s, "[fence marker removed]")
+}
+
 func buildRuntimePrompt(tuningTemplate string, allowedLabels []string, sender, subject, body string) string {
-	body = strings.TrimSpace(body)
-	sender = strings.TrimSpace(sender)
-	subject = strings.TrimSpace(subject)
+	body = stripFenceMarkers(strings.TrimSpace(body))
+	sender = stripFenceMarkers(strings.TrimSpace(sender))
+	subject = stripFenceMarkers(strings.TrimSpace(subject))
 	tuningTemplate = strings.TrimSpace(tuningTemplate)
 
 	emailLines := make([]string, 0, 4)

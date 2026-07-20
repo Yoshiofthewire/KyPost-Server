@@ -263,21 +263,32 @@ func (b *contactsDAVBackend) PutAddressObject(ctx context.Context, p string, car
 		return nil, err
 	}
 	uid := uidFromObjectPath(p)
-	existing, exists := store.Get(uid)
 
+	// Evaluate the If-Match/If-None-Match precondition atomically with the
+	// write (UpsertWithPrecondition holds the store's lock across both), so
+	// two concurrent PUTs racing the same precondition can't both pass the
+	// check and silently clobber each other.
+	var precondition contacts.ContactPrecondition
 	if opts != nil {
-		if opts.IfNoneMatch.IsSet() && opts.IfNoneMatch.IsWildcard() && exists && !existing.Deleted {
-			return nil, webdav.NewHTTPError(http.StatusPreconditionFailed, errors.New("contact already exists"))
+		if opts.IfNoneMatch.IsSet() && opts.IfNoneMatch.IsWildcard() {
+			precondition.RequireAbsent = true
 		}
 		if opts.IfMatch.IsSet() {
 			etag, err := opts.IfMatch.ETag()
-			if err != nil || !exists || existing.ETag() != etag {
+			if err != nil {
 				return nil, webdav.NewHTTPError(http.StatusPreconditionFailed, errors.New("etag mismatch"))
 			}
+			precondition.RequireETag = etag
 		}
 	}
 
-	updated, err := store.Upsert(b.server.contactFromVCardForUser(ac.UserID, uid, card))
+	updated, err := store.UpsertWithPrecondition(b.server.contactFromVCardForUser(ac.UserID, uid, card), precondition)
+	if errors.Is(err, contacts.ErrPreconditionFailed) {
+		if precondition.RequireAbsent {
+			return nil, webdav.NewHTTPError(http.StatusPreconditionFailed, errors.New("contact already exists"))
+		}
+		return nil, webdav.NewHTTPError(http.StatusPreconditionFailed, errors.New("etag mismatch"))
+	}
 	if err != nil {
 		return nil, err
 	}

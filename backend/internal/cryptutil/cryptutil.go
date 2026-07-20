@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"kypost-server/backend/internal/fsutil"
 )
@@ -39,6 +40,16 @@ func ParseEnvelope(raw []byte) (EncryptedPayload, bool) {
 	return env, true
 }
 
+// keyGenMu serializes the create-on-first-use path in LoadOrCreateKey below.
+// Without it, two concurrent callers racing the same not-yet-created key
+// path (e.g. two different users both configuring IMAP moments after a fresh
+// deploy) could each read os.ErrNotExist before either has written, each
+// generate a different random key, and each seal their own data under a key
+// that never gets persisted — silently and permanently orphaning whichever
+// caller's write loses the race. One process-wide mutex is enough: key
+// creation happens at most once per path ever, so contention is negligible.
+var keyGenMu sync.Mutex
+
 // LoadOrCreateKey reads the 32-byte base64-encoded master key at path,
 // generating and persisting a new random one via fsutil.AtomicWriteFile if
 // the file does not yet exist. Only callers that are allowed to originate
@@ -46,11 +57,20 @@ func ParseEnvelope(raw []byte) (EncryptedPayload, bool) {
 // use LoadKey so they never race-create a key the owning process didn't
 // expect.
 func LoadOrCreateKey(path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
-	if err == nil {
+	if b, err := os.ReadFile(path); err == nil {
 		return decodeKey(b)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
-	if !errors.Is(err, os.ErrNotExist) {
+
+	keyGenMu.Lock()
+	defer keyGenMu.Unlock()
+
+	// Re-check now that we hold the lock: another goroutine may have created
+	// the file while we were waiting.
+	if b, err := os.ReadFile(path); err == nil {
+		return decodeKey(b)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 
