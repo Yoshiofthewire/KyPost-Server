@@ -67,9 +67,10 @@ type Session struct {
 
 // AuthContext identifies the caller of an authenticated request.
 type AuthContext struct {
-	UserID   string
-	Username string
-	Role     users.Role
+	UserID             string
+	Username           string
+	Role               users.Role
+	MustChangePassword bool
 }
 
 type Server struct {
@@ -97,6 +98,7 @@ type Server struct {
 	poller               *processor.Poller
 	loginLockout         *failureLockout
 	davLockout           *failureLockout
+	mfaLockout           *failureLockout
 	captchaVerifier      captcha.Verifier
 	captchaProvider      captcha.Provider
 	captchaSiteKey       string
@@ -172,6 +174,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		davCredentials:       newDAVCredentialCache(),
 		loginLockout:         newLoginLockout(),
 		davLockout:           newFailureLockout(davMaxFailures, davLockoutFor),
+		mfaLockout:           newFailureLockout(mfaMaxFailures, mfaLockoutFor),
 		captchaVerifier:      captchaVerifier,
 		captchaProvider:      captchaProvider,
 		captchaSiteKey:       captchaSiteKey,
@@ -250,7 +253,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/mail/send", s.withMailAuth(s.handleMailSend))
 	mux.HandleFunc("GET /api/mail/attachments", s.withMailAuth(s.handleMailAttachmentList))
 	mux.HandleFunc("GET /api/mail/attachment", s.withMailAuth(s.handleMailAttachmentDownload))
-	mux.HandleFunc("POST /api/classifier/test", s.withAuth(s.handleClassifierTest))
+	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
 	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
@@ -1677,6 +1680,15 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		return
 	}
 
+	// A device id is global (the deviceIndex maps it to exactly one owner), but
+	// the id is client-supplied. Refuse to register one already owned by a
+	// different user, so a caller can't hijack a victim's device-index entry
+	// and deny that device service.
+	if strings.TrimSpace(req.DeviceID) != "" && s.deviceIDOwnedByAnother(ownerID, strings.TrimSpace(req.DeviceID)) {
+		http.Error(w, "device id already registered", http.StatusConflict)
+		return
+	}
+
 	// Mint this device's own pairing secret. Only its hash is ever persisted
 	// (see state.NativeDevice.SecretHash); the raw value is returned once
 	// below and never retrievable again.
@@ -2141,8 +2153,19 @@ func externalBaseURL(r *http.Request) string {
 // there.
 func clientIP(r *http.Request) string {
 	if trustProxyHeaders() {
-		if fwd := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); fwd != "" {
-			return fwd
+		// Use the RIGHT-most hop — the address the nearest trusted proxy
+		// appended — not the left-most one. A client can prepend arbitrary
+		// values to X-Forwarded-For (an appending proxy like nginx's
+		// $proxy_add_x_forwarded_for turns a client-sent "a" into "a, <realip>"),
+		// so keying the login lockout on the left-most hop let a client rotate
+		// it and evade the lockout. This assumes a single trusted proxy in
+		// front; multi-proxy deployments should set TRUST_PROXY_HEADERS=false
+		// and rely on RemoteAddr, or terminate the chain at a known hop.
+		if xff := r.Header.Get("X-Forwarded-For"); strings.TrimSpace(xff) != "" {
+			parts := strings.Split(xff, ",")
+			if fwd := strings.TrimSpace(parts[len(parts)-1]); fwd != "" {
+				return fwd
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -3286,6 +3309,14 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-account throttle spanning challenges: the per-challenge attempt cap
+	// alone can be reset by minting a new challenge, so a password-holding
+	// attacker could otherwise brute force TOTP online.
+	if allowed, _ := s.mfaLockout.allowed(ch.UserID); !allowed {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
+
 	u, err := s.users.Get(ch.UserID)
 	if err != nil || !u.Active || !u.TOTPEnabled || u.TOTPSecretEnc == "" {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
@@ -3299,6 +3330,7 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 
 	step, valid := totp.Validate(secret, req.Code, time.Now())
 	if !valid {
+		s.mfaLockout.recordFailure(ch.UserID)
 		if err := s.mfaChallenges.RecordTOTPAttempt(ch.ID); errors.Is(err, mfa.ErrTooManyAttempts) {
 			http.Error(w, "too many attempts", http.StatusUnauthorized)
 			return
@@ -3306,6 +3338,7 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
+	s.mfaLockout.recordSuccess(ch.UserID)
 
 	// A challenge is single-use: ConsumeTOTPStep atomically checks-and-marks
 	// consumption under a single lock, so two concurrent requests bearing the
@@ -3344,6 +3377,10 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
+	if allowed, _ := s.mfaLockout.allowed(ch.UserID); !allowed {
+		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
 	u, err := s.users.Get(ch.UserID)
 	if err != nil || !u.Active || !u.TOTPEnabled {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
@@ -3356,6 +3393,7 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !matched {
+		s.mfaLockout.recordFailure(ch.UserID)
 		if err := s.mfaChallenges.RecordTOTPAttempt(ch.ID); errors.Is(err, mfa.ErrTooManyAttempts) {
 			http.Error(w, "too many attempts", http.StatusUnauthorized)
 			return
@@ -3363,6 +3401,7 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
+	s.mfaLockout.recordSuccess(ch.UserID)
 
 	s.mfaChallenges.Delete(ch.ID)
 	if err := s.startSession(w, r, u.ID); err != nil {
@@ -3579,6 +3618,15 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "missing or invalid csrf token"})
 			return
 		}
+		// Enforce the first-login password change server-side: a user who still
+		// owes a password change (e.g. the bootstrap admin) gets a full session
+		// but may reach nothing except the change/logout endpoints until they
+		// rotate it. Without this the flag is merely advisory and a default
+		// credential grants full access.
+		if ac.MustChangePassword && !mustChangePasswordExemptPaths[r.URL.Path] {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "password change required", "mustChangePassword": true})
+			return
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
 }
@@ -3636,6 +3684,12 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "missing or invalid csrf token"})
 			return
 		}
+		// Session users still owing a first-login password change are blocked
+		// here too (device-auth contexts never set this flag).
+		if ac.MustChangePassword && !mustChangePasswordExemptPaths[r.URL.Path] {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "password change required", "mustChangePassword": true})
+			return
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
 }
@@ -3687,7 +3741,17 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 		s.mu.Unlock()
 		return AuthContext{}, false
 	}
-	return AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}, true
+	return AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword}, true
+}
+
+// mustChangePasswordExemptPaths are the only authenticated routes a user with
+// an unsatisfied first-login password-change requirement may reach: the
+// change endpoint itself and logout. Everything else is refused until the
+// password is rotated, so a known/default bootstrap credential cannot be used
+// for anything but changing it.
+var mustChangePasswordExemptPaths = map[string]bool{
+	"/api/auth/password": true,
+	"/api/auth/logout":   true,
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

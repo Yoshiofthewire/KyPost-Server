@@ -1016,12 +1016,19 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       .map((item) => {
         const body = item.body || "No message body available.";
         const isHtml = /<[^>]+>/.test(body);
+        // Sender-controlled HTML must pass through the sanitizer here just like
+        // every other render path (see sanitizeEmailHtml's invariant): the
+        // print document is a same-origin window that inherits the app CSP, so
+        // an unsanitized body would be a script-injection sink.
+        const renderedBody = isHtml
+          ? sanitizeEmailHtml(body)
+          : `<pre style="white-space: pre-wrap; margin: 0;">${escapeHtml(body)}</pre>`;
         return `
           <article style="page-break-inside: avoid; border: 1px solid #bbb; border-radius: 8px; padding: 12px; margin-bottom: 14px;">
             <h2 style="margin: 0 0 8px; font-size: 18px;">${escapeHtml(item.subject || "(no subject)")}</h2>
             <p style="margin: 0 0 6px;"><strong>Sender:</strong> ${escapeHtml(item.sender || "-")}</p>
             <p style="margin: 0 0 10px;"><strong>Time:</strong> ${escapeHtml(formatTimestamp(item.atUtc))}</p>
-            <div>${isHtml ? body : `<pre style="white-space: pre-wrap; margin: 0;">${escapeHtml(body)}</pre>`}</div>
+            <div>${renderedBody}</div>
           </article>
         `;
       })

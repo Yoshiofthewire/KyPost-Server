@@ -458,6 +458,16 @@ func (s *Store) SetPassword(id, newPassword string, requireChange bool) (User, e
 	})
 }
 
+// ClearMustChangePassword clears the first-login password-change requirement
+// without touching the password hash. Used by the password-change flow's
+// callers and available for administrative bookkeeping.
+func (s *Store) ClearMustChangePassword(id string) (User, error) {
+	return s.mutate(id, func(u *User) error {
+		u.MustChangePassword = false
+		return nil
+	})
+}
+
 // Deactivate soft-deletes a user: their sessions stop being accepted and
 // they can no longer log in, but their data is retained.
 func (s *Store) Deactivate(id string) (User, error) {

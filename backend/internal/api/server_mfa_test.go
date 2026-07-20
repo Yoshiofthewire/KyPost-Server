@@ -91,6 +91,9 @@ func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payl
 	srv.mu.Lock()
 	srv.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	srv.mu.Unlock()
+	// Model an onboarded session; the must-change gate (withAuth) is exercised
+	// by its own dedicated test.
+	_, _ = srv.users.ClearMustChangePassword(userID)
 
 	var body *bytes.Reader
 	if payload != nil {

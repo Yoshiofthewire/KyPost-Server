@@ -7,7 +7,10 @@ mkdir -p "${CONFIG_DIR:-/kypost/config}" "${LOG_DIR:-/kypost/logs}" "${STATE_DIR
 # the backend imports into users.json on first start. Skip if either exists.
 if [ ! -f "${CONFIG_DIR:-/kypost/config}/users.json" ] && [ ! -f "${CONFIG_DIR:-/kypost/config}/admin.env" ]; then
   user="${BOOTSTRAP_ADMIN_USER:-admin}"
-  pass="${BOOTSTRAP_ADMIN_PASS:-ChangeMeNow123!}"
+  # Generate a random, install-specific password when the operator hasn't set
+  # one, instead of a fixed publicly-known default. The value is printed once
+  # to the logs below and a first-login change is still required.
+  pass="${BOOTSTRAP_ADMIN_PASS:-$(node -e 'process.stdout.write(require("crypto").randomBytes(18).toString("base64url"))')}"
   pass_hash="$(PASS="$pass" node -e '
 const crypto = require("crypto");
 const pass = process.env.PASS || "";

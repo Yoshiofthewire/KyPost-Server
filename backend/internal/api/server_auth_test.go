@@ -21,6 +21,11 @@ func authRequestAs(s *Server, req *http.Request, userID string) {
 	s.mu.Lock()
 	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
+	// Represent a fully-onboarded session: users are created with
+	// MustChangePassword=true, which is now enforced server-side (see withAuth),
+	// so clear it here to model a user past first login. Tests that specifically
+	// exercise the must-change gate set the flag themselves.
+	_, _ = s.users.ClearMustChangePassword(userID)
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
 	req.Header.Set("X-CSRF-Token", csrfToken)
 }

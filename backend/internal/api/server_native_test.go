@@ -75,6 +75,9 @@ func authRequest(s *Server, req *http.Request) {
 	s.mu.Lock()
 	s.sessions[token] = Session{UserID: all[0].ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
+	// Model an onboarded session; the must-change gate (withAuth) has its own
+	// dedicated test.
+	_, _ = s.users.ClearMustChangePassword(all[0].ID)
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
 	req.Header.Set("X-CSRF-Token", csrfToken)
 }

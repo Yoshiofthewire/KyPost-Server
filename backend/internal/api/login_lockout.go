@@ -28,6 +28,15 @@ const (
 	davMaxFailures = 10
 	davLockoutFor  = 15 * time.Minute
 
+	// mfaMaxFailures/mfaLockoutFor throttle second-factor verification per
+	// account across challenges. The per-challenge attempt cap (mfa.Store) is
+	// not enough on its own: a password-holding attacker can mint an unlimited
+	// number of fresh challenges (each valid-password login clears the login
+	// lockout), so without an account-scoped counter the TOTP code is brute
+	// forceable online. Keyed on the challenge's UserID.
+	mfaMaxFailures = 10
+	mfaLockoutFor  = 15 * time.Minute
+
 	// loginLockoutSweepThreshold bounds how large loginLockout.entries can
 	// grow before a housekeeping sweep runs. An attacker submitting a stream
 	// of distinct, nonexistent usernames each gets its own entry that never

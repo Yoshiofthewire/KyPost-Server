@@ -33,6 +33,20 @@ func TestProxyHeadersTrustedByDefault(t *testing.T) {
 	}
 }
 
+// clientIP must use the RIGHT-most X-Forwarded-For hop (the address the
+// nearest trusted proxy appended), not the left-most one which a client can
+// prepend. An appending proxy turns a client-sent "1.1.1.1" into
+// "1.1.1.1, <realip>"; keying anything (e.g. the login lockout) on the
+// left-most hop lets a client rotate it freely.
+func TestClientIPUsesRightmostForwardedHop(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://backend.internal/api/x", nil)
+	req.RemoteAddr = "203.0.113.9:5000"
+	req.Header.Set("X-Forwarded-For", "1.1.1.1, 203.0.113.77")
+	if got := clientIP(req); got != "203.0.113.77" {
+		t.Fatalf("clientIP = %q, want the right-most hop 203.0.113.77 (not the client-prepended 1.1.1.1)", got)
+	}
+}
+
 // TRUST_PROXY_HEADERS=false: a directly-exposed deployment must not let
 // clients influence scheme/host/IP decisions by sending forged X-Forwarded-*
 // headers.

@@ -72,12 +72,16 @@ docker compose up --build -d
 
 - http://localhost:5866
 
-5. Sign in with bootstrap credentials:
+5. Sign in with the bootstrap credentials:
 
 - Username: `admin`
-- Password: `ChangeMeNow123!`
+- Password: printed once to the container logs on first start
+  (`Generated first-run admin credentials …`). To set your own instead,
+  pass `BOOTSTRAP_ADMIN_PASS` (and optionally `BOOTSTRAP_ADMIN_USER`) on the
+  first run.
 
-6. Change the password when prompted.
+6. Change the password when prompted — until you do, the account can reach
+   nothing but the password-change screen.
 7. In Config, save IMAP and SMTP settings and run IMAP Test.
 8. In Tuning, update labels/prompt and save.
 
