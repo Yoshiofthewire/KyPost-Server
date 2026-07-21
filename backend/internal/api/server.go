@@ -952,33 +952,43 @@ func smtpDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword
 // resolved From via mail.Address.String(), so a display name with special
 // characters gets properly quoted/encoded.
 //
-// On success it returns the resolved From value and status 0. On failure
-// it returns an empty from, along with the exact HTTP status code and
-// client-facing message handleMailSend should respond with — malformed
-// address (400), alias store unavailable (500), or address not a verified
-// alias (403).
-func resolveMailFrom(accountAddr, requestedFrom string, aliasStoreFn func() (*sendas.Store, error)) (from string, status int, msg string) {
+// On success it returns the resolved header-From and envelope-From values
+// and status 0. On failure it returns empty values, along with the exact
+// HTTP status code and client-facing message handleMailSend should respond
+// with — malformed address (400), alias store unavailable (500), or
+// address not a verified alias (403).
+//
+// headerFrom and envelopeFrom MUST be kept separate by every caller:
+// headerFrom may carry a display name (RFC 5322 formatted, for the MIME
+// From: header) while envelopeFrom is always a bare addr-spec. net/smtp's
+// Mail()/SendMail() never parses the from string it's given — it only
+// wraps it verbatim as MAIL FROM:<%s> — so passing a display-name-formatted
+// or already-angle-bracketed value as the envelope sender produces a
+// malformed SMTP command that real servers reject.
+func resolveMailFrom(accountAddr, requestedFrom string, aliasStoreFn func() (*sendas.Store, error)) (headerFrom, envelopeFrom string, status int, msg string) {
 	requested := strings.TrimSpace(requestedFrom)
 	if requested == "" {
-		return accountAddr, 0, ""
+		return accountAddr, accountAddr, 0, ""
 	}
 	parsed, perr := mail.ParseAddress(requested)
 	if perr != nil {
-		return "", http.StatusBadRequest, "invalid from address"
+		return "", "", http.StatusBadRequest, "invalid from address"
 	}
 	candidate := strings.ToLower(parsed.Address)
 	if strings.EqualFold(candidate, accountAddr) {
-		return accountAddr, 0, ""
+		return accountAddr, accountAddr, 0, ""
 	}
 	aliasStore, aerr := aliasStoreFn()
 	if aerr != nil {
-		return "", http.StatusInternalServerError, "failed to check send-as aliases"
+		return "", "", http.StatusInternalServerError, "failed to check send-as aliases"
 	}
 	alias, ok := aliasStore.FindVerifiedByEmail(candidate)
 	if !ok {
-		return "", http.StatusForbidden, "the from address is not a verified send-as alias for this account"
+		return "", "", http.StatusForbidden, "the from address is not a verified send-as alias for this account"
 	}
-	return sanitizeHeaderValue((&mail.Address{Name: alias.DisplayName, Address: alias.Email}).String()), 0, ""
+	headerFrom = sanitizeHeaderValue((&mail.Address{Name: alias.DisplayName, Address: alias.Email}).String())
+	envelopeFrom = sanitizeHeaderValue(alias.Email)
+	return headerFrom, envelopeFrom, 0, ""
 }
 
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
@@ -1015,7 +1025,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "imap username is required for sender", http.StatusBadRequest)
 		return
 	}
-	from, fromStatus, fromMsg := resolveMailFrom(accountAddr, req.From, func() (*sendas.Store, error) {
+	headerFrom, envelopeFrom, fromStatus, fromMsg := resolveMailFrom(accountAddr, req.From, func() (*sendas.Store, error) {
 		return s.sendAsFor(r)
 	})
 	if fromStatus != 0 {
@@ -1024,7 +1034,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	msg := mailmsg.Message{
-		From:        from,
+		From:        headerFrom,
 		To:          toList,
 		CC:          ccList,
 		Subject:     req.Subject,
@@ -1064,7 +1074,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			msg = signed
 		}
 		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
-		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, from, toList, ccList, bccList, recipients, msg, req)
+		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req)
 		return
 	}
 
@@ -1097,18 +1107,18 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	mainRecipients, mainCiphertext := deliveries[0].Recipients, deliveries[0].Ciphertext
 	bccDeliveries := deliveries[1:]
 
-	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, from, toList, ccList, bccList, mainRecipients, mainCiphertext, req) {
+	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req) {
 		return
 	}
 
 	for _, delivery := range bccDeliveries {
-		if err := smtpDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, from, delivery.Recipients, delivery.Ciphertext); err != nil {
+		if err := smtpDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
 			s.logger.Error("bcc pgp send failed", "recipient", delivery.Recipients[0], "error", err.Error())
 		}
 	}
 
 	for _, recipient := range plan.withoutKeyEmails {
-		if err := s.sendPickupNotification(ac.UserID, from, recipient, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password); err != nil {
+		if err := s.sendPickupNotification(ac.UserID, envelopeFrom, recipient, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password); err != nil {
 			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
 		}
 	}
