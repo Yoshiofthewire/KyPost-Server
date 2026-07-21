@@ -210,6 +210,9 @@ type Client interface {
 	GetAttachment(ctx context.Context, mailbox string, uid int, index int) (AttachmentInfo, []byte, error)
 	SaveDraft(ctx context.Context, draft DraftMessage) error
 	SaveSent(ctx context.Context, draft DraftMessage) error
+	// FetchHeaderFields issues a raw UID FETCH for BODY.PEEK[HEADER.FIELDS (...)]
+	// — see auth_results.go for the full contract.
+	FetchHeaderFields(ctx context.Context, uids []int, fields ...string) (map[int][]string, error)
 }
 
 type APIClient struct {

@@ -251,6 +251,9 @@ func (f *fakeClient) GetAttachment(context.Context, string, int, int) (imapadapt
 }
 func (f *fakeClient) SaveDraft(context.Context, imapadapter.DraftMessage) error { return nil }
 func (f *fakeClient) SaveSent(context.Context, imapadapter.DraftMessage) error  { return nil }
+func (f *fakeClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
+	return nil, nil
+}
 
 func TestApplyOutcome_MapsEachActionTypeToTheRightCall(t *testing.T) {
 	outcome := Outcome{Applied: []Action{

@@ -296,6 +296,9 @@ func (c *noopMailClient) GetAttachment(context.Context, string, int, int) (imapa
 }
 func (c *noopMailClient) SaveDraft(context.Context, imapadapter.DraftMessage) error { return nil }
 func (c *noopMailClient) SaveSent(context.Context, imapadapter.DraftMessage) error  { return nil }
+func (c *noopMailClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
+	return nil, nil
+}
 
 // TestHandleMessage_StopRuleShortCircuitsClassification proves a matched
 // "stop" rule skips classifyWithRetry entirely, rather than merely skipping

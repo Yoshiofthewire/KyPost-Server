@@ -22,6 +22,7 @@ import (
 	"kypost-server/backend/internal/redaction"
 	"kypost-server/backend/internal/retry"
 	"kypost-server/backend/internal/rules"
+	"kypost-server/backend/internal/sendas"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
 )
@@ -56,12 +57,13 @@ type Poller struct {
 	configDir   string
 	imapKeyPath string
 
-	userMu      sync.Mutex
-	stores      map[string]*state.Store
-	mailClients map[string]*mailClientEntry
-	mailCaches  map[string]*mailcache.Store
-	rulesStores map[string]*rules.Store
-	rate        map[string][]time.Time
+	userMu       sync.Mutex
+	stores       map[string]*state.Store
+	mailClients  map[string]*mailClientEntry
+	mailCaches   map[string]*mailcache.Store
+	rulesStores  map[string]*rules.Store
+	sendAsStores map[string]*sendas.Store
+	rate         map[string][]time.Time
 }
 
 type mailClientEntry struct {
@@ -109,6 +111,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		mailClients:          map[string]*mailClientEntry{},
 		mailCaches:           map[string]*mailcache.Store{},
 		rulesStores:          map[string]*rules.Store{},
+		sendAsStores:         map[string]*sendas.Store{},
 		rate:                 map[string][]time.Time{},
 	}
 	p.tickSem = make(chan struct{}, 1)
@@ -500,6 +503,8 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 			p.log.Error("failed to persist checkpoint", "user_id", u.ID, "error", err.Error())
 		}
 	}
+
+	p.checkPendingSendAsAliases(ctx, u.ID, uc.mail)
 
 	p.log.Info(
 		"user poll tick summary",
