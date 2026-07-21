@@ -606,6 +606,7 @@ type mailRequest struct {
 	Attachments []mailmsg.Attachment
 	Encrypt     bool
 	Sign        bool
+	From        string
 }
 
 // Attachment budget for one outgoing message (decoded bytes); the request
@@ -626,6 +627,7 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		Subject     string `json:"subject"`
 		Body        string `json:"body"`
 		Mode        string `json:"mode"`
+		From        string `json:"from"`
 		Attachments []struct {
 			Name       string `json:"name"`
 			MimeType   string `json:"mimeType"`
@@ -683,6 +685,7 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		Attachments: attachments,
 		Encrypt:     raw.Encrypt,
 		Sign:        raw.Sign,
+		From:        raw.From,
 	}, "", nil
 }
 
@@ -930,6 +933,54 @@ func smtpDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword
 	return smtpSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
 }
 
+// resolveMailFrom decides the From header value handleMailSend should use,
+// given the account's own IMAP username (accountAddr — already sanitized
+// and confirmed non-empty by the caller) and the client-requested From
+// address (requestedFrom, exactly as decoded from the JSON body — not yet
+// trimmed or validated).
+//
+// If requestedFrom is empty, or names the account's own address
+// (case-insensitively), it resolves to accountAddr and aliasStoreFn is
+// never called — this preserves today's zero-lookup behavior exactly for
+// every existing caller (which never sends `from` at all) and for a caller
+// that explicitly re-submits their own address.
+//
+// Otherwise requestedFrom is parsed as an RFC 5322 address, and
+// aliasStoreFn (typically s.sendAsFor(r), passed lazily so it's only
+// invoked when actually needed) is consulted for a verified alias matching
+// it. A verified alias's stored DisplayName is used to format the
+// resolved From via mail.Address.String(), so a display name with special
+// characters gets properly quoted/encoded.
+//
+// On success it returns the resolved From value and status 0. On failure
+// it returns an empty from, along with the exact HTTP status code and
+// client-facing message handleMailSend should respond with — malformed
+// address (400), alias store unavailable (500), or address not a verified
+// alias (403).
+func resolveMailFrom(accountAddr, requestedFrom string, aliasStoreFn func() (*sendas.Store, error)) (from string, status int, msg string) {
+	requested := strings.TrimSpace(requestedFrom)
+	if requested == "" {
+		return accountAddr, 0, ""
+	}
+	parsed, perr := mail.ParseAddress(requested)
+	if perr != nil {
+		return "", http.StatusBadRequest, "invalid from address"
+	}
+	candidate := strings.ToLower(parsed.Address)
+	if strings.EqualFold(candidate, accountAddr) {
+		return accountAddr, 0, ""
+	}
+	aliasStore, aerr := aliasStoreFn()
+	if aerr != nil {
+		return "", http.StatusInternalServerError, "failed to check send-as aliases"
+	}
+	alias, ok := aliasStore.FindVerifiedByEmail(candidate)
+	if !ok {
+		return "", http.StatusForbidden, "the from address is not a verified send-as alias for this account"
+	}
+	return sanitizeHeaderValue((&mail.Address{Name: alias.DisplayName, Address: alias.Email}).String()), 0, ""
+}
+
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	req, errMsg, err := decodeMailRequest(r)
 	if err != nil {
@@ -959,9 +1010,16 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	from := sanitizeHeaderValue(payload.Username)
-	if from == "" {
+	accountAddr := sanitizeHeaderValue(payload.Username)
+	if accountAddr == "" {
 		http.Error(w, "imap username is required for sender", http.StatusBadRequest)
+		return
+	}
+	from, fromStatus, fromMsg := resolveMailFrom(accountAddr, req.From, func() (*sendas.Store, error) {
+		return s.sendAsFor(r)
+	})
+	if fromStatus != 0 {
+		http.Error(w, fromMsg, fromStatus)
 		return
 	}
 
