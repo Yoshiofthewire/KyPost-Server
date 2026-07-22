@@ -1,8 +1,10 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"kypost-server/backend/internal/config"
@@ -87,5 +89,78 @@ func TestMigrateLegacySingleUserData(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(userConfigDir, "tuning.md"))
 	if err != nil || string(b) != "customized" {
 		t.Fatalf("second migration clobbered user file: content=%q err=%v", string(b), err)
+	}
+}
+
+// TestCopyIfMissing_MissingSourceStaysSilent verifies that a genuinely-missing source file
+// doesn't produce a log error (expected condition).
+func TestCopyIfMissing_MissingSourceStaysSilent(t *testing.T) {
+	logDir := t.TempDir()
+	logger, err := logging.New(logDir)
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	defer logger.Close()
+
+	dstDir := t.TempDir()
+	dst := filepath.Join(dstDir, "nonexistent.txt")
+
+	// Copy from a source that doesn't exist.
+	copyIfMissing(logger, "/this/path/does/not/exist", dst)
+
+	// Destination should not exist (copy didn't happen).
+	if _, err := os.Stat(dst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected destination to not exist, err=%v", err)
+	}
+
+	// Check logs: should have no error logs (expected condition).
+	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected error reading log: %v", err)
+	}
+	logContent := string(logBytes)
+	if strings.Contains(logContent, "ERROR") || strings.Contains(logContent, "failed to migrate legacy file") {
+		t.Fatalf("expected no error logs for missing source file, but got:\n%s", logContent)
+	}
+}
+
+// TestCopyIfMissing_ReadErrorLogged verifies that unexpected read errors (not os.ErrNotExist)
+// are logged appropriately.
+func TestCopyIfMissing_ReadErrorLogged(t *testing.T) {
+	logDir := t.TempDir()
+	logger, err := logging.New(logDir)
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	defer logger.Close()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	// Create a source that is a directory (not a file).
+	// Reading it with os.ReadFile will fail with a different error than os.ErrNotExist.
+	src := filepath.Join(srcDir, "is_a_directory")
+	if err := os.Mkdir(src, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	dst := filepath.Join(dstDir, "destination.txt")
+
+	// Attempt to copy from a directory.
+	copyIfMissing(logger, src, dst)
+
+	// Destination should not exist (copy failed).
+	if _, err := os.Stat(dst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected destination to not exist, err=%v", err)
+	}
+
+	// Check logs: should have an error log for this unexpected condition.
+	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected error reading log: %v", err)
+	}
+	logContent := string(logBytes)
+	if !strings.Contains(logContent, "failed to migrate legacy file") {
+		t.Fatalf("expected error log for read error, but got:\n%s", logContent)
 	}
 }

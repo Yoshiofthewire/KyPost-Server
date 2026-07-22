@@ -75,6 +75,10 @@ func copyIfMissing(logger *logging.Logger, src, dst string) {
 	}
 	b, err := os.ReadFile(src)
 	if err != nil {
+		// Expected: source doesn't exist. Unexpected: any other read error should be logged.
+		if !errors.Is(err, os.ErrNotExist) {
+			logger.Error("failed to migrate legacy file", "src", src, "dst", dst, "error", err.Error())
+		}
 		return
 	}
 	if err := fsutil.AtomicWriteFile(dst, b, 0o600); err != nil {
