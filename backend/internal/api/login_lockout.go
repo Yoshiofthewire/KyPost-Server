@@ -130,19 +130,19 @@ func (l *failureLockout) recordSuccess(username string) {
 	delete(l.entries, username)
 }
 
-var (
-	timingDummyHashOnce sync.Once
-	timingDummyHash     string
+const (
+	// timingDummyHash is a precomputed scrypt hash used to equalize login
+	// timing regardless of whether the account exists. It's a valid
+	// scrypt(n=16384,r=8,p=1) hash of "kypost-timing-equalization-dummy"
+	// with a fixed salt, hardcoded to avoid any runtime cost/variance in
+	// computing the dummy hash.
+	timingDummyHash = "scrypt$16384$8$1$WKzJYfE9CiMdmMrc+JFGzA==$xF16zj/zU2Y8NeGHTbs/wNF8iRSncahxdDCzZw0q34U="
 )
 
 // equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
 // the unknown-username (and inactive-account) login path costs the same as a
-// real wrong-password check. The dummy hash is minted once per process; its
-// plaintext is irrelevant because the verification is only ever expected to
-// fail.
+// real wrong-password check. The dummy hash is precomputed; its plaintext is
+// irrelevant because the verification is only ever expected to fail.
 func equalizeLoginTiming(candidate string) {
-	timingDummyHashOnce.Do(func() {
-		timingDummyHash, _ = users.HashPassword("kypost-timing-equalization-dummy")
-	})
 	users.VerifySecretHash(timingDummyHash, candidate)
 }
