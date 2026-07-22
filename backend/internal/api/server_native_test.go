@@ -199,6 +199,58 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 	}
 }
 
+// TestNativeRegisterRejectsReplayedPairingToken is a regression test: a
+// captured pairing token/QR code must be redeemable only once, or an
+// attacker who observes one (shoulder-surfing, a screen recording, a leaked
+// URL) could register an unbounded number of rogue devices within the
+// token's validity window, each with full mail sync and push-MFA-approval
+// rights.
+func TestNativeRegisterRejectsReplayedPairingToken(t *testing.T) {
+	srv := newTestServer(t)
+	store := testUserStore(t, srv)
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	token, _, err := srv.createPairingToken(subscriberID, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"subscriberId": subscriberID,
+		"pairingToken": token,
+		"deviceToken":  "native-device-token",
+		"deviceId":     "device-first",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", bytes.NewReader(body))
+	srv.handleNotificationNativeRegister(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first registration: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Replay the exact same token with a different device id — this must be
+	// rejected even though the device id itself doesn't collide.
+	replayBody, _ := json.Marshal(map[string]any{
+		"subscriberId": subscriberID,
+		"pairingToken": token,
+		"deviceToken":  "native-device-token-2",
+		"deviceId":     "device-second",
+	})
+	replayRec := httptest.NewRecorder()
+	replayReq := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", bytes.NewReader(replayBody))
+	srv.handleNotificationNativeRegister(replayRec, replayReq)
+	if replayRec.Code != http.StatusConflict {
+		t.Fatalf("replayed registration: status = %d, want 409; body=%s", replayRec.Code, replayRec.Body.String())
+	}
+
+	devices := store.ListNativeDevices()
+	if len(devices) != 1 {
+		t.Fatalf("len(devices) = %d, want 1 (replay must not have registered a second device)", len(devices))
+	}
+}
+
 // Platform names pass through unchanged (case/whitespace-normalized) so a
 // new client isn't silently mislabeled as android; only a truly empty
 // platform (legacy clients that omit the field) defaults to android.

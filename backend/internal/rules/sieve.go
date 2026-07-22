@@ -297,34 +297,58 @@ func ParseRuleText(text string, existing Rule) (Rule, error) {
 // (which is always exactly one flat level) Sieve rule would ever need.
 const maxTestNestingDepth = 32
 
-// ValidateMatchDepth walks m (and any nested Condition.Group) and rejects it
-// once its nesting depth exceeds maxTestNestingDepth — the exact same bound
-// sieveParser.enterTest/exitTest enforces while parsing a Sieve script.
+// maxMatchConditions bounds the total number of leaf Conditions a Match tree
+// may contain, independent of nesting depth: a single flat group with
+// thousands of sibling conditions sails through the depth check above
+// untouched (depth 1, no nesting at all) while still costing real CPU time
+// on every poller tick for every message. Measured directly: 8,000
+// conditions took ~71ms to evaluate against one message (~8.9µs/condition).
+// 300 keeps a single rule's worst-case per-message cost under a few
+// milliseconds — several orders of magnitude past anything a human-composed
+// or GUI-round-tripped rule (realistically well under 20 conditions) would
+// ever need.
+const maxMatchConditions = 300
+
+// ValidateMatchShape walks m (and any nested Condition.Group) and rejects it
+// once its nesting depth exceeds maxTestNestingDepth or its total leaf-
+// condition count exceeds maxMatchConditions, in one combined traversal —
+// the depth bound is the exact same one sieveParser.enterTest/exitTest
+// enforces while parsing a Sieve script; the condition-count bound has no
+// script-parser equivalent since ParseRuleText's own token stream is what
+// naturally limits how many conditions a hand-written script can contain
+// within the request-body size limit, but the JSON path below has no such
+// natural limit.
 //
 // This exists because ParseRuleText (the Sieve-script path) isn't the only
 // way a Match tree reaches the store: rules_handlers.go's POST /api/rules and
 // PUT /api/rules/{id} decode a MatchGroup straight from JSON and hand it to
 // store.Upsert with no shape validation at all. Without this check, an
-// authenticated caller could persist an arbitrarily deep Match tree via
-// those two endpoints (bounded only by the request-body size limit and Go's
-// encoding/json nesting cap of 10000) that engine.go's evaluator would then
-// walk on every poller tick forever — reproducing, via the JSON path, the
-// exact resource-exhaustion issue the Sieve-parser depth check was added to
-// close. Both entry points must share this one constant/function rather than
-// each guessing their own limit.
-func ValidateMatchDepth(m MatchGroup) error {
-	return validateMatchGroupDepth(m, 1)
+// authenticated caller could persist an arbitrarily deep or arbitrarily wide
+// Match tree via those two endpoints (bounded only by the request-body size
+// limit and Go's encoding/json nesting cap of 10000) that engine.go's
+// evaluator would then walk on every poller tick forever — reproducing,
+// via the JSON path, the exact resource-exhaustion issue the Sieve-parser
+// depth check was added to close. Both entry points must share this one
+// constant/function rather than each guessing their own limit.
+func ValidateMatchShape(m MatchGroup) error {
+	count := 0
+	return validateMatchGroupShape(m, 1, &count)
 }
 
-func validateMatchGroupDepth(m MatchGroup, depth int) error {
+func validateMatchGroupShape(m MatchGroup, depth int, count *int) error {
 	if depth > maxTestNestingDepth {
 		return fmt.Errorf("match nesting exceeds maximum depth of %d", maxTestNestingDepth)
 	}
 	for _, c := range m.Conditions {
 		if c.Group != nil {
-			if err := validateMatchGroupDepth(*c.Group, depth+1); err != nil {
+			if err := validateMatchGroupShape(*c.Group, depth+1, count); err != nil {
 				return err
 			}
+			continue
+		}
+		*count++
+		if *count > maxMatchConditions {
+			return fmt.Errorf("match has more than %d total conditions", maxMatchConditions)
 		}
 	}
 	return nil

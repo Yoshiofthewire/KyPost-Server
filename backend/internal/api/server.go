@@ -75,36 +75,38 @@ type AuthContext struct {
 }
 
 type Server struct {
-	mu                   sync.RWMutex
-	cfg                  config.Config
-	onConfigUpdated      func(config.Config)
-	logger               *logging.Logger
-	health               *health.Service
-	users                *users.Store
-	configDir            string
-	stateDir             string
-	configPath           string
-	logPath              string
-	imapConfigKeyPath    string
-	totpSecretKeyPath    string
-	pgpPrivateKeyPath    string
-	sessions             map[string]Session
-	mfaChallenges        *mfa.Store
-	pairingSecret        string
-	serverBaseURL        string
-	baseURLFallbackWarn  sync.Once
-	pairingSecretWarn    sync.Once
-	nativePushDispatcher *processor.NativePushDispatcher
-	pickupStore          *pgpmail.PickupStore
-	poller               *processor.Poller
-	loginLockout         *failureLockout
-	davLockout           *failureLockout
-	mfaLockout           *failureLockout
-	mfaPushCooldown      *mfaPushCooldown
-	sendAsCooldown       *sendAsVerificationCooldown
-	captchaVerifier      captcha.Verifier
-	captchaProvider      captcha.Provider
-	captchaSiteKey       string
+	mu                     sync.RWMutex
+	cfg                    config.Config
+	onConfigUpdated        func(config.Config)
+	logger                 *logging.Logger
+	health                 *health.Service
+	users                  *users.Store
+	configDir              string
+	stateDir               string
+	configPath             string
+	logPath                string
+	imapConfigKeyPath      string
+	totpSecretKeyPath      string
+	pgpPrivateKeyPath      string
+	sessions               map[string]Session
+	mfaChallenges          *mfa.Store
+	pairingSecret          string
+	serverBaseURL          string
+	baseURLFallbackWarn    sync.Once
+	pairingSecretWarn      sync.Once
+	nativePushDispatcher   *processor.NativePushDispatcher
+	pickupStore            *pgpmail.PickupStore
+	poller                 *processor.Poller
+	loginLockout           *failureLockout
+	davLockout             *failureLockout
+	mfaLockout             *failureLockout
+	mfaPushCooldown        *mfaPushCooldown
+	sendAsCooldown         *sendAsVerificationCooldown
+	classifierTestCooldown *classifierTestCooldown
+	nativePairingNonces    *consumedNativePairingNonces
+	captchaVerifier        captcha.Verifier
+	captchaProvider        captcha.Provider
+	captchaSiteKey         string
 
 	// classifier and globalStore back the Ollama version/update-check block on
 	// the Prompt Tuning page and its admin-notification email. classifier is
@@ -168,43 +170,45 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	}
 
 	return &Server{
-		cfg:                  cfg,
-		onConfigUpdated:      onConfigUpdated,
-		logger:               logger,
-		health:               healthSvc,
-		users:                usersStore,
-		configDir:            configDir,
-		stateDir:             stateDir,
-		configPath:           filepath.Join(configDir, "config.yaml"),
-		logPath:              logPath,
-		imapConfigKeyPath:    imapConfigKeyPath,
-		totpSecretKeyPath:    totpSecretKeyPath,
-		pgpPrivateKeyPath:    pgpPrivateKeyPath,
-		sessions:             map[string]Session{},
-		mfaChallenges:        mfa.NewStore(),
-		pairingSecret:        pairingSecret,
-		serverBaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
-		nativePushDispatcher: processor.NewNativePushDispatcher(logger),
-		pickupStore:          pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
-		userStores:           map[string]*state.Store{},
-		userContacts:         map[string]*contacts.Store{},
-		userSendAs:           map[string]*sendas.Store{},
-		userGroups:           map[string]*groups.Store{},
-		userRules:            map[string]*rules.Store{},
-		userMailCache:        map[string]*mailcache.Store{},
-		userMail:             map[string]*serverMailEntry{},
-		subIndex:             map[string]string{},
-		deviceIndex:          map[string]string{},
-		davCredentials:       newDAVCredentialCache(),
-		loginLockout:         newLoginLockout(),
-		davLockout:           newFailureLockout(davMaxFailures, davLockoutFor),
-		mfaLockout:           newFailureLockout(mfaMaxFailures, mfaLockoutFor),
-		mfaPushCooldown:      newMfaPushCooldown(),
-		sendAsCooldown:       newSendAsVerificationCooldown(),
-		captchaVerifier:      captchaVerifier,
-		captchaProvider:      captchaProvider,
-		captchaSiteKey:       captchaSiteKey,
-		globalStore:          globalStore,
+		cfg:                    cfg,
+		onConfigUpdated:        onConfigUpdated,
+		logger:                 logger,
+		health:                 healthSvc,
+		users:                  usersStore,
+		configDir:              configDir,
+		stateDir:               stateDir,
+		configPath:             filepath.Join(configDir, "config.yaml"),
+		logPath:                logPath,
+		imapConfigKeyPath:      imapConfigKeyPath,
+		totpSecretKeyPath:      totpSecretKeyPath,
+		pgpPrivateKeyPath:      pgpPrivateKeyPath,
+		sessions:               map[string]Session{},
+		mfaChallenges:          mfa.NewStore(),
+		pairingSecret:          pairingSecret,
+		serverBaseURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
+		nativePushDispatcher:   processor.NewNativePushDispatcher(logger),
+		pickupStore:            pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
+		userStores:             map[string]*state.Store{},
+		userContacts:           map[string]*contacts.Store{},
+		userSendAs:             map[string]*sendas.Store{},
+		userGroups:             map[string]*groups.Store{},
+		userRules:              map[string]*rules.Store{},
+		userMailCache:          map[string]*mailcache.Store{},
+		userMail:               map[string]*serverMailEntry{},
+		subIndex:               map[string]string{},
+		deviceIndex:            map[string]string{},
+		davCredentials:         newDAVCredentialCache(),
+		loginLockout:           newLoginLockout(),
+		davLockout:             newFailureLockout(davMaxFailures, davLockoutFor),
+		mfaLockout:             newFailureLockout(mfaMaxFailures, mfaLockoutFor),
+		mfaPushCooldown:        newMfaPushCooldown(),
+		sendAsCooldown:         newSendAsVerificationCooldown(),
+		classifierTestCooldown: newClassifierTestCooldown(),
+		nativePairingNonces:    newConsumedNativePairingNonces(),
+		captchaVerifier:        captchaVerifier,
+		captchaProvider:        captchaProvider,
+		captchaSiteKey:         captchaSiteKey,
+		globalStore:            globalStore,
 	}
 }
 
@@ -1665,6 +1669,12 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// nativePairingTokenTTL is the validity window for a native-device pairing
+// token, shared by the token-minting call site (handleNotificationPairing)
+// and the nonce-consumption TTL in handleNotificationNativeRegister — a
+// single constant so the two can't drift out of sync.
+const nativePairingTokenTTL = 90 * time.Second
+
 func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Request) {
 	ac, okAuth := authFromContext(r)
 	if !okAuth {
@@ -1701,7 +1711,7 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		registerEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/register"
 		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
 	}
-	pairingTTLSeconds := int64(90)
+	pairingTTLSeconds := int64(nativePairingTokenTTL.Seconds())
 	resp := map[string]any{
 		"subscriberId":      subscriberID,
 		"serverBaseUrl":     serverBaseURL,
@@ -1776,8 +1786,21 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
-	if err := s.validatePairingToken(subscriberID, pairingToken, time.Now().UTC()); err != nil {
+	claims, err := s.decodeAndVerifyPairingToken(pairingToken, time.Now().UTC())
+	if err != nil {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(subscriberID)) != 1 {
+		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
+		return
+	}
+	// Native pairing tokens are meant to be redeemed exactly once — the
+	// QR/deep-link a user scans to pair a new device. Without this, the same
+	// captured token stays valid for its full TTL and could register an
+	// unlimited number of devices.
+	if !s.nativePairingNonces.consume(claims.Nonce, nativePairingTokenTTL) {
+		http.Error(w, "pairing token already used", http.StatusConflict)
 		return
 	}
 
@@ -3332,8 +3355,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// mistyped a TOTP code must still be able to retry, but repeated logins
 			// within the cooldown window reuse the existing push rather than fanning
 			// another one out — see mfaPushCooldown's doc for why.
-			if allowed, _ := s.mfaPushCooldown.allowed(u.ID); allowed {
-				s.mfaPushCooldown.recordSent(u.ID)
+			if allowed, _ := s.mfaPushCooldown.tryConsume(u.ID); allowed {
 				go s.dispatchPushChallenge(u.ID, ch.ID)
 			}
 		}
@@ -3647,6 +3669,24 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	// This handler deliberately builds its own ad-hoc classifier client (see
+	// below) rather than reusing the server's shared, paced instance, so this
+	// cooldown is the substitute guard against an admin (or a compromised
+	// admin session) firing unpaced concurrent requests at the shared
+	// classifier/Ollama backend.
+	if allowed, retryAfter := s.classifierTestCooldown.tryConsume(ac.UserID); !allowed {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "classifier test already in progress or recently run; try again shortly",
+			"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
+		})
+		return
+	}
+
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
@@ -3689,6 +3729,7 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 
 	tuning := classifier.LoadTuningText()
 	client := classifier.NewHTTPClient(baseURL, apiKey, path, tuning, 120*time.Second)
+	defer client.Close()
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 

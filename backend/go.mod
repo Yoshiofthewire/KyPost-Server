@@ -7,6 +7,7 @@ require (
 	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/ProtonMail/gopenpgp/v3 v3.4.1
 	github.com/SherClockHolmes/webpush-go v1.4.0
+	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9
 	github.com/emersion/go-webdav v0.7.0
 	gopkg.in/yaml.v3 v3.0.1

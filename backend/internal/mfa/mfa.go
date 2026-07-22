@@ -164,6 +164,21 @@ func (s *Store) Delete(id string) {
 	s.mu.Unlock()
 }
 
+// DeleteByUser removes every live challenge belonging to userID. Used when
+// an admin clears a user's MFA: without this, a challenge already approved
+// (but not yet finished) before the clear would still be redeemable via
+// ConsumePushApproval until it naturally expired, even though the account's
+// PushMFAEnabled bit had already been turned off underneath it.
+func (s *Store) DeleteByUser(userID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, ch := range s.m {
+		if ch.UserID == userID {
+			delete(s.m, id)
+		}
+	}
+}
+
 // PushStatus returns the current push status for a live challenge: "pending",
 // "approved", or "denied". ok=false means missing or expired (caller should
 // treat as "expired"). It is in-memory only — cheap enough to poll frequently.

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -152,7 +153,7 @@ func TestRulesSieveRoundTrip(t *testing.T) {
 // same pathological shape sieve_test.go's "excessive allof nesting is
 // rejected" regression test uses (there, 50 levels of Sieve source text;
 // here, the equivalent JSON MatchGroup/Condition.Group tree). Used to prove
-// rules.ValidateMatchDepth is actually wired into the JSON create/update
+// rules.ValidateMatchShape is actually wired into the JSON create/update
 // paths, not just ParseRuleText's Sieve-script path.
 func deeplyNestedMatchPayload(wraps int) map[string]any {
 	current := map[string]any{
@@ -255,6 +256,115 @@ func TestRulesUpdate_RejectsDeeplyNestedMatch(t *testing.T) {
 	}
 	if stillThere.Name != "original" {
 		t.Fatalf("expected rejected update not to apply, got name=%q", stillThere.Name)
+	}
+}
+
+// wideMatchPayload builds a single flat "anyof" MatchGroup with n sibling
+// leaf conditions — the shape ValidateMatchDepth's original depth-only check
+// let straight through (depth 1, no nesting at all), used to prove the
+// width bound is actually wired into the JSON create/update paths.
+func wideMatchPayload(n int) map[string]any {
+	conditions := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		conditions = append(conditions, map[string]any{
+			"field": "subject", "comparator": "contains", "value": fmt.Sprintf("v%d", i),
+		})
+	}
+	return map[string]any{"op": "anyof", "conditions": conditions}
+}
+
+// TestRulesCreate_RejectsTooWideMatch is TestRulesCreate_RejectsDeeplyNestedMatch's
+// sibling for tree width: a single flat group with more than
+// rules.maxMatchConditions sibling conditions must be rejected, not stored.
+func TestRulesCreate_RejectsTooWideMatch(t *testing.T) {
+	srv := newTestServer(t)
+
+	createBody, _ := json.Marshal(map[string]any{
+		"name":    "too wide",
+		"enabled": true,
+		"match":   wideMatchPayload(301),
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(createBody))
+	authRequest(srv, req)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a 301-condition match, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "more than 300") {
+		t.Fatalf("expected a condition-count error message, got %q", rec.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/rules", nil)
+	authRequest(srv, listReq)
+	listRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(listRec, listReq)
+	var listResp struct {
+		Rules []rulePayload `json:"rules"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(listResp.Rules) != 0 {
+		t.Fatalf("expected the rejected rule not to be stored, got %d rules", len(listResp.Rules))
+	}
+}
+
+// TestRulesCreate_RejectsOverRuleCap confirms the per-user rule cap: once an
+// account has maxRulesPerUser rules, the next create is rejected, but PUT on
+// an existing rule still succeeds (updating in place doesn't grow the
+// count).
+func TestRulesCreate_RejectsOverRuleCap(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	store, err := srv.userRulesStore(all[0].ID)
+	if err != nil {
+		t.Fatalf("userRulesStore: %v", err)
+	}
+
+	var lastID string
+	for i := 0; i < maxRulesPerUser; i++ {
+		created, err := store.Upsert(rulesTestRule(fmt.Sprintf("rule-%d", i)))
+		if err != nil {
+			t.Fatalf("seed rule %d: %v", i, err)
+		}
+		lastID = created.ID
+	}
+
+	overCapBody, _ := json.Marshal(map[string]any{
+		"name":    "one too many",
+		"enabled": true,
+		"match":   map[string]any{"op": "allof", "conditions": []map[string]any{{"field": "from", "comparator": "contains", "value": "x"}}},
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(overCapBody))
+	authRequest(srv, createReq)
+	createRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for the (maxRulesPerUser+1)th rule, got %d, body=%s", createRec.Code, createRec.Body.String())
+	}
+	if !strings.Contains(createRec.Body.String(), "too many rules") {
+		t.Fatalf("expected a rule-cap error message, got %q", createRec.Body.String())
+	}
+
+	// Updating an existing rule must still succeed even at the cap.
+	updateBody, _ := json.Marshal(map[string]any{
+		"name":    "updated at cap",
+		"enabled": true,
+		"match":   map[string]any{"op": "allof", "conditions": []map[string]any{{"field": "from", "comparator": "contains", "value": "y"}}},
+		"actions": []map[string]any{{"type": "archive"}},
+	})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/rules/"+lastID, bytes.NewReader(updateBody))
+	authRequest(srv, updateReq)
+	updateRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected update to succeed even at the rule cap, got %d, body=%s", updateRec.Code, updateRec.Body.String())
 	}
 }
 

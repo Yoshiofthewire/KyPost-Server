@@ -107,6 +107,24 @@ func (c *HTTPClient) Warmup(ctx context.Context) error {
 	return c.ensureWarm(ctx)
 }
 
+// Close releases the three diagnostic log file handles opened by
+// NewHTTPClient. Callers that construct a short-lived HTTPClient (e.g. an
+// admin connectivity-test request) should defer Close() immediately after
+// construction; the long-lived shared classifier instance used by the
+// poller is intentionally never closed — it lives for the process.
+func (c *HTTPClient) Close() error {
+	var firstErr error
+	for _, w := range []io.WriteCloser{c.outputLog, c.serverLog, c.errorLog} {
+		if w == nil {
+			continue
+		}
+		if err := w.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sender, subject, body, tuning string) (string, error) {
 	if err := c.ensureWarm(ctx); err != nil {
 		c.logError(err.Error())

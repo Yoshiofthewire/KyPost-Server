@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,8 @@ import (
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/sendas"
 )
+
+var errFakeRawFetch = errors.New("fake raw message fetch failure")
 
 // stubSendAsMailClient implements imapadapter.Client by embedding the
 // (nil) interface and overriding only the two methods
@@ -23,10 +26,10 @@ type stubSendAsMailClient struct {
 	imapadapter.Client
 	searchResults map[string][]imapadapter.Overview // keyed by the searched verification code
 	searchErr     error
-	headerResults map[int][]string
-	headerErr     error
+	rawResults    map[int][]byte
+	rawErr        error
 	searchCalls   []string
-	headerCalls   [][]int
+	rawCalls      []int
 }
 
 func (c *stubSendAsMailClient) SearchMessages(_ context.Context, _, _, query string, _ int) ([]imapadapter.Overview, error) {
@@ -37,18 +40,12 @@ func (c *stubSendAsMailClient) SearchMessages(_ context.Context, _, _, query str
 	return c.searchResults[query], nil
 }
 
-func (c *stubSendAsMailClient) FetchHeaderFields(_ context.Context, uids []int, _ ...string) (map[int][]string, error) {
-	c.headerCalls = append(c.headerCalls, uids)
-	if c.headerErr != nil {
-		return nil, c.headerErr
+func (c *stubSendAsMailClient) FetchRawMessage(_ context.Context, uid int) ([]byte, error) {
+	c.rawCalls = append(c.rawCalls, uid)
+	if c.rawErr != nil {
+		return nil, c.rawErr
 	}
-	out := map[int][]string{}
-	for _, uid := range uids {
-		if lines, ok := c.headerResults[uid]; ok {
-			out[uid] = lines
-		}
-	}
-	return out, nil
+	return c.rawResults[uid], nil
 }
 
 // newTestPollerForSendAs builds a minimal *Poller sufficient to exercise
@@ -112,7 +109,17 @@ func backdateSendAsField(t *testing.T, stateDir, userID, aliasID string, mutate 
 	}
 }
 
-func TestCheckPendingSendAsAliasesMarksVerifiedOnPassingAuthResult(t *testing.T) {
+// TestCheckPendingSendAsAliasesStaysPendingOnNoDKIMSignature covers the
+// deterministic, no-DNS-required case: a matched message with no
+// DKIM-Signature header at all reliably fails VerifyDKIMForDomain without
+// any network access, so the alias must stay pending. Real DKIM
+// pass/fail crypto outcomes (valid signature, tampered body, wrong domain,
+// expired signature) are exhaustively covered in
+// internal/adapters/imap/dkim_verify_test.go, which has a test-only seam
+// for injecting a fake DNS lookup — this package only exercises the
+// raw-fetch-then-verify plumbing (see also the two rawCalls-focused tests
+// below), not the crypto itself.
+func TestCheckPendingSendAsAliasesStaysPendingOnNoDKIMSignature(t *testing.T) {
 	p := newTestPollerForSendAs(t)
 	userID := "user-1"
 
@@ -129,8 +136,8 @@ func TestCheckPendingSendAsAliasesMarksVerifiedOnPassingAuthResult(t *testing.T)
 		searchResults: map[string][]imapadapter.Overview{
 			alias.VerificationCode: {{UID: 1}},
 		},
-		headerResults: map[int][]string{
-			1: {"Authentication-Results: mx.example.com; dkim=pass header.d=example.com"},
+		rawResults: map[int][]byte{
+			1: []byte("From: candidate@example.com\r\nSubject: no signature here\r\n\r\nbody\r\n"),
 		},
 	}
 
@@ -140,15 +147,18 @@ func TestCheckPendingSendAsAliasesMarksVerifiedOnPassingAuthResult(t *testing.T)
 	if !ok {
 		t.Fatalf("Get: alias not found")
 	}
-	if got.Status != "verified" {
-		t.Fatalf("Status = %q, want verified", got.Status)
+	if got.Status != "pending" {
+		t.Fatalf("Status = %q, want pending", got.Status)
 	}
-	if got.VerifiedAt == "" {
-		t.Fatalf("VerifiedAt not set")
+	if len(mail.rawCalls) != 1 || mail.rawCalls[0] != 1 {
+		t.Fatalf("rawCalls = %v, want exactly one call for UID 1", mail.rawCalls)
 	}
 }
 
-func TestCheckPendingSendAsAliasesStaysPendingOnFailingAuthResult(t *testing.T) {
+// TestCheckPendingSendAsAliasesStaysPendingOnRawFetchError confirms a
+// FetchRawMessage error for a matched UID is handled gracefully (logged,
+// alias left pending for the next tick) rather than propagating a crash.
+func TestCheckPendingSendAsAliasesStaysPendingOnRawFetchError(t *testing.T) {
 	p := newTestPollerForSendAs(t)
 	userID := "user-1"
 
@@ -165,9 +175,7 @@ func TestCheckPendingSendAsAliasesStaysPendingOnFailingAuthResult(t *testing.T) 
 		searchResults: map[string][]imapadapter.Overview{
 			alias.VerificationCode: {{UID: 1}},
 		},
-		headerResults: map[int][]string{
-			1: {"Authentication-Results: mx.example.com; dkim=fail header.d=wrong-domain.com"},
-		},
+		rawErr: errFakeRawFetch,
 	}
 
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
@@ -207,8 +215,8 @@ func TestCheckPendingSendAsAliasesStaysPendingOnNoSearchMatch(t *testing.T) {
 	if got.Status != "pending" {
 		t.Fatalf("Status = %q, want pending", got.Status)
 	}
-	if len(mail.headerCalls) != 0 {
-		t.Fatalf("headerCalls = %d, want 0 (no search match should skip header fetch)", len(mail.headerCalls))
+	if len(mail.rawCalls) != 0 {
+		t.Fatalf("rawCalls = %d, want 0 (no search match should skip raw fetch)", len(mail.rawCalls))
 	}
 }
 

@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,13 +41,14 @@ func (p *Poller) userSendAsStore(userID string) (*sendas.Store, error) {
 // for a message whose subject contains the record's VerificationCode. A
 // bare subject match is not sufficient on its own — it proves only that
 // *some* message with that text exists in an inbox the account owner fully
-// controls, which they could trivially fake themselves. Verification
-// additionally requires that message's Authentication-Results header show
-// a passing DKIM or SPF verdict scoped to the candidate address's own
-// domain (AuthenticationResultsPassForDomain) — a verdict the account
-// owner cannot forge, since it's computed by the receiving mail server
-// during the real SMTP transaction. See auth_results.go for the full
-// rationale.
+// controls, which they could trivially fake themselves (e.g. via IMAP
+// APPEND, which involves no MTA and lets the owner write any header they
+// like). Verification additionally requires that message to carry a
+// cryptographically valid DKIM signature (VerifyDKIMForDomain) whose d=
+// domain matches the candidate address's own domain — a signature the
+// account owner cannot forge without that domain's private key, unlike a
+// merely-claimed Authentication-Results header. See dkim_verify.go for the
+// full rationale.
 //
 // Errors from the mail client (search/fetch failures) are logged and
 // leave the affected record pending for the next tick — they are not
@@ -83,21 +85,16 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 			continue
 		}
 
-		uids := make([]int, len(matches))
-		for i, m := range matches {
-			uids[i] = m.UID
-		}
-		headers, err := mail.FetchHeaderFields(ctx, uids, "Authentication-Results")
-		if err != nil {
-			p.log.Error("send-as verification header fetch failed",
-				"user_id", userID, "alias_id", alias.ID, "error", err.Error())
-			continue
-		}
-
 		domain := domainOf(alias.Email)
 		verified := false
-		for _, uid := range uids {
-			if imapadapter.AuthenticationResultsPassForDomain(headers[uid], domain) {
+		for _, m := range matches {
+			raw, err := mail.FetchRawMessage(ctx, m.UID)
+			if err != nil {
+				p.log.Error("send-as verification raw fetch failed",
+					"user_id", userID, "alias_id", alias.ID, "uid", strconv.Itoa(m.UID), "error", err.Error())
+				continue
+			}
+			if imapadapter.VerifyDKIMForDomain(raw, domain) {
 				verified = true
 				break
 			}

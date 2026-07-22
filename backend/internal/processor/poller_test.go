@@ -299,6 +299,7 @@ func (c *noopMailClient) SaveSent(context.Context, imapadapter.DraftMessage) err
 func (c *noopMailClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
 	return nil, nil
 }
+func (c *noopMailClient) FetchRawMessage(context.Context, int) ([]byte, error) { return nil, nil }
 
 // TestHandleMessage_StopRuleShortCircuitsClassification proves a matched
 // "stop" rule skips classifyWithRetry entirely, rather than merely skipping

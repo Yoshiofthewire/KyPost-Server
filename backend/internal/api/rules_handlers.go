@@ -11,6 +11,14 @@ import (
 	"kypost-server/backend/internal/rules"
 )
 
+// maxRulesPerUser bounds how many filter rules one account may accumulate.
+// Unlike send-as aliases (each Create sends an unsolicited email to a third
+// party), a rule's only cost is the poller's own per-message evaluation
+// time, so this is set well above maxSendAsAliasesPerUser (20) — closer to
+// a Gmail-style filter allowance — purely as a hygiene backstop against
+// unbounded accumulation, not a tight abuse-resistance limit.
+const maxRulesPerUser = 100
+
 type rulePayload struct {
 	ID          string           `json:"id"`
 	Name        string           `json:"name"`
@@ -92,7 +100,11 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		if err := rules.ValidateMatchDepth(payload.Match); err != nil {
+		if len(store.List()) >= maxRulesPerUser {
+			http.Error(w, "too many rules for this account", http.StatusBadRequest)
+			return
+		}
+		if err := rules.ValidateMatchShape(payload.Match); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -138,7 +150,7 @@ func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		if err := rules.ValidateMatchDepth(payload.Match); err != nil {
+		if err := rules.ValidateMatchShape(payload.Match); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

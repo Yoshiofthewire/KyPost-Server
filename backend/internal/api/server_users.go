@@ -182,6 +182,11 @@ func (s *Server) handleUsersClearMFA(w http.ResponseWriter, r *http.Request) {
 	// Clearing MFA is an account-recovery action; revoke paired devices too so
 	// a device paired under the old trust state can't retain access.
 	s.revokeUserDevices(u.ID)
+	// Also purge any in-flight push-MFA challenge: DisableTOTP clears the
+	// PushMFAEnabled bit, but a challenge already approved before this call
+	// is otherwise still redeemable via handlePushFinish until it naturally
+	// expires (up to a few minutes) — see mfa.Store.DeleteByUser.
+	s.mfaChallenges.DeleteByUser(u.ID)
 	s.logger.Info("user MFA cleared by admin", "user_id", u.ID)
 	writeJSON(w, http.StatusOK, u.Public())
 }

@@ -295,15 +295,15 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 	pairApproverDevice(t, srv, u.ID, "dev-uma")
 	enablePush(t, srv, u.ID)
 
-	if ok, _ := srv.mfaPushCooldown.allowed(u.ID); !ok {
-		t.Fatal("expected push allowed before any login")
+	if _, sent := srv.mfaPushCooldown.lastSent[u.ID]; sent {
+		t.Fatal("expected no push recorded before any login")
 	}
 
 	first, methods := loginChallenge(t, srv, "uma", "pw-uma")
 	if !methodsContain(methods, "push") {
 		t.Fatalf("methods = %v, want push offered on first login", methods)
 	}
-	if ok, _ := srv.mfaPushCooldown.allowed(u.ID); ok {
+	if _, sent := srv.mfaPushCooldown.lastSent[u.ID]; !sent {
 		t.Fatal("expected push cooldown armed after first login's dispatch")
 	}
 	firstSentAt := srv.mfaPushCooldown.lastSent[u.ID]
@@ -318,11 +318,51 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 	if !methodsContain(methods, "push") {
 		t.Fatalf("methods = %v, want push still offered as a login method", methods)
 	}
-	if ok, _ := srv.mfaPushCooldown.allowed(u.ID); ok {
-		t.Fatal("expected push still in cooldown after second login")
-	}
 	if !srv.mfaPushCooldown.lastSent[u.ID].Equal(firstSentAt) {
 		t.Fatal("second login within the cooldown window must not re-arm it")
+	}
+}
+
+// TestPushFinishRejectsAfterAdminClearsMFA is a regression test: an
+// already-approved-but-not-yet-finished push challenge must not still mint
+// a session after an admin clears the account's MFA in response to a
+// suspected compromise — the entire point of that action is to immediately
+// cut off access, including any in-flight authentication attempt.
+func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("sam", "pw-sam", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-sam")
+	enablePush(t, srv, u.ID)
+
+	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam")
+	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
+		t.Fatalf("respond approve: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if pollPush(srv, challengeID) != "approved" {
+		t.Fatalf("expected approved after response")
+	}
+
+	// Admin clears MFA in response to the suspicious approval.
+	clearReq := httptest.NewRequest(http.MethodPost, "/api/users/"+u.ID+"/clear-mfa", nil)
+	clearReq.SetPathValue("id", u.ID)
+	clearRec := httptest.NewRecorder()
+	srv.handleUsersClearMFA(clearRec, clearReq)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear-mfa: status=%d body=%s", clearRec.Code, clearRec.Body.String())
+	}
+
+	// The already-approved challenge must no longer be redeemable.
+	finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+		map[string]string{"challengeId": challengeID})
+	if finishRec.Code != http.StatusUnauthorized {
+		t.Fatalf("finish after clear-mfa: status=%d, want 401, body=%s", finishRec.Code, finishRec.Body.String())
+	}
+	if cookies := finishRec.Result().Cookies(); findCookie(cookies, "kypost_session") != nil {
+		t.Fatalf("expected no session cookie minted after clear-mfa, got %+v", cookies)
 	}
 }
 

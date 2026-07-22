@@ -28,6 +28,34 @@ func TestChallengeCreateGetDelete(t *testing.T) {
 	}
 }
 
+func TestDeleteByUserRemovesOnlyThatUsersChallenges(t *testing.T) {
+	s := NewStore()
+	a1, err := s.Create("user-a")
+	if err != nil {
+		t.Fatalf("Create a1: %v", err)
+	}
+	a2, err := s.Create("user-a")
+	if err != nil {
+		t.Fatalf("Create a2: %v", err)
+	}
+	b1, err := s.Create("user-b")
+	if err != nil {
+		t.Fatalf("Create b1: %v", err)
+	}
+
+	s.DeleteByUser("user-a")
+
+	if _, ok := s.Get(a1.ID); ok {
+		t.Fatal("expected user-a's first challenge to be gone")
+	}
+	if _, ok := s.Get(a2.ID); ok {
+		t.Fatal("expected user-a's second challenge to be gone")
+	}
+	if _, ok := s.Get(b1.ID); !ok {
+		t.Fatal("expected user-b's challenge to survive user-a's DeleteByUser")
+	}
+}
+
 func TestChallengeExpiry(t *testing.T) {
 	s := NewStore()
 	ch, err := s.Create("user-1")

@@ -135,17 +135,22 @@ function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
 // nothing added earlier survives untouched.
 //
 // blockRemoteContent additionally forbids style/background attributes and
-// <style> elements. Stripping <img> tags alone does not block remote-resource
-// loading: a legacy background="..." attribute, an inline
-// style="background-image:url(...)", or a <style> block are all in
-// DOMPurify's default allowlist and load exactly like <img src> does, so they
-// bypass the "Show Images" control (and its anti-tracking-pixel intent)
-// unless explicitly forbidden here too.
+// <style>, <svg>, <video>, and <audio> elements. Stripping <img> tags alone
+// does not block remote-resource loading: a legacy background="..."
+// attribute, an inline style="background-image:url(...)", a <style> block,
+// an SVG <image href="...">, a <video poster="...">, or an <audio src="...">
+// are all in DOMPurify's default allowlist and fetch a remote URL eagerly on
+// render exactly like <img src> does, so they bypass the "Show Images"
+// control (and its anti-tracking-pixel intent) unless explicitly forbidden
+// here too. svg/video/audio are all in DOMPurify's own DEFAULT_FORBID_CONTENTS
+// set, so forbidding these three tags drops their entire subtree (any
+// <source>/<track> children included) rather than hoisting children to the
+// top level — no separate child-tag entry is needed.
 function sanitizeEmailHtml(html: string, blockRemoteContent = false): string {
   return DOMPurify.sanitize(
     html,
     blockRemoteContent
-      ? { ADD_ATTR: ["target"], FORBID_ATTR: ["style", "background"], FORBID_TAGS: ["style"] }
+      ? { ADD_ATTR: ["target"], FORBID_ATTR: ["style", "background"], FORBID_TAGS: ["style", "svg", "video", "audio"] }
       : { ADD_ATTR: ["target"] }
   );
 }

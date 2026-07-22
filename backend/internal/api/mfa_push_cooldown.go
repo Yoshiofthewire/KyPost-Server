@@ -32,25 +32,20 @@ func newMfaPushCooldown() *mfaPushCooldown {
 	return &mfaPushCooldown{lastSent: map[string]time.Time{}}
 }
 
-// allowed reports whether a push notification may be sent to userID right
-// now, and if not, how much longer until it may.
-func (c *mfaPushCooldown) allowed(userID string) (ok bool, retryAfter time.Duration) {
+// tryConsume atomically checks whether a push notification may be sent to
+// userID right now and, if so, records it in the same critical section.
+// Doing the check and the record under one lock closes a TOCTOU window that
+// separate allowed()+recordSent() calls left open: two concurrent logins for
+// the same account could otherwise both observe "allowed" before either had
+// recorded its send, permitting a small burst past the intended cap.
+func (c *mfaPushCooldown) tryConsume(userID string) (ok bool, retryAfter time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	last, exists := c.lastSent[userID]
-	if !exists {
-		return true, 0
+	if last, exists := c.lastSent[userID]; exists {
+		if remaining := mfaPushCooldownFor - time.Since(last); remaining > 0 {
+			return false, remaining
+		}
 	}
-	if remaining := mfaPushCooldownFor - time.Since(last); remaining > 0 {
-		return false, remaining
-	}
-	return true, 0
-}
-
-// recordSent marks that a push notification was just dispatched to userID,
-// starting a fresh cooldown window.
-func (c *mfaPushCooldown) recordSent(userID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.lastSent[userID] = time.Now()
+	return true, 0
 }

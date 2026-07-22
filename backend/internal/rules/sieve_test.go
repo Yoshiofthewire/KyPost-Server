@@ -272,6 +272,81 @@ func TestParseRuleText_ReasonableNestingStillParses(t *testing.T) {
 	}
 }
 
+// flatMatchGroup builds a single-level "anyof" MatchGroup with n leaf
+// conditions, used to test ValidateMatchShape's width bound independent of
+// nesting depth.
+func flatMatchGroup(n int) MatchGroup {
+	conds := make([]Condition, 0, n)
+	for i := 0; i < n; i++ {
+		conds = append(conds, Condition{Field: "subject", Comparator: "contains", Value: fmt.Sprintf("v%d", i)})
+	}
+	return MatchGroup{Op: "anyof", Conditions: conds}
+}
+
+func TestValidateMatchShapeRejectsTooManyConditions(t *testing.T) {
+	m := flatMatchGroup(maxMatchConditions + 1)
+	err := ValidateMatchShape(m)
+	if err == nil {
+		t.Fatal("expected an error for a flat tree exceeding maxMatchConditions")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("more than %d", maxMatchConditions)) {
+		t.Fatalf("error = %q, want it to mention the %d limit", err.Error(), maxMatchConditions)
+	}
+}
+
+func TestValidateMatchShapeAcceptsExactlyAtLimit(t *testing.T) {
+	m := flatMatchGroup(maxMatchConditions)
+	if err := ValidateMatchShape(m); err != nil {
+		t.Fatalf("expected exactly maxMatchConditions (%d) to be accepted, got: %v", maxMatchConditions, err)
+	}
+}
+
+// TestValidateMatchShapeStillEnforcesDepth confirms a deep-but-narrow tree
+// (few total conditions, but many nesting levels) is still rejected on
+// depth grounds — the new width counter must not have displaced the
+// existing depth check.
+func TestValidateMatchShapeStillEnforcesDepth(t *testing.T) {
+	// Build maxTestNestingDepth+1 levels of nested single-condition allof
+	// groups — well under maxMatchConditions in total leaf count.
+	leaf := Condition{Field: "subject", Comparator: "contains", Value: "x"}
+	group := MatchGroup{Op: "allof", Conditions: []Condition{leaf}}
+	for i := 0; i < maxTestNestingDepth+1; i++ {
+		group = MatchGroup{Op: "allof", Conditions: []Condition{{Group: &group}}}
+	}
+
+	err := ValidateMatchShape(group)
+	if err == nil {
+		t.Fatal("expected an error for a tree exceeding maxTestNestingDepth")
+	}
+	if !strings.Contains(err.Error(), "nesting exceeds maximum depth") {
+		t.Fatalf("error = %q, want a nesting-depth error", err.Error())
+	}
+}
+
+// TestValidateMatchShapeCountsAcrossGroupBoundaries confirms the leaf
+// counter accumulates correctly through nested groups, not just within one
+// flat group — a tree with several nested groups each holding conditions
+// under the limit individually must still be rejected once their combined
+// total exceeds maxMatchConditions.
+func TestValidateMatchShapeCountsAcrossGroupBoundaries(t *testing.T) {
+	perGroup := 10
+	numGroups := maxMatchConditions/perGroup + 1 // total leaves > maxMatchConditions
+	top := MatchGroup{Op: "allof"}
+	for g := 0; g < numGroups; g++ {
+		inner := flatMatchGroup(perGroup)
+		top.Conditions = append(top.Conditions, Condition{Group: &inner})
+	}
+
+	err := ValidateMatchShape(top)
+	if err == nil {
+		t.Fatalf("expected an error: %d groups of %d conditions (%d total) exceeds the %d limit",
+			numGroups, perGroup, numGroups*perGroup, maxMatchConditions)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("more than %d", maxMatchConditions)) {
+		t.Fatalf("error = %q, want it to mention the %d limit", err.Error(), maxMatchConditions)
+	}
+}
+
 // TestRoundTrip verifies CompileRule(mustParse(CompileRule(r))) is
 // semantically equivalent to CompileRule(r) for every GUI-producible rule
 // shape (flat allof/anyof of leaf conditions, one condition per field).

@@ -206,6 +206,17 @@ func (s *Server) handlePushFinish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
+	// Re-check live push-MFA state even though the challenge was already
+	// approved: an admin clearing this account's MFA (handleUsersClearMFA)
+	// turns PushMFAEnabled off, and while that same action also purges
+	// live challenges via mfaChallenges.DeleteByUser, this check is the
+	// second, independent gate — without it, a challenge approved just
+	// before the clear (and not yet finished) would still mint a session
+	// if the purge and this call raced.
+	if !u.PushMFAEnabled {
+		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
+		return
+	}
 	if err := s.startSession(w, r, u.ID); err != nil {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
