@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,25 +52,54 @@ func (w *rotatingWriter) open() error {
 }
 
 func (w *rotatingWriter) rotate() error {
+	var errs []error
+
 	if w.current != nil {
-		_ = w.current.Close()
+		if err := w.current.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close %s: %w", w.path, err))
+		}
 	}
 	for i := w.maxFiles - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", w.path, i)
 		dst := fmt.Sprintf("%s.%d", w.path, i+1)
 		if i == w.maxFiles-1 {
-			_ = os.Remove(dst)
+			if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove %s: %w", dst, err))
+			}
 		}
 		if _, err := os.Stat(src); err == nil {
-			_ = os.Rename(src, dst)
+			if err := os.Rename(src, dst); err != nil {
+				errs = append(errs, fmt.Errorf("rename %s to %s: %w", src, dst, err))
+			}
 		}
 	}
-	if _, err := os.Stat(w.path); err == nil {
-		_ = os.Rename(w.path, fmt.Sprintf("%s.1", w.path))
-	}
+
 	w.current = nil
-	w.currentSz = 0
-	return w.open()
+	if _, err := os.Stat(w.path); err == nil {
+		if err := os.Rename(w.path, fmt.Sprintf("%s.1", w.path)); err != nil {
+			errs = append(errs, fmt.Errorf("rename %s to %s.1: %w", w.path, w.path, err))
+			// The active file wasn't actually rotated away, so it kept
+			// whatever bytes it already had. Re-stat it to learn the real
+			// size instead of assuming rotation succeeded and resetting to
+			// zero — otherwise the size bound silently stops being
+			// enforced and the file grows without limit.
+			if st, statErr := os.Stat(w.path); statErr == nil {
+				w.currentSz = st.Size()
+			} else {
+				errs = append(errs, fmt.Errorf("stat %s after failed rotation: %w", w.path, statErr))
+			}
+		} else {
+			w.currentSz = 0
+		}
+	} else {
+		w.currentSz = 0
+	}
+
+	if err := w.open(); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
 }
 
 func (w *rotatingWriter) Write(p []byte) (n int, err error) {
