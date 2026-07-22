@@ -250,6 +250,10 @@ type ImportResult = {
   imported: number;
   skipped: number;
   errors: string[];
+  // Total number of errors encountered, which may exceed errors.length: the
+  // server caps how many error strings it returns but still reports the
+  // true count here so truncation isn't silently dropped.
+  errorCount: number;
 };
 
 export async function importContacts(file: File): Promise<ImportResult> {

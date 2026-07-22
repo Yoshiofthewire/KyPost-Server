@@ -126,18 +126,53 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 	decoder := vcard.NewDecoder(limitedBody)
 
 	type importResult struct {
-		Imported int   `json:"imported"`
-		Skipped  int   `json:"skipped"`
-		Errors   []string `json:"errors"`
+		Imported   int      `json:"imported"`
+		Skipped    int      `json:"skipped"`
+		Errors     []string `json:"errors"`
+		ErrorCount int      `json:"errorCount"`
 	}
 
 	result := importResult{Errors: []string{}}
 	maxCards := 5000
+	// maxAttempts bounds the total number of loop iterations independent of
+	// cardCount: a decode error never increments cardCount, so a stream of
+	// malformed (non-vCard) input would otherwise loop until the request
+	// body is exhausted rather than until any cap is hit. maxCards*2 gives
+	// legitimate imports plenty of room (successful decodes hit the
+	// maxCards cap long before this) while still bounding pathological
+	// all-malformed input.
+	maxAttempts := maxCards * 2
+	// maxErrors caps how many error strings we retain in the response; the
+	// true count is still reported via ErrorCount so truncation is
+	// communicated rather than silently dropped.
+	maxErrors := 100
 	cardCount := 0
+	attempts := 0
+	errorCount := 0
+
+	addError := func(msg string) {
+		errorCount++
+		if len(result.Errors) < maxErrors {
+			result.Errors = append(result.Errors, msg)
+		}
+	}
+	// addSummary is for the one-time "why did the loop stop" message: it
+	// always appears (bypassing the maxErrors cap) since it's the context
+	// that explains why the Errors list may otherwise look truncated.
+	addSummary := func(msg string) {
+		errorCount++
+		result.Errors = append(result.Errors, msg)
+	}
 
 	for {
 		if cardCount >= maxCards {
-			result.Errors = append(result.Errors, fmt.Sprintf("stopped processing after %d contacts (limit reached)", maxCards))
+			addSummary(fmt.Sprintf("stopped processing after %d contacts (limit reached)", maxCards))
+			break
+		}
+
+		attempts++
+		if attempts > maxAttempts {
+			addSummary(fmt.Sprintf("stopped processing after %d attempts (too many errors)", maxAttempts))
 			break
 		}
 
@@ -146,7 +181,7 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 			if err == io.EOF {
 				break
 			}
-			result.Errors = append(result.Errors, fmt.Sprintf("decode error: %v", err))
+			addError(fmt.Sprintf("decode error: %v", err))
 			continue
 		}
 		cardCount++
@@ -159,12 +194,14 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 
 		_, err = store.Upsert(contact)
 		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("import error for %s: %v", contact.FormattedName, err))
+			addError(fmt.Sprintf("import error for %s: %v", contact.FormattedName, err))
 			result.Skipped++
 			continue
 		}
 		result.Imported++
 	}
+
+	result.ErrorCount = errorCount
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)

@@ -478,7 +478,11 @@ export function ContactsPage() {
     setStatus("");
     try {
       const result = await importContacts(file);
-      setStatus(`Imported ${result.imported} contact${result.imported === 1 ? "" : "s"}.${result.errors.length > 0 ? ` (${result.errors.length} error${result.errors.length === 1 ? "" : "s"})` : ""}`);
+      // errorCount is the true total; result.errors may be truncated by the
+      // server, so use errorCount (falling back to errors.length for
+      // resilience) rather than assuming the array length is the total.
+      const errorTotal = result.errorCount ?? result.errors.length;
+      setStatus(`Imported ${result.imported} contact${result.imported === 1 ? "" : "s"}.${errorTotal > 0 ? ` (${errorTotal} error${errorTotal === 1 ? "" : "s"})` : ""}`);
       await refresh();
       if (importFileInputRef.current) {
         importFileInputRef.current.value = "";
