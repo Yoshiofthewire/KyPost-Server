@@ -36,7 +36,15 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
         const data = await response.json() as { error?: string; message?: string };
         detail = data.error || data.message || "";
       } else {
-        detail = (await response.text()).trim();
+        const rawText = (await response.text()).trim();
+        // Gateways/CDNs (e.g. Cloudflare) sometimes substitute their own
+        // branded HTML error page for certain status codes (502/504) instead
+        // of passing the origin's real plain-text error through — dumping
+        // that markup into the UI is useless noise, so treat it as "no
+        // detail available" and fall through to the bare status message
+        // below, same as an empty body.
+        const looksLikeHtml = contentType.includes("text/html") || /^<(!doctype|html)/i.test(rawText);
+        detail = looksLikeHtml ? "" : rawText;
       }
     } catch {
       detail = "";
