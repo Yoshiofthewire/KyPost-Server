@@ -91,8 +91,18 @@ func (w *rotatingWriter) rotate() error {
 		} else {
 			w.currentSz = 0
 		}
-	} else {
+	} else if os.IsNotExist(err) {
 		w.currentSz = 0
+	} else {
+		// The file may still be there with all its content — we just
+		// couldn't confirm it (permission problem, transient I/O error,
+		// etc.). Don't assume it's gone and reset the tracked size to
+		// zero, which would silently disable the size bound if the file
+		// is in fact still present and growing. Surface the failure and
+		// leave currentSz at its last known, accurate value instead,
+		// matching the fallback used above when the recovery re-stat
+		// after a failed rename can't be trusted either.
+		errs = append(errs, fmt.Errorf("stat %s: %w", w.path, err))
 	}
 
 	if err := w.open(); err != nil {

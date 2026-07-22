@@ -2,6 +2,8 @@ package logging
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -188,5 +190,68 @@ func TestRotate_JoinsMultipleErrors(t *testing.T) {
 	var linkErr *os.LinkError
 	if !errors.As(err, &linkErr) {
 		t.Fatalf("expected a wrapped *os.LinkError (from the failed os.Rename) to be reachable via errors.As, got: %v", err)
+	}
+}
+
+// TestRotate_SurfacesInitialStatErrors proves that when the *initial*
+// os.Stat(w.path) check (the one that decides whether to take the
+// "file exists, rename it" path or the "no file, currentSz = 0" path) fails
+// for a reason other than the file genuinely not existing — a permission
+// problem, a transient I/O error, etc. — rotate() does not silently treat
+// that as "no file". Before the fix, any non-nil Stat error here (regardless
+// of cause) fell into the same `else` branch as "file doesn't exist" and
+// unconditionally reset currentSz to 0, hiding the failure and letting the
+// size bound silently stop being enforced if the file was in fact still
+// present and growing.
+func TestRotate_SurfacesInitialStatErrors(t *testing.T) {
+	requirePermissionEnforcement(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+
+	w := newRotatingWriter(path, 1<<20, 2)
+	defer func() {
+		_ = os.Chmod(dir, 0o755) // restore so t.TempDir() cleanup can remove it
+		w.Close()
+	}()
+
+	payload := []byte("hello world, this is the pre-rotation payload\n")
+	if _, err := w.Write(payload); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	realSize := w.currentSz
+	if realSize == 0 {
+		t.Fatal("test setup bug: expected a non-zero size before rotating")
+	}
+
+	// os.Stat only requires search (execute) permission on the containing
+	// directories, not any permission on the target file itself — that's
+	// why the existing rename-path tests above, which merely strip write
+	// permission (0o555), still let Stat succeed. To force Stat(w.path)
+	// itself to fail with something other than ENOENT, strip execute
+	// permission from the directory entirely: path lookups inside it then
+	// fail with EACCES even though app.log is still sitting right there
+	// with all its content.
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+
+	err := w.rotate()
+	if err == nil {
+		t.Fatal("rotate() returned nil error despite a non-ENOENT failure of the initial Stat")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("stat %s:", path)) {
+		t.Fatalf("rotate() error = %q, want it to mention the failed initial stat of %s", err.Error(), path)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("rotate() error = %v, want it to wrap fs.ErrPermission", err)
+	}
+
+	if w.currentSz == 0 {
+		t.Fatalf("currentSz reset to 0 after a permission-denied initial Stat; want it preserved at %d", realSize)
+	}
+	if w.currentSz != realSize {
+		t.Fatalf("currentSz = %d, want %d (preserved pre-rotation size, untouched by the failed Stat)", w.currentSz, realSize)
 	}
 }
