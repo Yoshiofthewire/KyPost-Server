@@ -28,6 +28,19 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers
   });
+  if (response.status === 401 && !path.startsWith("/api/auth/")) {
+    // Session cookie expired (or was revoked) mid-session on an endpoint
+    // where a 401 is always unexpected — every endpoint where a 401 is an
+    // expected, in-band outcome (login, password change, MFA challenge)
+    // lives under /api/auth/ and is excluded above. Force a hard reload
+    // rather than trying to recover in-SPA: it re-triggers the normal
+    // "not authenticated" flow (see refreshAuth/App.tsx) cleanly. Return a
+    // never-resolving promise so no caller's .then/catch runs against this
+    // response while the reload is in flight (reload() doesn't synchronously
+    // halt JS execution in every browser).
+    window.location.reload();
+    return new Promise<T>(() => {});
+  }
   if (!response.ok) {
     let detail = "";
     try {
