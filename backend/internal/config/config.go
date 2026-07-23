@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"kypost-server/backend/internal/fsutil"
 
@@ -292,24 +293,59 @@ func LoadVAPIDPrivateKey(path string) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(out), nil
 }
 
+func parseNotificationPrivateKeyPEM(b []byte) (*ecdsa.PrivateKey, error) {
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, fmt.Errorf("decode notification private key: pem block missing")
+	}
+	key, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse notification private key: %w", err)
+	}
+	return key, nil
+}
+
+// loadOrCreateNotificationPrivateKey reads the VAPID private key at path,
+// generating and persisting a new one on first run.
+//
+// daemon and server are separate OS processes that each independently call
+// this on boot. On a fresh install both can observe "file doesn't exist"
+// and race to generate + write a keypair; whichever write lands last "wins"
+// on disk while the other process would otherwise keep running with a
+// DIFFERENT keypair in memory, so the persisted public key in config.yaml
+// could end up not matching the private key on disk. To prevent that, the
+// whole read-check-generate-write sequence is guarded by a syscall.Flock on
+// a sibling lock file. Flock (rather than an O_EXCL lock file) is used
+// deliberately: it is released automatically by the kernel if the holding
+// process dies, so a crash mid-lock can never deadlock a future boot. The
+// losing side of the race re-reads the file after acquiring the lock
+// instead of trusting its own already-generated in-memory key, so every
+// caller converges on the single keypair that actually ends up on disk.
 func loadOrCreateNotificationPrivateKey(path string) (*ecdsa.PrivateKey, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir notification key dir: %w", err)
+	}
+
+	lockFile, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open notification key lock: %w", err)
+	}
+	defer lockFile.Close()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, fmt.Errorf("lock notification key: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	// Re-check under the lock: another process/goroutine may have already
+	// generated and written the key while we were waiting for the lock. If
+	// so, use what's actually on disk rather than generating our own.
 	if b, err := os.ReadFile(path); err == nil {
-		block, _ := pem.Decode(b)
-		if block == nil {
-			return nil, fmt.Errorf("decode notification private key: pem block missing")
-		}
-		key, err := x509.ParseECPrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse notification private key: %w", err)
-		}
-		return key, nil
+		return parseNotificationPrivateKeyPEM(b)
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir notification key dir: %w", err)
-	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate notification key: %w", err)
@@ -318,19 +354,9 @@ func loadOrCreateNotificationPrivateKey(path string) (*ecdsa.PrivateKey, error) 
 	if err != nil {
 		return nil, fmt.Errorf("marshal notification key: %w", err)
 	}
-	file, err := os.Create(path)
-	if err != nil {
-		return nil, fmt.Errorf("create notification key: %w", err)
-	}
-	if err := pem.Encode(file, &pem.Block{Type: "EC PRIVATE KEY", Bytes: der}); err != nil {
-		file.Close()
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	if err := fsutil.AtomicWriteFile(path, pemBytes, 0o600); err != nil {
 		return nil, fmt.Errorf("write notification key: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close notification key: %w", err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return nil, fmt.Errorf("chmod notification key: %w", err)
 	}
 	return key, nil
 }
