@@ -6,7 +6,7 @@ export type AppConfig = {
   scan: { intervalSeconds: number };
   rateLimits: { perMinute: number; perHour: number };
   labels: { allowlist: string[]; keywordMappings: Record<string, string[]> };
-  classifier: { baseUrl: string; apiKey: string; classifyPath: string };
+  classifier: { baseUrl: string; apiKey: string; classifyPath: string; apiKeySet: boolean };
 };
 
 export function uniqueLabels(labels: string[]): string[] {
@@ -54,8 +54,13 @@ export function normalizeConfig(input: unknown): AppConfig {
     },
     classifier: {
       baseUrl: classifier.baseUrl ?? "",
-      apiKey: classifier.apiKey ?? "",
-      classifyPath: classifier.classifyPath ?? ""
+      // Write-only: the server never echoes the real API key back (see
+      // handleConfig), so this is always populated blank here regardless of
+      // whatever the response happens to contain. Only a user actively
+      // typing into the field should ever put a value here.
+      apiKey: "",
+      classifyPath: classifier.classifyPath ?? "",
+      apiKeySet: Boolean(classifier.apiKeySet)
     }
   };
 }

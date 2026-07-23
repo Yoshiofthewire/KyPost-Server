@@ -55,6 +55,12 @@ type Config struct {
 		BaseURL      string `yaml:"baseUrl" json:"baseUrl"`
 		APIKey       string `yaml:"apiKey" json:"apiKey"`
 		ClassifyPath string `yaml:"classifyPath" json:"classifyPath"`
+		// APIKeySet is a computed, response-only indicator of whether an API
+		// key is configured. It is never persisted and never populated on
+		// the live in-memory config; handleConfig sets it on a response
+		// copy only, after zeroing APIKey, so the plaintext key is never
+		// echoed back to any caller.
+		APIKeySet bool `yaml:"-" json:"apiKeySet"`
 	} `yaml:"classifier" json:"classifier"`
 
 	Scan struct {

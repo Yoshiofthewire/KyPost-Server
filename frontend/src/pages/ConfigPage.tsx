@@ -309,9 +309,29 @@ export function ConfigPage() {
       }
     };
 
+    // The API key input is write-only (never populated from a loaded
+    // config), so a non-empty value here can only mean the user just typed
+    // a new one. Only send apiKey in that case — an empty string would
+    // otherwise look like "clear the key" to a naive reader of the diff,
+    // even though the server already preserves the existing key on empty.
+    // apiKeySet is a response-only computed field; never send it back.
+    const typedApiKey = next.classifier.apiKey.trim();
+    const { apiKeySet: _apiKeySet, apiKey: _apiKey, ...classifierRest } = next.classifier;
+    const payload = {
+      ...next,
+      classifier: typedApiKey ? { ...classifierRest, apiKey: typedApiKey } : classifierRest
+    };
+
     try {
-      await putJSON<{ ok: boolean }>("/api/config", next);
-      setCfg(next);
+      await putJSON<{ ok: boolean }>("/api/config", payload);
+      setCfg({
+        ...next,
+        classifier: {
+          ...next.classifier,
+          apiKey: "",
+          apiKeySet: typedApiKey ? true : next.classifier.apiKeySet
+        }
+      });
       setConfigStatus("Configuration saved.");
     } catch {
       setConfigStatus("Failed to save configuration.");
@@ -1014,7 +1034,11 @@ export function ConfigPage() {
                 type="password"
                 value={cfg.classifier.apiKey}
                 onChange={(event) => updateConfig("classifier", { ...cfg.classifier, apiKey: event.target.value })}
+                placeholder="Leave blank to keep the existing key"
               />
+              <p className="config-muted">
+                {cfg.classifier.apiKeySet ? "An API key is currently configured." : "No API key is configured yet."}
+              </p>
             </label>
           </div>
           <div className="config-actions">

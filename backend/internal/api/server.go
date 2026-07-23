@@ -1381,11 +1381,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()
 		cfg := s.cfg
 		s.mu.RUnlock()
-		// Remote LLM settings (including the API key) are admin-only to
-		// edit; don't hand the plaintext key to a non-admin session either.
-		if ac, ok := authFromContext(r); !ok || ac.Role != users.RoleAdmin {
-			cfg.Classifier.APIKey = ""
-		}
+		// The remote LLM API key is a live secret: never echo it back to
+		// any caller, admin included. Report only whether one is set, on
+		// this response copy — the live s.cfg is never mutated.
+		cfg.Classifier.APIKeySet = cfg.Classifier.APIKey != ""
+		cfg.Classifier.APIKey = ""
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
 		var next config.Config
@@ -1394,6 +1394,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.RLock()
+		// APIKeySet is a response-only computed field (see GET above) and is
+		// never meaningful in a PUT payload. Reset it unconditionally before
+		// the change-detection diff so a naive round-trip of a GET response
+		// (which echoes apiKeySet=true when a key is configured) doesn't
+		// spuriously register as a Classifier change.
+		next.Classifier.APIKeySet = false
+		// GET always zeroes APIKey on the wire, so a naive round-trip PUT
+		// will carry apiKey="". Preserve the live key in that case rather
+		// than wiping it, and do so before the diff so that round-trip
+		// isn't misread as the user clearing the key.
+		if next.Classifier.APIKey == "" {
+			next.Classifier.APIKey = s.cfg.Classifier.APIKey
+		}
 		classifierChanged := next.Classifier != s.cfg.Classifier
 		// VAPID key material is server-owned and json:"-" on the wire;
 		// carry it across the round-trip.
