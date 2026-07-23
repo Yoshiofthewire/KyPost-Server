@@ -20,6 +20,7 @@ import (
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/mailcache"
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/redaction"
 	"kypost-server/backend/internal/retry"
 	"kypost-server/backend/internal/rules"
@@ -562,6 +563,85 @@ func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc user
 	p.maybeSendNativePushNotification(uc, msg, "", nil)
 }
 
+// sendRejectionNotice matches mailmsg.SMTPDeliver's signature. A
+// package-level var — rather than calling mailmsg.SMTPDeliver directly — so
+// tests can substitute a fake SMTP sender and verify the reject-and-notify
+// path without standing up a live SMTP server, the same test-seam idiom
+// mailmsg.MaxInboundMessageBytes uses for the size cap itself.
+var sendRejectionNotice = mailmsg.SMTPDeliver
+
+// rejectOversizedMessage is handleMessage's branch for a message
+// ListUnreadInbox flagged as TooLarge: instead of the normal rule/classify/
+// label pipeline (which has no real content to act on — Body was
+// deliberately left empty), it best-effort emails a rejection notice to the
+// account's own address and records a distinct "rejected_too_large"
+// Decision, then marks the message processed so it isn't retried every poll
+// tick. A failure to send the notice is logged and folded into the
+// Decision's Detail, but never blocks recording the decision or marking the
+// message processed — an SMTP misconfiguration must not leave the same
+// oversized message retried forever.
+func (p *Poller) rejectOversizedMessage(uc userCtx, msg imapadapter.Message) error {
+	detail := fmt.Sprintf("message from %q exceeded the %d MiB inbound size limit and was not processed", msg.Sender, mailmsg.MaxInboundMessageBytes/(1<<20))
+	if err := p.notifyMessageTooLarge(uc, msg); err != nil {
+		p.log.Error("failed to send too-large rejection notice", "user_id", uc.id, "message_id", msg.ID, "error", err.Error())
+		detail += "; rejection notice could not be sent: " + err.Error()
+	}
+	if err := uc.store.AddDecision(state.Decision{
+		MessageID: msg.ID,
+		Sender:    msg.Sender,
+		SentTo:    msg.SentTo,
+		Subject:   msg.Subject,
+		Status:    "rejected_too_large",
+		Detail:    detail,
+	}); err != nil {
+		return err
+	}
+	return uc.store.MarkProcessed(msg.ID)
+}
+
+// notifyMessageTooLarge emails a rejection notice to the mailbox owner's own
+// address — the IMAP username, the same "this account's address" convention
+// api.handleMailSend uses for accountAddr — using the poller's per-user IMAP/
+// SMTP config and the mailmsg SMTP-send helpers from Task 16. The notice
+// deliberately carries only the sender and subject the rejected message
+// already exposed in its IMAP overview (cheap header metadata fetched
+// without ever reading the oversized body — see ListUnreadInbox), plus the
+// size limit itself: never the message's own content, which this server
+// never read into memory in the first place, so there's nothing sensitive
+// left to leak.
+func (p *Poller) notifyMessageTooLarge(uc userCtx, msg imapadapter.Message) error {
+	payload, exists, err := mailmsg.ReadIMAPConfigPayload(p.userIMAPConfigPath(uc.id), p.imapKeyPath)
+	if err != nil {
+		return fmt.Errorf("read imap config: %w", err)
+	}
+	if !exists {
+		return errors.New("no imap configuration on file for this account")
+	}
+	accountAddr := mailmsg.SanitizeHeaderValue(payload.Username)
+	if accountAddr == "" {
+		return errors.New("imap username is required to notify the account")
+	}
+	smtpHost, smtpPort, addr, err := mailmsg.ResolveSMTPTarget(payload)
+	if err != nil {
+		return err
+	}
+
+	notice := mailmsg.Message{
+		From:    accountAddr,
+		To:      []string{accountAddr},
+		Subject: "Message rejected: too large to process",
+		Body: fmt.Sprintf(
+			"An incoming message was rejected because it exceeded the %d MiB size limit this server enforces, and was not read, classified, or filtered.\n\n"+
+				"From: %s\nSubject: %s\n\n"+
+				"The message itself was left on the server exactly as delivered — check your mailbox directly to read it — but no label or rule was applied to it.",
+			mailmsg.MaxInboundMessageBytes/(1<<20), msg.Sender, msg.Subject,
+		),
+		Mode: "plain",
+	}.Build()
+
+	return sendRejectionNotice(smtpHost, smtpPort, addr, payload.Username, payload.Password, accountAddr, []string{accountAddr}, notice)
+}
+
 func (p *Poller) reloadConfigIfNeeded() {
 	p.cfgMu.RLock()
 	path := p.cfgPath
@@ -609,6 +689,15 @@ func recentDecisionsContext(store *state.Store, limit int) string {
 }
 
 func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.Message) error {
+	// A message ListUnreadInbox flagged as too large to safely fetch (see
+	// imapadapter.Message.TooLarge and mailmsg.MaxInboundMessageBytes) skips
+	// every ordinary step below — rule matching, classification, labeling —
+	// none of which have real content to act on anyway, since Body was
+	// deliberately left empty rather than populated with an oversized read.
+	if msg.TooLarge {
+		return p.rejectOversizedMessage(uc, msg)
+	}
+
 	cfg := p.currentConfig()
 
 	// Filter rules run first, before classification (below), and skip it

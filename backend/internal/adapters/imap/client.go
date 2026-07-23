@@ -33,6 +33,17 @@ type Message struct {
 	// the poller's cache-warm path can carry it into mailcache.Entry without
 	// any extra IMAP round trip.
 	HasAttachments bool
+	// TooLarge is set instead of Body/HasAttachments being populated when
+	// this message's total content (HTML + text + every attachment) exceeded
+	// mailmsg.MaxInboundMessageBytes — see ListUnreadInbox. Sender/Subject/
+	// SentTo/CC/BCC are still populated (from IMAP overview metadata, which
+	// is cheap and doesn't carry the oversized content) so the poller can
+	// build a rejection notice without ever holding the oversized body in
+	// memory. The poller's handleMessage checks this instead of an error
+	// return, since ListUnreadInbox fetches every unread message in one
+	// batch — one oversized message must not fail the whole batch (nor block
+	// checkpoint progress for every other message in it).
+	TooLarge bool
 }
 
 type UnreadMessage struct {
@@ -449,11 +460,37 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 		if e == nil {
 			continue
 		}
+		ov := overviewFromEmail(uid, e)
+		// A message whose total content (HTML + text + attachments) exceeds
+		// the inbound size cap is still included in out — with TooLarge set
+		// and Body left empty — rather than skipped or erroring the whole
+		// batch: overview metadata (subject/sender/etc) is cheap header data
+		// and safe to carry, but the oversized Text/HTML/Attachments must
+		// never be copied into Body here. maxUID still advances past it, the
+		// same as any other successfully-fetched message, so the poller
+		// (which rejects and notifies instead of processing it — see
+		// handleMessage) doesn't refetch it every tick.
+		if emailContentSize(e) > mailmsg.MaxInboundMessageBytes {
+			out = append(out, Message{
+				ID:       ov.MessageID,
+				Subject:  ov.Subject,
+				Sender:   ov.Sender,
+				SentTo:   ov.SentTo,
+				CC:       ov.CC,
+				BCC:      ov.BCC,
+				Keywords: ov.Keywords,
+				AtUTC:    ov.AtUTC,
+				TooLarge: true,
+			})
+			if uid > maxUID {
+				maxUID = uid
+			}
+			continue
+		}
 		body := strings.TrimSpace(e.Text)
 		if body == "" {
 			body = strings.TrimSpace(e.HTML)
 		}
-		ov := overviewFromEmail(uid, e)
 		out = append(out, Message{
 			ID:             ov.MessageID,
 			Subject:        ov.Subject,
@@ -741,6 +778,17 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		e := emails[uid]
 		if e == nil {
 			continue
+		}
+		// go-imap's GetEmails has already fully decoded this message's body
+		// and attachments into memory before we ever see e — there is no
+		// io.Reader left to wrap in an io.LimitReader at this point (see
+		// FetchRawMessage's comment for why). Refusing to hand an oversized
+		// message on to the rest of the pipeline still bounds how much of it
+		// this call retains and returns, and gives callers (the poller, in
+		// particular) the sentinel needed to reject-and-notify instead of
+		// silently processing a huge message.
+		if emailContentSize(e) > mailmsg.MaxInboundMessageBytes {
+			return nil, mailmsg.ErrMessageTooLarge
 		}
 		body := strings.TrimSpace(e.HTML)
 		if body == "" {
@@ -1318,6 +1366,21 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 	}
 }
 
+// emailContentSize sums the bytes an already-fetched *goimap.Email holds in
+// memory: its HTML/text bodies plus every attachment's content. Used to
+// enforce mailmsg.MaxInboundMessageBytes uniformly across GetMessageBodies
+// and fetchAttachments (and, transitively, ListAttachments/GetAttachment,
+// which both call fetchAttachments) — a single message with many small
+// attachments that add up past the cap is exactly as much of an OOM risk as
+// one huge attachment, so the check is on the total, not any single part.
+func emailContentSize(e *goimap.Email) int64 {
+	total := int64(len(e.HTML)) + int64(len(e.Text))
+	for _, a := range e.Attachments {
+		total += int64(len(a.Content))
+	}
+	return total
+}
+
 // fetchAttachments pulls one message and returns its parsed attachments
 // (go-imap's GetEmails decodes MIME parts into Email.Attachments).
 func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid int) ([]goimap.Attachment, error) {
@@ -1350,6 +1413,9 @@ func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid in
 	if e == nil {
 		return nil, fmt.Errorf("message %d not found in %q", uid, mailbox)
 	}
+	if emailContentSize(e) > mailmsg.MaxInboundMessageBytes {
+		return nil, mailmsg.ErrMessageTooLarge
+	}
 	return e.Attachments, nil
 }
 
@@ -1370,6 +1436,11 @@ func (c *APIClient) ListAttachments(ctx context.Context, mailbox string, uid int
 	return infos, nil
 }
 
+// GetAttachment returns one attachment's content by index. The
+// mailmsg.MaxInboundMessageBytes cap is enforced by fetchAttachments (on the
+// whole message's total content, before any attachment is picked out here),
+// so a request for a single attachment from an oversized message fails with
+// mailmsg.ErrMessageTooLarge just as ListAttachments does.
 func (c *APIClient) GetAttachment(ctx context.Context, mailbox string, uid int, index int) (AttachmentInfo, []byte, error) {
 	attachments, err := c.fetchAttachments(ctx, mailbox, uid)
 	if err != nil {

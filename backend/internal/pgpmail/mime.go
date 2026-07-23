@@ -13,6 +13,7 @@ import (
 	"net/textproto"
 	"strings"
 
+	opgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
 	"kypost-server/backend/internal/mailmsg"
@@ -151,12 +152,26 @@ func DecryptMIME(armoredPGPMessage string, recipient *Identity, signerArmoredPub
 	if recipient == nil {
 		return nil, errors.New("pgpmail: recipient identity required to decrypt")
 	}
+	// Defense in depth against a giant armored input even before decryption
+	// is attempted — the real decompression-bomb guard is
+	// MaxDecompressedMessageSize below, which bounds the *decrypted* output
+	// regardless of how small the ciphertext is, but there's no reason to
+	// let an absurdly large armored blob through either.
+	if int64(len(armoredPGPMessage)) > mailmsg.MaxInboundMessageBytes {
+		return nil, mailmsg.ErrMessageTooLarge
+	}
 	decryptionKeys, err := crypto.NewKeyRing(recipient.key)
 	if err != nil {
 		return nil, fmt.Errorf("pgpmail: build decryption keyring: %w", err)
 	}
 
-	builder := crypto.PGP().Decryption().DecryptionKeys(decryptionKeys)
+	// MaxDecompressedMessageSize is gopenpgp's own guard against a PGP
+	// decompression bomb: a small ciphertext whose compressed packet expands
+	// to gigabytes of plaintext once decrypted. Unlike the read sites in
+	// package imap, this is a genuine streaming limit enforced by the
+	// underlying go-crypto library while decompressing, not a post-hoc size
+	// check — see LimitReader in go-crypto's openpgp/packet/compressed.go.
+	builder := crypto.PGP().Decryption().DecryptionKeys(decryptionKeys).MaxDecompressedMessageSize(mailmsg.MaxInboundMessageBytes)
 	var verifying bool
 	if len(signerArmoredPubKeys) > 0 {
 		verifyKeys, err := crypto.NewKeyRing(nil)
@@ -182,6 +197,23 @@ func DecryptMIME(armoredPGPMessage string, recipient *Identity, signerArmoredPub
 	}
 	result, err := decHandle.Decrypt([]byte(armoredPGPMessage), crypto.Auto)
 	if err != nil {
+		// This errors.Is check is best-effort, not the primary guarantee:
+		// go-crypto's HandleSensitiveParsingError deliberately genericizes
+		// every parsing error encountered while reading symmetrically-
+		// decrypted data — including a MaxDecompressedMessageSize overflow —
+		// into an opaque "parsing error", specifically so an attacker can't
+		// use the error to distinguish "ciphertext too large" from
+		// "ciphertext corrupted/wrong key" before the message is
+		// authenticated (an oracle-attack mitigation). So for an ordinary
+		// encrypted message, a decompression-bomb rejection surfaces here as
+		// a generic decrypt error, not opgperrors.ErrMessageTooLarge — this
+		// branch only catches it on the rarer paths where go-crypto doesn't
+		// genericize (e.g. non-SEIPD-wrapped data). Either way, decryption
+		// still fails closed and the oversized plaintext is never returned;
+		// see TestDecryptMIMERejectsDecompressionBomb.
+		if errors.Is(err, opgperrors.ErrMessageTooLarge) {
+			return nil, mailmsg.ErrMessageTooLarge
+		}
 		return nil, fmt.Errorf("pgpmail: decrypt: %w", err)
 	}
 
@@ -313,13 +345,19 @@ func VerifyDetached(data []byte, armoredSignature string, signerArmoredPubKeys [
 // gracefully: recognized text/attachment parts are extracted, anything else
 // is skipped rather than erroring, so the message still renders.
 func ParseContent(content []byte) (body string, attachments []mailmsg.Attachment, err error) {
+	if int64(len(content)) > mailmsg.MaxInboundMessageBytes {
+		return "", nil, mailmsg.ErrMessageTooLarge
+	}
 	reader := textproto.NewReader(bufio.NewReader(bytes.NewReader(content)))
 	header, err := reader.ReadMIMEHeader()
 	if err != nil && header == nil {
 		return "", nil, fmt.Errorf("pgpmail: read content headers: %w", err)
 	}
-	rest, err := io.ReadAll(reader.R)
+	rest, err := mailmsg.BoundedRead(reader.R, mailmsg.MaxInboundMessageBytes)
 	if err != nil {
+		if errors.Is(err, mailmsg.ErrMessageTooLarge) {
+			return "", nil, err
+		}
 		return "", nil, fmt.Errorf("pgpmail: read content body: %w", err)
 	}
 
@@ -337,8 +375,11 @@ func ParseContent(content []byte) (body string, attachments []mailmsg.Attachment
 		if err != nil {
 			return body, attachments, fmt.Errorf("pgpmail: read multipart part: %w", err)
 		}
-		partBody, err := io.ReadAll(part)
+		partBody, err := mailmsg.BoundedRead(part, mailmsg.MaxInboundMessageBytes)
 		if err != nil {
+			if errors.Is(err, mailmsg.ErrMessageTooLarge) {
+				return body, attachments, err
+			}
 			return body, attachments, fmt.Errorf("pgpmail: read part body: %w", err)
 		}
 		if strings.EqualFold(part.Header.Get("Content-Transfer-Encoding"), "base64") {

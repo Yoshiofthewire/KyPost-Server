@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	goimap "github.com/BrianLeishman/go-imap"
+
+	"kypost-server/backend/internal/mailmsg"
 )
 
 // FetchRawMessage issues a raw UID FETCH for BODY.PEEK[] against uid in the
@@ -115,6 +117,18 @@ func parseRawMessageRecord(records [][]*goimap.Token, uid int) ([]byte, error) {
 		}
 		if !valueFound {
 			return nil, fmt.Errorf("parse raw message: no BODY[] value found for UID %d", uid)
+		}
+		// The goimap library has already read the entire BODY[] literal off
+		// the wire into value (a Go string) by the time we see it here — its
+		// Exec/ParseFetchResponse have no size-limiting hook of their own, so
+		// this can't be a true streaming io.LimitReader over the network
+		// read. What we can still do, and do here, is refuse to hand an
+		// oversized raw message on to the rest of the pipeline (DKIM
+		// verification, send-as checks, etc.) rather than silently
+		// processing it — bounding memory retention downstream even though
+		// the initial buffering by the vendored library already happened.
+		if int64(len(value)) > mailmsg.MaxInboundMessageBytes {
+			return nil, mailmsg.ErrMessageTooLarge
 		}
 		return []byte(value), nil
 	}

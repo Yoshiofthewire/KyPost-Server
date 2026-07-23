@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/rules"
 	"kypost-server/backend/internal/state"
 )
@@ -677,5 +679,180 @@ func TestHandleMessage_AutoLabelDisabledUsesConfiguredLabel(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("applied label %q is not in the configured allowlist %v — mail will land in the invisible Uncategorized tab", got, p.cfg.Labels.Allowlist)
+	}
+}
+
+// writeTestIMAPConfig writes a plaintext (unencrypted) IMAP/SMTP config
+// payload at the path notifyMessageTooLarge reads via
+// mailmsg.ReadIMAPConfigPayload for userID. Plaintext is enough:
+// decryptEncryptedPayload falls back to treating unparseable input as
+// plaintext, so this test doesn't need a real encryption-at-rest key file.
+func writeTestIMAPConfig(t *testing.T, configDir, userID, username, password string) {
+	t.Helper()
+	payload := mailmsg.IMAPConfigPayload{
+		Host:     "imap.example.com",
+		Port:     993,
+		Username: username,
+		Password: password,
+		Mailbox:  "INBOX",
+		SMTPHost: "smtp.example.com",
+		SMTPPort: 587,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal test imap config: %v", err)
+	}
+	dir := filepath.Join(configDir, "users", userID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "imap-config.json"), b, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+// fakeRejectionSMTPCall records one invocation of sendRejectionNotice, the
+// package-level test seam standing in for mailmsg.SMTPDeliver.
+type fakeRejectionSMTPCall struct {
+	smtpHost, addr, from, username, password string
+	smtpPort                                 int
+	recipients                               []string
+	msg                                      []byte
+}
+
+// stubSendRejectionNotice replaces the sendRejectionNotice package var for
+// the duration of a test with a fake that records its call (or fails, if
+// failWith is non-nil) instead of dialing a real SMTP server, restoring the
+// original via t.Cleanup.
+func stubSendRejectionNotice(t *testing.T, failWith error) *[]fakeRejectionSMTPCall {
+	t.Helper()
+	var calls []fakeRejectionSMTPCall
+	original := sendRejectionNotice
+	sendRejectionNotice = func(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, recipients []string, msg []byte) error {
+		calls = append(calls, fakeRejectionSMTPCall{
+			smtpHost: smtpHost, smtpPort: smtpPort, addr: addr,
+			username: smtpUsername, password: smtpPassword, from: from,
+			recipients: recipients, msg: msg,
+		})
+		return failWith
+	}
+	t.Cleanup(func() { sendRejectionNotice = original })
+	return &calls
+}
+
+// TestHandleMessage_TooLargeMessageRejectsAndNotifies is the reject-and-
+// notify integration test: a message ListUnreadInbox flagged as TooLarge
+// must not go through the normal rule/classify/label pipeline at all, must
+// send a rejection notice to the account's own address (the IMAP username),
+// and must be recorded with the distinct "rejected_too_large" status rather
+// than "applied"/"skipped" — proving handleMessage's TooLarge branch, not
+// just notifyMessageTooLarge in isolation.
+func TestHandleMessage_TooLargeMessageRejectsAndNotifies(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+
+	configDir := t.TempDir()
+	writeTestIMAPConfig(t, configDir, "user-1", "alice@example.com", "hunter2")
+	calls := stubSendRejectionNotice(t, nil)
+
+	p := &Poller{log: logger, configDir: configDir} // classifier intentionally nil: must never be reached
+	mail := &noopMailClient{}
+	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true}
+	msg := imapadapter.Message{
+		ID:       "900",
+		Subject:  "Huge attachment",
+		Sender:   "sender@example.com",
+		TooLarge: true,
+	}
+
+	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 rejection notice sent, got %d: %+v", len(*calls), *calls)
+	}
+	call := (*calls)[0]
+	if call.from != "alice@example.com" {
+		t.Fatalf("expected notice From the account's own address, got %q", call.from)
+	}
+	if len(call.recipients) != 1 || call.recipients[0] != "alice@example.com" {
+		t.Fatalf("expected notice addressed to the account's own address, got %v", call.recipients)
+	}
+	body := string(call.msg)
+	if !strings.Contains(body, "Huge attachment") || !strings.Contains(body, "sender@example.com") {
+		t.Fatalf("expected the notice to mention the rejected message's subject/sender, got:\n%s", body)
+	}
+
+	// Nothing from the normal pipeline must have run.
+	if len(mail.appliedLabels) != 0 {
+		t.Fatalf("expected no label to be applied to a rejected message, got %v", mail.appliedLabels)
+	}
+	if len(mail.inboxActions) != 0 {
+		t.Fatalf("expected no rule action to be applied to a rejected message, got %v", mail.inboxActions)
+	}
+
+	if !store.Seen(msg.ID) {
+		t.Fatal("expected the rejected message to be marked processed so it isn't retried every poll tick")
+	}
+	decisions := store.Decisions(10)
+	if len(decisions) != 1 {
+		t.Fatalf("expected exactly 1 decision recorded, got %d: %+v", len(decisions), decisions)
+	}
+	if decisions[0].Status != "rejected_too_large" {
+		t.Fatalf("expected status %q, got %q (must be distinct from the ordinary processed-message statuses)", "rejected_too_large", decisions[0].Status)
+	}
+}
+
+// TestHandleMessage_TooLargeMessageStillRecordsDecisionWhenNotifyFails
+// proves the reject-and-notify path is best-effort: when there's no IMAP
+// config on file for the account (so the notice can't be built/sent at
+// all), the message is still recorded as rejected and marked processed —
+// never left to be retried forever just because notification failed.
+func TestHandleMessage_TooLargeMessageStillRecordsDecisionWhenNotifyFails(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+
+	// configDir deliberately left as an empty temp dir: no imap-config.json
+	// exists for this user, so notifyMessageTooLarge must fail before ever
+	// reaching sendRejectionNotice.
+	calls := stubSendRejectionNotice(t, nil)
+
+	p := &Poller{log: logger, configDir: t.TempDir()}
+	uc := userCtx{id: "user-1", mail: &noopMailClient{}, store: store}
+	msg := imapadapter.Message{ID: "901", Subject: "Huge attachment", Sender: "sender@example.com", TooLarge: true}
+
+	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	if len(*calls) != 0 {
+		t.Fatalf("expected sendRejectionNotice never to be reached without a stored imap config, got %d calls", len(*calls))
+	}
+	if !store.Seen(msg.ID) {
+		t.Fatal("expected the message to still be marked processed even when the notice couldn't be sent")
+	}
+	decisions := store.Decisions(10)
+	if len(decisions) != 1 || decisions[0].Status != "rejected_too_large" {
+		t.Fatalf("expected a rejected_too_large decision to still be recorded, got %+v", decisions)
+	}
+	if !strings.Contains(decisions[0].Detail, "rejection notice could not be sent") {
+		t.Fatalf("expected Detail to mention the notice failure, got %q", decisions[0].Detail)
 	}
 }

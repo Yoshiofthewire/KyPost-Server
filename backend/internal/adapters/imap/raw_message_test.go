@@ -1,8 +1,12 @@
 package imap
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
+
+	"kypost-server/backend/internal/mailmsg"
 )
 
 func TestParseRawMessageRecord(t *testing.T) {
@@ -79,4 +83,40 @@ func TestParseRawMessageRecord(t *testing.T) {
 			t.Fatal("expected an error for a record missing its UID token")
 		}
 	})
+
+	t.Run("message over the size cap is rejected with ErrMessageTooLarge", func(t *testing.T) {
+		withLoweredMaxInboundMessageBytes(t, 16)
+		content := strings.Repeat("a", 17)
+		raw := fmt.Sprintf("* 1 FETCH (UID 600 BODY[] {%d}\r\n%s)\r\n", len(content), content)
+		records := parseRecords(t, raw)
+		_, err := parseRawMessageRecord(records, 600)
+		if !errors.Is(err, mailmsg.ErrMessageTooLarge) {
+			t.Fatalf("got err %v, want ErrMessageTooLarge", err)
+		}
+	})
+
+	t.Run("message exactly at the size cap is accepted", func(t *testing.T) {
+		withLoweredMaxInboundMessageBytes(t, 16)
+		content := strings.Repeat("a", 16)
+		raw := fmt.Sprintf("* 1 FETCH (UID 601 BODY[] {%d}\r\n%s)\r\n", len(content), content)
+		records := parseRecords(t, raw)
+		got, err := parseRawMessageRecord(records, 601)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(got) != content {
+			t.Fatalf("got %q, want %q", got, content)
+		}
+	})
+}
+
+// withLoweredMaxInboundMessageBytes temporarily lowers the shared inbound
+// size cap so tests can exercise the overflow/boundary behavior without
+// allocating megabytes of test data, restoring the original value via
+// t.Cleanup.
+func withLoweredMaxInboundMessageBytes(t *testing.T, limit int64) {
+	t.Helper()
+	original := mailmsg.MaxInboundMessageBytes
+	mailmsg.MaxInboundMessageBytes = limit
+	t.Cleanup(func() { mailmsg.MaxInboundMessageBytes = original })
 }
