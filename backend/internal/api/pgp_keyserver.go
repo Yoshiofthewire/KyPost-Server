@@ -37,7 +37,7 @@ func (s *Server) handlePGPKeyserverLookup(w http.ResponseWriter, r *http.Request
 		http.Error(w, "failed to build keyserver request", http.StatusInternalServerError)
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newSSRFSafeHTTPClient(10 * time.Second).Do(req)
 	if err != nil {
 		http.Error(w, "keyserver lookup failed", http.StatusBadGateway)
 		return

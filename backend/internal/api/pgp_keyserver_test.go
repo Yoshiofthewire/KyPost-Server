@@ -12,6 +12,7 @@ import (
 )
 
 func TestPGPKeyserverLookupSuccess(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
 	id, err := pgpmail.GenerateIdentity("Keyserver Test", "keyserver-test@example.com")
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -57,6 +58,7 @@ func TestPGPKeyserverLookupSuccess(t *testing.T) {
 }
 
 func TestPGPKeyserverLookupNotFound(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
