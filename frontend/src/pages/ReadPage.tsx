@@ -1501,7 +1501,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                   <button type="button" onClick={replyToSelectedEmail} disabled={actionLoading}>Reply</button>
                   <button type="button" onClick={replyAllToSelectedEmail} disabled={actionLoading}>Reply All</button>
                   <button type="button" onClick={forwardSelectedEmail} disabled={actionLoading}>Forward</button>
-                      <button type="button" onClick={() => { setShowImages(true); }}>Show Images</button>
+                      <button type="button" onClick={() => { setShowImages((v) => !v); }}>
+                        {showImages ? "Hide Remote Content" : "Show Remote Content"}
+                      </button>
                   <button type="button" onClick={() => setSelected(null)}>Close</button>
                 </div>
               </div>
