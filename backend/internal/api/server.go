@@ -133,6 +133,12 @@ type Server struct {
 	subIndex       map[string]string
 	deviceIndex    map[string]string
 	davCredentials davCredentialCache
+
+	// httpServer is the live *http.Server backing Run/Serve, constructed by
+	// Prepare so that a Shutdown call arriving before Serve's goroutine has
+	// even been scheduled still has a real server to act on instead of racing
+	// a lazy initialization (see Prepare's doc comment).
+	httpServer *http.Server
 }
 
 func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config)) *Server {
@@ -360,10 +366,65 @@ func (s *Server) routes() http.Handler {
 	return withSecurityHeaders(mux)
 }
 
-func (s *Server) Run() error {
+// Prepare constructs the underlying *http.Server (Addr + Handler) without
+// starting it. Callers that need to coordinate a graceful Shutdown with a
+// signal handler (see runServer/runAll in internal/app/app.go) MUST call
+// Prepare synchronously — before launching any goroutine that calls Serve —
+// so that a shutdown signal arriving essentially immediately after startup
+// always has a non-nil *http.Server to call Shutdown on. Constructing the
+// *http.Server lazily inside the goroutine that calls Serve would instead
+// race: Shutdown could run before that goroutine is even scheduled, either
+// panicking on a nil server or silently doing nothing.
+//
+// Serve and Run call Prepare automatically if it wasn't already called, so
+// simple callers that don't need external shutdown coordination can still
+// just call Run.
+func (s *Server) Prepare() {
 	port := config.EnvInt("WEB_PORT", 5866)
-	s.logger.Info("api server starting", "port", strconv.Itoa(port))
-	return http.ListenAndServe(":"+strconv.Itoa(port), s.routes())
+	s.httpServer = &http.Server{
+		Addr:    ":" + strconv.Itoa(port),
+		Handler: s.routes(),
+	}
+}
+
+// Serve binds the address configured on the prepared *http.Server and blocks
+// serving requests until Shutdown (or Close) stops it, at which point it
+// returns nil (the underlying http.ErrServerClosed is not an error from the
+// caller's point of view — it's the expected result of a graceful stop).
+// Prepare is called automatically if it hasn't been already, but callers
+// that need race-free Shutdown coordination should call Prepare themselves
+// first (see Prepare's doc comment).
+func (s *Server) Serve() error {
+	if s.httpServer == nil {
+		s.Prepare()
+	}
+	s.logger.Info("api server starting", "addr", s.httpServer.Addr)
+	err := s.httpServer.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// Run is a convenience wrapper for callers that don't need to call Shutdown
+// from elsewhere: it prepares and serves in one blocking call.
+func (s *Server) Run() error {
+	s.Prepare()
+	return s.Serve()
+}
+
+// Shutdown gracefully stops the HTTP server: it stops accepting new
+// connections immediately and waits for active requests to finish on their
+// own, up to ctx's deadline, before returning. Safe to call even if Prepare
+// was never invoked (a no-op then, since there is nothing to shut down) or
+// before Serve's goroutine has started (the eventual Serve call will observe
+// the server is already shutting down and return promptly instead of ever
+// blocking on Accept — see net/http.Server's shuttingDown/trackListener).
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.httpServer == nil {
+		return nil
+	}
+	return s.httpServer.Shutdown(ctx)
 }
 
 // StartPickupSweeper runs PickupStore.Sweep on an interval for the process

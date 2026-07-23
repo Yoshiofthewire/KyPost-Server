@@ -145,11 +145,48 @@ func runDaemon(d runDeps) error {
 func runServer(d runDeps) error {
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil)
 	srv.SetClassifier(newClassifierClient(d.cfg))
-	go srv.StartPickupSweeper(context.Background())
-	go srv.StartSendAsCooldownSweeper(context.Background())
-	go srv.StartOllamaVersionMonitor(context.Background())
-	return srv.Run()
+
+	// Prepare constructs the *http.Server synchronously, before the Serve
+	// goroutine below is even launched, so a stop signal arriving essentially
+	// immediately still has a real server for Shutdown to act on (see
+	// api.Server.Prepare's doc comment for the race this avoids).
+	srv.Prepare()
+
+	sweeperCtx, cancelSweepers := context.WithCancel(context.Background())
+	defer cancelSweepers()
+	go srv.StartPickupSweeper(sweeperCtx)
+	go srv.StartSendAsCooldownSweeper(sweeperCtx)
+	go srv.StartOllamaVersionMonitor(sweeperCtx)
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- srv.Serve()
+	}()
+
+	select {
+	case <-stop:
+		cancelSweepers()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancelShutdown()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			d.logger.Error("api server shutdown error", "error", err.Error())
+		}
+		<-serveErr
+		return nil
+	case err := <-serveErr:
+		return err
+	}
 }
+
+// shutdownTimeout bounds how long a graceful shutdown waits for the HTTP
+// server to drain in-flight requests (via api.Server.Shutdown) before
+// giving up and letting the process exit anyway. 20s comfortably covers the
+// slowest handlers (e.g. IMAP round-trips) without risking an orchestrator's
+// own SIGKILL timeout (typically 30s) firing first.
+const shutdownTimeout = 20 * time.Second
 
 func runAll(d runDeps) error {
 	// Restore the sticky AI-credits flag onto the health status so a restart
@@ -168,20 +205,40 @@ func runAll(d runDeps) error {
 	srv.SetClassifier(classifierClient)
 	warmupClassifierOnStartup(d.logger, classifierClient, poller)
 
+	// Prepare constructs the *http.Server synchronously, before the Serve
+	// goroutine below is launched, so a stop signal arriving essentially
+	// immediately still has a real server for Shutdown to act on (see
+	// api.Server.Prepare's doc comment for the race this avoids).
+	srv.Prepare()
+
+	sweeperCtx, cancelSweepers := context.WithCancel(context.Background())
+	defer cancelSweepers()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go poller.Run()
 	d.logger.Info("poller goroutine started")
-	go srv.StartPickupSweeper(context.Background())
-	go srv.StartSendAsCooldownSweeper(context.Background())
-	go srv.StartOllamaVersionMonitor(context.Background())
+	go srv.StartPickupSweeper(sweeperCtx)
+	go srv.StartSendAsCooldownSweeper(sweeperCtx)
+	go srv.StartOllamaVersionMonitor(sweeperCtx)
 	go monitorHealth(d.logger, d.health)
 	go func() {
-		if err := srv.Run(); err != nil {
+		if err := srv.Serve(); err != nil {
 			d.logger.Error("api server stopped", "error", err.Error())
 		}
 	}()
+
 	<-stop
+	// Cancel the sweepers right away, then drain the HTTP server before
+	// stopping the poller: an in-flight admin request (e.g. "poll now") may
+	// still depend on the poller, so it should keep running until Shutdown
+	// has finished waiting for such requests to complete.
+	cancelSweepers()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelShutdown()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		d.logger.Error("api server shutdown error", "error", err.Error())
+	}
 	poller.Stop()
 	return nil
 }
