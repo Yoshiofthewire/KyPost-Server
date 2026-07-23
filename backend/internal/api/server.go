@@ -3507,7 +3507,6 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
-	s.mfaLockout.recordSuccess(ch.UserID)
 
 	// A challenge is single-use: ConsumeTOTPStep atomically checks-and-marks
 	// consumption under a single lock, so two concurrent requests bearing the
@@ -3532,11 +3531,20 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	// reaches here, so it never advances the recorded step), and a rejection
 	// here gets the exact same generic response as a wrong code so it cannot
 	// be distinguished from one over the wire.
+	//
+	// recordSuccess (which clears the account's brute-force lockout throttle)
+	// is deliberately deferred until after this guard passes: a replayed code
+	// is a rejected attempt, exactly like a wrong code, and must count against
+	// the lockout (recordFailure) rather than clearing it — otherwise a
+	// captured valid code let an attacker keep the lockout counter at zero
+	// indefinitely while brute-forcing the real, still-unknown current code.
 	if _, err := s.users.SetLastUsedTOTPStep(u.ID, step); err != nil {
+		s.mfaLockout.recordFailure(ch.UserID)
 		s.mfaChallenges.Delete(ch.ID)
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
+	s.mfaLockout.recordSuccess(ch.UserID)
 
 	s.mfaChallenges.Delete(ch.ID)
 	if err := s.startSession(w, r, u.ID); err != nil {

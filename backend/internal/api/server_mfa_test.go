@@ -278,6 +278,70 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	}
 }
 
+// TestTOTPReplayCountsTowardLockout proves a replayed (already-used) TOTP
+// code counts as a failure against the account-wide MFA lockout, the same as
+// a wrong code, rather than clearing it. Before the fix, recordSuccess ran as
+// soon as totp.Validate accepted the code -- before the per-account replay
+// guard rejected it -- so a captured valid code let an attacker keep
+// resetting the lockout counter to zero indefinitely while grinding through
+// guesses for the real, still-unknown current code.
+func TestTOTPReplayCountsTowardLockout(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("kate", "pw-kate", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	secret, _ := enrollTOTP(t, srv, u.ID)
+
+	newChallenge := func() string {
+		t.Helper()
+		loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+			map[string]string{"username": "kate", "password": "pw-kate"})
+		var login struct {
+			ChallengeID string `json:"challengeId"`
+		}
+		if err := json.Unmarshal(loginRec.Body.Bytes(), &login); err != nil {
+			t.Fatalf("unmarshal login: %v", err)
+		}
+		if login.ChallengeID == "" {
+			t.Fatalf("expected a challengeId, got %s", loginRec.Body.String())
+		}
+		return login.ChallengeID
+	}
+
+	// Consume the current code once, legitimately.
+	firstCode := totpCodeForTest(t, secret, time.Now())
+	rec := doJSON(srv, srv.handleMFATOTP, http.MethodPost, "/api/auth/mfa/totp",
+		map[string]string{"challengeId": newChallenge(), "code": firstCode})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial use: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Replay that now-used code against mfaMaxFailures fresh challenges. Each
+	// one passes totp.Validate (the code is still time-window valid) but must
+	// be rejected by the per-account replay guard -- and, per the fix, that
+	// rejection must count as a lockout failure exactly like a wrong code
+	// would, not a success that clears the lockout.
+	for i := 0; i < mfaMaxFailures; i++ {
+		replay := doJSON(srv, srv.handleMFATOTP, http.MethodPost, "/api/auth/mfa/totp",
+			map[string]string{"challengeId": newChallenge(), "code": firstCode})
+		if replay.Code != http.StatusUnauthorized {
+			t.Fatalf("replay attempt %d: status=%d, want 401", i+1, replay.Code)
+		}
+	}
+
+	// The account must now be locked out by the account-wide MFA throttle:
+	// a fresh challenge is rejected before the code is even inspected. If
+	// replays had instead been clearing the lockout (the bug), this would
+	// still be a plain 401 "invalid code", not 429.
+	locked := doJSON(srv, srv.handleMFATOTP, http.MethodPost, "/api/auth/mfa/totp",
+		map[string]string{"challengeId": newChallenge(), "code": firstCode})
+	if locked.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected account lockout after %d replayed attempts, got status=%d body=%s",
+			mfaMaxFailures, locked.Code, locked.Body.String())
+	}
+}
+
 func TestTOTPAttemptLockout(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create("frank", "pw-frank", users.RoleUser)
