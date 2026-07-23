@@ -82,10 +82,10 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 
 	recipients := []string{recipient}
 	if smtpPort == 465 {
-		return smtpSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, notice, 45*time.Second)
+		return mailmsg.SMTPSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, notice, 45*time.Second)
 	}
 	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
-	return smtpSendWithTimeout(addr, auth, from, recipients, notice, 45*time.Second)
+	return mailmsg.SMTPSendWithTimeout(addr, auth, from, recipients, notice, 45*time.Second)
 }
 
 // pickupBaseURL is the externally-reachable base URL used to build pickup

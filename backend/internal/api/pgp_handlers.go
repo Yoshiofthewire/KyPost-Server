@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/pgpmail"
 )
 
@@ -37,7 +38,7 @@ func (s *Server) handlePGPIdentityGenerate(w http.ResponseWriter, r *http.Reques
 	// which for accounts like "admin" isn't an email address at all and
 	// leaves the generated key with no way to tie back to the user's real
 	// mailbox.
-	imapPayload, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
+	imapPayload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 	if err != nil {
 		http.Error(w, "failed to read mail configuration", http.StatusInternalServerError)
 		return

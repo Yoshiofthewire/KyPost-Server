@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
-	"net/smtp"
 	"os"
 	"path"
 	"path/filepath"
@@ -417,35 +415,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-type imapConfigPayload struct {
-	Host      string `json:"host"`
-	Port      int    `json:"port"`
-	Username  string `json:"username"`
-	Password  string `json:"password"`
-	Mailbox   string `json:"mailbox"`
-	SMTPHost  string `json:"smtpHost,omitempty"`
-	SMTPPort  int    `json:"smtpPort,omitempty"`
-	UpdatedAt string `json:"updatedAt,omitempty"`
-}
-
-// normalizeIMAPPayload applies default values and trimming to IMAP config payload.
-func normalizeIMAPPayload(p imapConfigPayload) imapConfigPayload {
-	p.Host = strings.TrimSpace(p.Host)
-	p.Username = strings.TrimSpace(p.Username)
-	p.Password = strings.TrimSpace(p.Password)
-	p.Mailbox = strings.TrimSpace(p.Mailbox)
-	p.SMTPHost = strings.TrimSpace(p.SMTPHost)
-	if p.Port <= 0 {
-		p.Port = 993
-	}
-	if p.Mailbox == "" {
-		p.Mailbox = "INBOX"
-	}
-	if p.SMTPHost != "" && p.SMTPPort <= 0 {
-		p.SMTPPort = 587
-	}
-	return p
-}
+// imapConfigPayload is an alias for mailmsg.IMAPConfigPayload: the type
+// moved to package mailmsg (Task 16) so the mail poller can read stored IMAP/
+// SMTP credentials without an api->processor->api import cycle. Kept as an
+// alias here (rather than rewriting every reference in this package) since
+// it's the identical type, just relocated.
+type imapConfigPayload = mailmsg.IMAPConfigPayload
 
 func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)
@@ -456,7 +431,7 @@ func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 	imapConfigPath := s.userIMAPConfigPath(ac.UserID)
 	switch r.Method {
 	case http.MethodGet:
-		payload, exists, err := readIMAPConfigPayload(imapConfigPath, s.imapConfigKeyPath)
+		payload, exists, err := mailmsg.ReadIMAPConfigPayload(imapConfigPath, s.imapConfigKeyPath)
 		if err != nil {
 			http.Error(w, "failed to read imap configuration", http.StatusInternalServerError)
 			return
@@ -485,7 +460,7 @@ func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		payload = normalizeIMAPPayload(payload)
+		payload = mailmsg.NormalizeIMAPPayload(payload)
 		if payload.Host == "" || payload.Username == "" || payload.Password == "" {
 			http.Error(w, "host, username, and password are required", http.StatusBadRequest)
 			return
@@ -536,7 +511,7 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
 
 	if strings.TrimSpace(req.Host) == "" || strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
-		stored, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
+		stored, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 		if err != nil {
 			http.Error(w, "failed to load imap configuration", http.StatusInternalServerError)
 			return
@@ -562,7 +537,7 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	req = normalizeIMAPPayload(req)
+	req = mailmsg.NormalizeIMAPPayload(req)
 
 	client, err := goimap.New(req.Username, req.Password, req.Host, req.Port)
 	if err != nil {
@@ -699,115 +674,6 @@ func sanitizeHeaderValue(value string) string {
 	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
 }
 
-func deriveSMTPHost(imapHost string) string {
-	host := strings.TrimSpace(imapHost)
-	if host == "" {
-		return ""
-	}
-	lower := strings.ToLower(host)
-	if strings.HasPrefix(lower, "imap.") {
-		return "smtp." + host[len("imap."):]
-	}
-	if strings.Contains(lower, ".imap.") {
-		return strings.Replace(host, ".imap.", ".smtp.", 1)
-	}
-	return host
-}
-
-// resolveSMTPTarget derives the SMTP host/port/address to use for a user's
-// outbound mail from their stored IMAP config, applying the same fallback
-// chain every outbound-send call site in this package needs: the payload's
-// own SMTPHost/SMTPPort, then SMTP_HOST/SMTP_PORT env vars, then a
-// heuristic derived from the IMAP host, then a hardcoded default port of
-// 587. Returns an error (rather than picking a call-site-specific HTTP
-// status) when no host can be determined at all — callers translate that
-// into whatever response is appropriate for their context.
-func resolveSMTPTarget(payload imapConfigPayload) (smtpHost string, smtpPort int, addr string, err error) {
-	smtpHost = strings.TrimSpace(payload.SMTPHost)
-	if smtpHost == "" {
-		smtpHost = strings.TrimSpace(config.EnvOrDefault("SMTP_HOST", ""))
-	}
-	if smtpHost == "" {
-		smtpHost = deriveSMTPHost(payload.Host)
-	}
-	if smtpHost == "" {
-		return "", 0, "", fmt.Errorf("smtp host is not configured")
-	}
-	smtpPort = payload.SMTPPort
-	if smtpPort <= 0 {
-		smtpPort = config.EnvInt("SMTP_PORT", 587)
-	}
-	if smtpPort <= 0 {
-		smtpPort = 587
-	}
-	return smtpHost, smtpPort, fmt.Sprintf("%s:%d", smtpHost, smtpPort), nil
-}
-
-func smtpSendWithTimeout(addr string, auth smtp.Auth, from string, recipients []string, msg []byte, timeout time.Duration) error {
-	result := make(chan error, 1)
-	go func() {
-		result <- smtp.SendMail(addr, auth, from, recipients, msg)
-	}()
-
-	select {
-	case err := <-result:
-		return err
-	case <-time.After(timeout):
-		return fmt.Errorf("smtp send timed out after %s", timeout)
-	}
-}
-
-func smtpSendWithImplicitTLS(host string, port int, username, password, from string, recipients []string, msg []byte, timeout time.Duration) error {
-	addr := fmt.Sprintf("%s:%d", host, port)
-	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-
-	client, err := smtp.NewClient(conn, host)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	if ok, _ := client.Extension("AUTH"); ok {
-		auth := smtp.PlainAuth("", username, password, host)
-		if err := client.Auth(auth); err != nil {
-			return err
-		}
-	}
-
-	if err := client.Mail(from); err != nil {
-		return err
-	}
-	for _, recipient := range recipients {
-		if err := client.Rcpt(recipient); err != nil {
-			return err
-		}
-	}
-
-	writer, err := client.Data()
-	if err != nil {
-		return err
-	}
-	if _, err := writer.Write(msg); err != nil {
-		_ = writer.Close()
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-
-	if err := client.Quit(); err != nil {
-		return err
-	}
-	return nil
-}
-
 // findContactPGPKey looks up email among the store's contacts (case-
 // insensitive) and returns its armored PGP public key, if the matching
 // contact has one on file.
@@ -927,18 +793,6 @@ func buildPGPDeliveries(msg []byte, plan pgpRecipientPlan, signer *pgpmail.Ident
 	return deliveries, nil
 }
 
-// smtpDeliver sends msg over SMTP to recipients, choosing implicit TLS
-// (port 465) or STARTTLS/plain auth otherwise. Extracted from
-// finishMailSend so per-BCC-recipient encrypted sends (handleMailSend) can
-// reuse the same transport logic for their own separate SMTP transactions.
-func smtpDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, recipients []string, msg []byte) error {
-	if smtpPort == 465 {
-		return smtpSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, msg, 45*time.Second)
-	}
-	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
-	return smtpSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
-}
-
 // resolveMailFrom decides the From header value handleMailSend should use,
 // given the account's own IMAP username (accountAddr — already sanitized
 // and confirmed non-empty by the caller) and the client-requested From
@@ -1010,7 +864,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
-	payload, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
+	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 	if err != nil {
 		http.Error(w, "failed to read mail credentials", http.StatusInternalServerError)
 		return
@@ -1020,7 +874,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	smtpHost, smtpPort, addr, err := resolveSMTPTarget(payload)
+	smtpHost, smtpPort, addr, err := mailmsg.ResolveSMTPTarget(payload)
 	if err != nil {
 		http.Error(w, "smtp host is not configured", http.StatusBadRequest)
 		return
@@ -1118,7 +972,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, delivery := range bccDeliveries {
-		if err := smtpDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
+		if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
 			s.logger.Error("bcc pgp send failed", "recipient", delivery.Recipients[0], "error", err.Error())
 		}
 	}
@@ -1155,7 +1009,7 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
 
 	if len(recipients) > 0 {
-		if sendErr := smtpDeliver(smtpHost, smtpPort, addr, smtpUsername, smtpPassword, from, recipients, msg); sendErr != nil {
+		if sendErr := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, smtpUsername, smtpPassword, from, recipients, msg); sendErr != nil {
 			s.logger.Error("mail send failed", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "error", sendErr.Error())
 			http.Error(w, fmt.Sprintf("failed to send email: %s", sendErr.Error()), http.StatusBadGateway)
 			return false
@@ -1312,27 +1166,6 @@ func (s *Server) serveAttachmentDownload(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content)
-}
-
-func readIMAPConfigPayload(path, keyPath string) (imapConfigPayload, bool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return imapConfigPayload{}, false, nil
-		}
-		return imapConfigPayload{}, false, err
-	}
-
-	plain, err := decryptEncryptedPayload(b, keyPath)
-	if err != nil {
-		return imapConfigPayload{}, false, err
-	}
-
-	var payload imapConfigPayload
-	if err := json.Unmarshal(plain, &payload); err != nil {
-		return imapConfigPayload{}, false, err
-	}
-	return normalizeIMAPPayload(payload), true, nil
 }
 
 func writeIMAPConfigPayload(path, keyPath string, payload imapConfigPayload) error {

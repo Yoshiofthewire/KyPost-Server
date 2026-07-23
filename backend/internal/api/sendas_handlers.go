@@ -70,7 +70,7 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Load the caller's own IMAP config.
-	imapCfg, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
+	imapCfg, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 	if err != nil {
 		http.Error(w, "failed to read mail credentials", http.StatusInternalServerError)
 		return
@@ -124,7 +124,7 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 8. Resolve the SMTP target.
-	smtpHost, smtpPort, addr, err := resolveSMTPTarget(imapCfg)
+	smtpHost, smtpPort, addr, err := mailmsg.ResolveSMTPTarget(imapCfg)
 	if err != nil {
 		http.Error(w, "smtp host is not configured", http.StatusBadRequest)
 		return
@@ -140,7 +140,7 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 		Mode:    "plain",
 	}.Build()
 
-	if err := smtpDeliver(smtpHost, smtpPort, addr, imapCfg.Username, imapCfg.Password, sanitizeHeaderValue(imapCfg.Username), []string{normalizedEmail}, msg); err != nil {
+	if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, imapCfg.Username, imapCfg.Password, sanitizeHeaderValue(imapCfg.Username), []string{normalizedEmail}, msg); err != nil {
 		http.Error(w, fmt.Sprintf("failed to send verification email: %s", err), http.StatusBadGateway)
 		return
 	}

@@ -14,6 +14,7 @@ import (
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/groups"
 	"kypost-server/backend/internal/mailcache"
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/rules"
 	"kypost-server/backend/internal/sendas"
 	"kypost-server/backend/internal/state"
@@ -233,7 +234,7 @@ type serverMailEntry struct {
 // their stored credential payload changes (keyed by the payload UpdatedAt).
 // Returns errIMAPNotConfigured when the user has no stored credentials.
 func (s *Server) userMailClient(userID string) (imapadapter.Client, error) {
-	payload, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(userID), s.imapConfigKeyPath)
+	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(userID), s.imapConfigKeyPath)
 	if err != nil {
 		return nil, err
 	}

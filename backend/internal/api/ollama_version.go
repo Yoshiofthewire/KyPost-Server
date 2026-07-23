@@ -152,7 +152,7 @@ func (s *Server) notifyAdminOllamaUpdateAvailable(installed, latest string) erro
 		return fmt.Errorf("no active admin to notify")
 	}
 
-	payload, exists, err := readIMAPConfigPayload(s.userIMAPConfigPath(admin.ID), s.imapConfigKeyPath)
+	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(admin.ID), s.imapConfigKeyPath)
 	if err != nil {
 		return fmt.Errorf("read admin imap config: %w", err)
 	}
@@ -160,7 +160,7 @@ func (s *Server) notifyAdminOllamaUpdateAvailable(installed, latest string) erro
 		return fmt.Errorf("admin has no imap configuration to send through")
 	}
 
-	smtpHost, smtpPort, addr, err := resolveSMTPTarget(payload)
+	smtpHost, smtpPort, addr, err := mailmsg.ResolveSMTPTarget(payload)
 	if err != nil {
 		return fmt.Errorf("resolve smtp target: %w", err)
 	}
@@ -183,5 +183,5 @@ func (s *Server) notifyAdminOllamaUpdateAvailable(installed, latest string) erro
 		Mode: "plain",
 	}.Build()
 
-	return smtpDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, from, []string{from}, msg)
+	return mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, from, []string{from}, msg)
 }

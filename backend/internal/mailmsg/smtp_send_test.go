@@ -1,4 +1,4 @@
-package api
+package mailmsg
 
 import "testing"
 
@@ -8,12 +8,12 @@ import "testing"
 // error when no host can be determined at all).
 func TestResolveSMTPTarget(t *testing.T) {
 	t.Run("uses payload SMTPHost directly", func(t *testing.T) {
-		payload := imapConfigPayload{
+		payload := IMAPConfigPayload{
 			Host:     "imap.example.com",
 			SMTPHost: "smtp.explicit.example.com",
 			SMTPPort: 2525,
 		}
-		host, port, addr, err := resolveSMTPTarget(payload)
+		host, port, addr, err := ResolveSMTPTarget(payload)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -30,10 +30,10 @@ func TestResolveSMTPTarget(t *testing.T) {
 
 	t.Run("falls back to SMTP_HOST env var when payload host empty", func(t *testing.T) {
 		t.Setenv("SMTP_HOST", "smtp.fromenv.example.com")
-		payload := imapConfigPayload{
+		payload := IMAPConfigPayload{
 			Host: "imap.example.com",
 		}
-		host, port, addr, err := resolveSMTPTarget(payload)
+		host, port, addr, err := ResolveSMTPTarget(payload)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -49,10 +49,10 @@ func TestResolveSMTPTarget(t *testing.T) {
 	})
 
 	t.Run("falls back to deriveSMTPHost(payload.Host) when payload and env both empty", func(t *testing.T) {
-		payload := imapConfigPayload{
+		payload := IMAPConfigPayload{
 			Host: "imap.example.com",
 		}
-		host, port, addr, err := resolveSMTPTarget(payload)
+		host, port, addr, err := ResolveSMTPTarget(payload)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -69,10 +69,10 @@ func TestResolveSMTPTarget(t *testing.T) {
 	})
 
 	t.Run("errors when completely unconfigured", func(t *testing.T) {
-		payload := imapConfigPayload{
+		payload := IMAPConfigPayload{
 			Host: "",
 		}
-		_, _, _, err := resolveSMTPTarget(payload)
+		_, _, _, err := ResolveSMTPTarget(payload)
 		if err == nil {
 			t.Fatal("expected error when no smtp host can be determined, got nil")
 		}
