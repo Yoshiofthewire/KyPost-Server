@@ -19,6 +19,18 @@ import (
 // own MIME parser: DKIM signature verification (see dkim_verify.go) must
 // operate on the exact bytes a signature was originally computed over, and
 // a re-parsed/re-serialized copy would not reliably reproduce them.
+//
+// This method is reached automatically, without any user click, from the
+// poller's send-as verification sweep (processor.checkPendingSendAsAliases,
+// once per pending alias per poll tick, for every message whose subject
+// matched the alias's verification code) — the same "runs unattended against
+// attacker-influenced mail" shape as ListUnreadInbox, so it gets the same
+// server-side pre-fetch size bound: a "UID <uid> LARGER <cap>" SEARCH before
+// ever issuing the raw FETCH, so an oversized message's literal is never
+// requested from the server in the first place (unlike the post-fetch check
+// in parseRawMessageRecord, which is kept below as defense-in-depth but
+// can't undo buffering the underlying library already did by the time it
+// runs).
 func (c *APIClient) FetchRawMessage(ctx context.Context, uid int) ([]byte, error) {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
@@ -30,6 +42,15 @@ func (c *APIClient) FetchRawMessage(ctx context.Context, uid int) ([]byte, error
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
 		return nil, err
+	}
+
+	sb := goimap.Search().UID(strconv.Itoa(uid)).Larger(int(mailmsg.MaxInboundMessageBytes))
+	oversizedUIDs, err := d.SearchUIDs(sb)
+	if err != nil {
+		return nil, fmt.Errorf("imap search oversized: %w", err)
+	}
+	if len(oversizedUIDs) > 0 {
+		return nil, mailmsg.ErrMessageTooLarge
 	}
 
 	cmd := "UID FETCH " + strconv.Itoa(uid) + " BODY.PEEK[]"
@@ -118,15 +139,17 @@ func parseRawMessageRecord(records [][]*goimap.Token, uid int) ([]byte, error) {
 		if !valueFound {
 			return nil, fmt.Errorf("parse raw message: no BODY[] value found for UID %d", uid)
 		}
-		// The goimap library has already read the entire BODY[] literal off
-		// the wire into value (a Go string) by the time we see it here — its
-		// Exec/ParseFetchResponse have no size-limiting hook of their own, so
-		// this can't be a true streaming io.LimitReader over the network
-		// read. What we can still do, and do here, is refuse to hand an
-		// oversized raw message on to the rest of the pipeline (DKIM
-		// verification, send-as checks, etc.) rather than silently
-		// processing it — bounding memory retention downstream even though
-		// the initial buffering by the vendored library already happened.
+		// Defense-in-depth: FetchRawMessage already runs a pre-fetch
+		// "UID <uid> LARGER <cap>" SEARCH so an oversized message's literal
+		// is normally never requested from the server at all. But the
+		// message could have grown between that SEARCH and this FETCH, and
+		// the goimap library itself has no size-limiting hook of its own
+		// (its Exec/ParseFetchResponse always read the full BODY[] literal
+		// off the wire into value, a Go string, before we ever see it
+		// here), so this re-check is the last line of defense: refuse to
+		// hand an oversized raw message on to the rest of the pipeline
+		// (DKIM verification, send-as checks, etc.) rather than silently
+		// processing it.
 		if int64(len(value)) > mailmsg.MaxInboundMessageBytes {
 			return nil, mailmsg.ErrMessageTooLarge
 		}

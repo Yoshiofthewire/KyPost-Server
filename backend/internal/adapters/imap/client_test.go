@@ -191,3 +191,80 @@ func TestPartitionUIDsBySize(t *testing.T) {
 		}
 	})
 }
+
+// TestUidSetCriteria pins down the exact IMAP sequence-set rendering
+// GetMessageBodies (and FetchRawMessage) rely on to scope their pre-fetch
+// oversized-message SEARCH to precisely the UIDs they were asked about.
+func TestUidSetCriteria(t *testing.T) {
+	t.Run("single uid", func(t *testing.T) {
+		if got := uidSetCriteria([]int{42}); got != "42" {
+			t.Fatalf("got %q, want %q", got, "42")
+		}
+	})
+
+	t.Run("multiple uids are comma separated", func(t *testing.T) {
+		if got := uidSetCriteria([]int{1, 2, 3}); got != "1,2,3" {
+			t.Fatalf("got %q, want %q", got, "1,2,3")
+		}
+	})
+
+	t.Run("empty slice renders as empty string", func(t *testing.T) {
+		if got := uidSetCriteria(nil); got != "" {
+			t.Fatalf("got %q, want empty string", got)
+		}
+	})
+}
+
+// TestGetMessageBodiesOversizedSearchCriteria pins down the exact server-side
+// SEARCH criteria GetMessageBodies composes to identify oversized UIDs among
+// the ones it's asked about *before* ever calling go-imap's buffering
+// GetEmails — the UID-set-scoped counterpart to ListUnreadInbox's
+// "UNSEEN LARGER <cap>" criteria. IMAP ANDs search keys together, so
+// "UID <set> LARGER <cap>" restricts the oversized check to exactly this
+// call's requested UIDs rather than the whole mailbox.
+func TestGetMessageBodiesOversizedSearchCriteria(t *testing.T) {
+	withLoweredMaxInboundMessageBytes(t, 100)
+	uids := []int{5, 10, 15}
+	sb := goimap.Search().UID(uidSetCriteria(uids)).Larger(int(mailmsg.MaxInboundMessageBytes))
+	got := sb.Build()
+	want := "UID 5,10,15 LARGER 100"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestGetMessageBodiesExcludesOversizedUIDFromBufferingFetch drives
+// partitionUIDsBySize exactly as GetMessageBodies does: the requested UID
+// batch as filtered, and the result of the "UID <set> LARGER <cap>" SEARCH
+// (TestGetMessageBodiesOversizedSearchCriteria above) as oversized.
+//
+// This is the fix for the final-review finding that GetMessageBodies (unlike
+// ListUnreadInbox) had no pre-fetch size bound: an oversized message
+// delivered to a victim's mailbox would previously be fully buffered by
+// GetEmails on every inbox-cache-sync or rules-run pass, before any size
+// check ran. GetMessageBodies itself can't be driven end-to-end without a
+// live/fake *goimap.Dialer (see TestPartitionUIDsBySize above), so this pins
+// down — at the same pure-function seam that test uses for ListUnreadInbox —
+// that an oversized UID the SEARCH reports is structurally excluded from the
+// toFetch slice, and therefore never reaches GetEmails at all.
+func TestGetMessageBodiesExcludesOversizedUIDFromBufferingFetch(t *testing.T) {
+	requested := []int{101, 102, 103, 104}
+	// Simulates what
+	// d.SearchUIDs(goimap.Search().UID(uidSetCriteria(requested)).Larger(cap))
+	// would return: only UID 103 is oversized.
+	oversized := []int{103}
+
+	toFetch, tooLarge := partitionUIDsBySize(requested, oversized)
+
+	if !reflect.DeepEqual(toFetch, []int{101, 102, 104}) {
+		t.Fatalf("toFetch = %v, want [101 102 104]", toFetch)
+	}
+	if !reflect.DeepEqual(tooLarge, []int{103}) {
+		t.Fatalf("tooLarge = %v, want [103]", tooLarge)
+	}
+	for _, uid := range toFetch {
+		if uid == 103 {
+			t.Fatal("oversized uid 103 must never appear in toFetch — it would be buffered by GetEmails")
+		}
+	}
+}

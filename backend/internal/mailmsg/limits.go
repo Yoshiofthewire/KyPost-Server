@@ -8,9 +8,12 @@ import (
 // ErrMessageTooLarge is the shared sentinel every inbound-mail read site
 // returns when the data it would otherwise have to hold in memory exceeds
 // MaxInboundMessageBytes: a raw fetched message (imap.FetchRawMessage), a
-// fetched body/attachment (imap.APIClient's GetMessageBodies,
-// fetchAttachments, GetAttachment), or a decrypted/parsed PGP/MIME payload
-// (pgpmail.DecryptMIME, pgpmail.ParseContent). Defined once here — rather
+// fetched attachment (imap.APIClient's fetchAttachments, GetAttachment), or a
+// decrypted/parsed PGP/MIME payload (pgpmail.DecryptMIME, pgpmail.ParseContent).
+// GetMessageBodies is the one exception: a batch call across many UIDs must
+// not let one oversized message fail every other UID in the same call, so it
+// marks that UID's MessageContent.TooLarge instead of returning this sentinel
+// for the whole batch. Defined once here — rather
 // than in package imap or package pgpmail — because both of those already
 // import mailmsg (for Attachment/Message) with no import back the other way,
 // so this is the natural shared home without adding a new import edge, and

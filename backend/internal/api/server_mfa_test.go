@@ -62,7 +62,16 @@ func enrollTOTP(t *testing.T, srv *Server, userID string) (secret string, recove
 		t.Fatalf("setup response missing fields: %s", setupRec.Body.String())
 	}
 
-	code := totpCodeForTest(t, setupResp.Secret, time.Now())
+	// Deliberately the *previous* time-step, not the current one: since
+	// handleMFAConfirm now records LastUsedTOTPStep (see
+	// TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge), consuming the
+	// current step here would make it unusable for whatever code a test
+	// computes immediately afterward via time.Now() for its first login MFA
+	// challenge -- a same-instant test artifact, not a real user scenario
+	// (a real user confirming enrollment isn't simultaneously mid-login).
+	// One step earlier is still within totp.Validate's +/-1 skew window
+	// against the real current time, so confirmation itself still succeeds.
+	code := totpCodeForTest(t, setupResp.Secret, time.Now().Add(-30*time.Second))
 	confirmRec := doJSONAuth(srv, srv.withAuth(srv.handleMFAConfirm), http.MethodPost,
 		"/api/mfa/totp/confirm", map[string]string{"code": code}, userID)
 	if confirmRec.Code != http.StatusOK {
@@ -249,9 +258,13 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 		return login.ChallengeID
 	}
 
+	// enrollTOTP's own confirm call already recorded a step (handleMFAConfirm
+	// is wired to the same per-account guard — see
+	// TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge), so "fresh" here
+	// means "fresh off enrollment", not literally zero.
 	before, _ := srv.users.Get(v.ID)
-	if before.LastUsedTOTPStep != 0 {
-		t.Fatalf("expected fresh account to have LastUsedTOTPStep=0, got %d", before.LastUsedTOTPStep)
+	if before.LastUsedTOTPStep == 0 {
+		t.Fatalf("expected enrollment confirm to have recorded LastUsedTOTPStep, got 0")
 	}
 	badRec := doJSON(srv, srv.handleMFATOTP, http.MethodPost, "/api/auth/mfa/totp",
 		map[string]string{"challengeId": newJillChallenge(), "code": "111111"})
@@ -259,8 +272,8 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 		t.Fatalf("(d) wrong code: status=%d, want 401", badRec.Code)
 	}
 	afterWrong, _ := srv.users.Get(v.ID)
-	if afterWrong.LastUsedTOTPStep != 0 {
-		t.Fatalf("wrong code advanced LastUsedTOTPStep: want 0, got %d", afterWrong.LastUsedTOTPStep)
+	if afterWrong.LastUsedTOTPStep != before.LastUsedTOTPStep {
+		t.Fatalf("wrong code advanced LastUsedTOTPStep: want unchanged %d, got %d", before.LastUsedTOTPStep, afterWrong.LastUsedTOTPStep)
 	}
 
 	// The user's next attempt at the (still-unused) current step succeeds,
@@ -456,5 +469,103 @@ func TestMFAStatusAndDisable(t *testing.T) {
 	got, _ := srv.users.Get(u.ID)
 	if got.TOTPEnabled {
 		t.Fatalf("expected TOTP disabled")
+	}
+}
+
+// TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge proves handleMFAConfirm
+// (the enrollment-confirmation handler) is wired to the same per-account
+// replay guard as handleMFATOTP (the login-challenge handler): the exact code
+// used to confirm/enable TOTP records LastUsedTOTPStep, so it cannot then be
+// replayed against a login MFA challenge within the same 30-90s time-step
+// window.
+//
+// Before this fix, handleMFAConfirm validated the code via totp.Validate but
+// never called SetLastUsedTOTPStep, so LastUsedTOTPStep stayed at its
+// zero-value after enrollment -- and 0 < any real step always passes
+// handleMFATOTP's guard, making the confirmation code replayable once
+// against a login challenge in the same window.
+func TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("nora", "pw-nora", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/mfa/totp/setup", nil)
+	authRequestAs(srv, setupReq, u.ID)
+	setupRec := httptest.NewRecorder()
+	srv.withAuth(srv.handleMFASetup)(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("setup: status=%d body=%s", setupRec.Code, setupRec.Body.String())
+	}
+	var setupResp struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(setupRec.Body.Bytes(), &setupResp); err != nil {
+		t.Fatalf("unmarshal setup: %v", err)
+	}
+
+	before, _ := srv.users.Get(u.ID)
+	if before.LastUsedTOTPStep != 0 {
+		t.Fatalf("expected fresh account to have LastUsedTOTPStep=0, got %d", before.LastUsedTOTPStep)
+	}
+
+	confirmCode := totpCodeForTest(t, setupResp.Secret, time.Now())
+	confirmRec := doJSONAuth(srv, srv.withAuth(srv.handleMFAConfirm), http.MethodPost,
+		"/api/mfa/totp/confirm", map[string]string{"code": confirmCode}, u.ID)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: status=%d body=%s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	// The confirmation code must have advanced LastUsedTOTPStep -- this is
+	// the actual fix; everything below just observes its consequence via the
+	// public login/mfa flow.
+	after, _ := srv.users.Get(u.ID)
+	if after.LastUsedTOTPStep == 0 {
+		t.Fatalf("expected LastUsedTOTPStep to be recorded by handleMFAConfirm, got 0")
+	}
+
+	loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": "nora", "password": "pw-nora"})
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login: status=%d body=%s", loginRec.Code, loginRec.Body.String())
+	}
+	var login struct {
+		ChallengeID string `json:"challengeId"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &login); err != nil {
+		t.Fatalf("unmarshal login: %v", err)
+	}
+	if login.ChallengeID == "" {
+		t.Fatalf("expected a challengeId, got %s", loginRec.Body.String())
+	}
+
+	// The attack this closes: the same code just used to confirm enrollment,
+	// replayed against a login MFA challenge in the same time-step window.
+	replayRec := doJSON(srv, srv.handleMFATOTP, http.MethodPost, "/api/auth/mfa/totp",
+		map[string]string{"challengeId": login.ChallengeID, "code": confirmCode})
+	if replayRec.Code != http.StatusUnauthorized {
+		t.Fatalf("replaying confirm code against login challenge: status=%d, want 401 (body=%s)",
+			replayRec.Code, replayRec.Body.String())
+	}
+
+	// A genuinely later code still works normally -- proves the guard
+	// rejects only the specific replayed step, not TOTP login wholesale. A
+	// fresh challenge is required since the rejected replay above already
+	// consumed login.ChallengeID (handleMFATOTP deletes the challenge on any
+	// rejected code, replay or otherwise).
+	login2Rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": "nora", "password": "pw-nora"})
+	var login2 struct {
+		ChallengeID string `json:"challengeId"`
+	}
+	if err := json.Unmarshal(login2Rec.Body.Bytes(), &login2); err != nil {
+		t.Fatalf("unmarshal second login: %v", err)
+	}
+	laterCode := totpCodeForTest(t, setupResp.Secret, time.Now().Add(30*time.Second))
+	laterRec := doJSON(srv, srv.handleMFATOTP, http.MethodPost, "/api/auth/mfa/totp",
+		map[string]string{"challengeId": login2.ChallengeID, "code": laterCode})
+	if laterRec.Code != http.StatusOK {
+		t.Fatalf("later code after replay rejection: status=%d body=%s", laterRec.Code, laterRec.Body.String())
 	}
 }

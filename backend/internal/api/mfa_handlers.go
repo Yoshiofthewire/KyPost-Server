@@ -122,7 +122,21 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load pending secret", http.StatusInternalServerError)
 		return
 	}
-	if _, valid := totp.Validate(secret, strings.TrimSpace(req.Code), time.Now()); !valid {
+	step, valid := totp.Validate(secret, strings.TrimSpace(req.Code), time.Now())
+	if !valid {
+		http.Error(w, "invalid code", http.StatusUnauthorized)
+		return
+	}
+
+	// Per-account replay guard, shared with handleMFATOTP's login challenge
+	// (see server.go): LastUsedTOTPStep is scoped to the account, not to any
+	// one endpoint, so the exact code just used to confirm/enable TOTP here
+	// must be recorded too — otherwise it stays replayable once against a
+	// login MFA challenge in the same 30-90s validation window, since
+	// LastUsedTOTPStep would still be at its zero value after enrollment and
+	// 0 < any real step always passes that guard. Runs only after the code
+	// has already validated, mirroring handleMFATOTP's ordering.
+	if _, err := s.users.SetLastUsedTOTPStep(u.ID, step); err != nil {
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
 	}

@@ -93,6 +93,15 @@ type UnreadMessage struct {
 type MessageContent struct {
 	Body           string
 	HasAttachments bool
+	// TooLarge is set instead of Body/HasAttachments being populated when
+	// this UID was identified as oversized by GetMessageBodies's server-side
+	// "UID <set> LARGER <cap>" SEARCH (or, as a defense-in-depth fallback,
+	// by the post-fetch emailContentSize check) — mirrors Message.TooLarge
+	// on ListUnreadInbox's result type. The message's content is never
+	// buffered into memory in the search-caught case. Set per-UID rather
+	// than failing the whole GetMessageBodies call, since one oversized
+	// message must not make every other UID in the same batch unreadable.
+	TooLarge bool
 	// PGPEncryptedPayload holds the armored OpenPGP message when the
 	// fetched email's Content-Type was multipart/encrypted (RFC 3156) —
 	// detected by sniffing e.Attachments for an armored PGP message, since
@@ -205,7 +214,9 @@ type Client interface {
 	SearchMessages(ctx context.Context, mailbox, field, query string, limit int) ([]Overview, error)
 	// GetMessageBodies fetches body content and attachment presence for
 	// exactly the given UIDs — called only for UIDs the mail cache reports as
-	// genuinely new.
+	// genuinely new. UIDs the server reports as oversized (see
+	// MessageContent.TooLarge) are excluded from the buffering fetch and come
+	// back with TooLarge set instead of a Body.
 	GetMessageBodies(ctx context.Context, mailbox string, uids []int) (map[int]MessageContent, error)
 	ListLabels(ctx context.Context) ([]string, error)
 	ListSubfolders(ctx context.Context, parent string) ([]string, error)
@@ -415,20 +426,34 @@ func overviewFromEmail(uid int, e *goimap.Email) Overview {
 	}
 }
 
-// partitionUIDsBySize splits filtered (the unseen, past-checkpoint UIDs
-// ListUnreadInbox is about to process) into toFetch — safe to hand to
+// uidSetCriteria renders uids as an IMAP sequence-set (RFC 3501 §9:
+// comma-separated numbers) for use as the argument to a SearchBuilder.UID
+// search key, so a pre-fetch oversized-message SEARCH can be scoped to
+// exactly the UIDs a caller is asking about instead of the whole mailbox.
+func uidSetCriteria(uids []int) string {
+	parts := make([]string, len(uids))
+	for i, uid := range uids {
+		parts[i] = strconv.Itoa(uid)
+	}
+	return strings.Join(parts, ",")
+}
+
+// partitionUIDsBySize splits filtered (the batch of UIDs a caller is about to
+// process — ListUnreadInbox's unseen, past-checkpoint UIDs, or
+// GetMessageBodies's requested UIDs) into toFetch — safe to hand to
 // go-imap's GetEmails, which fully buffers each message's body and
-// attachments into memory — and tooLarge — UIDs the server-side
-// "UNSEEN LARGER <cap>" SEARCH (see ListUnreadInbox) already identified as
-// oversized, which must never be passed to GetEmails at all. oversized is
-// exactly what that SEARCH returned; membership is intersected against
-// filtered so a UID the search reports but that isn't in this batch (e.g. it
-// fell out of UNSEEN between the two round trips) is silently ignored rather
-// than fabricating a message for it. Pulled out as a pure function, with no
-// IMAP connection involved, specifically so a test can assert on it directly
-// — this package has no live/fake *goimap.Dialer to drive ListUnreadInbox
-// itself end-to-end (see client_test.go), so this is the seam that proves
-// oversized UIDs are structurally excluded from the fetch list, not just
+// attachments into memory — and tooLarge — UIDs a server-side
+// "... LARGER <cap>" SEARCH (UNSEEN-scoped for ListUnreadInbox, UID-set-scoped
+// for GetMessageBodies) already identified as oversized, which must never be
+// passed to GetEmails at all. oversized is exactly what that SEARCH returned;
+// membership is intersected against filtered so a UID the search reports but
+// that isn't in this batch (e.g. it fell out of UNSEEN between the two round
+// trips) is silently ignored rather than fabricating a message for it. Pulled
+// out as a pure function, with no IMAP connection involved, specifically so a
+// test can assert on it directly — this package has no live/fake
+// *goimap.Dialer to drive ListUnreadInbox/GetMessageBodies themselves
+// end-to-end (see client_test.go), so this is the seam that proves oversized
+// UIDs are structurally excluded from the fetch list, not just
 // checked-and-discarded after GetEmails already ran.
 func partitionUIDsBySize(filtered []int, oversized []int) (toFetch []int, tooLarge []int) {
 	large := make(map[int]bool, len(oversized))
@@ -484,11 +509,12 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 	// bodies: LARGER is evaluated against the server's own RFC822.SIZE, so
 	// an oversized message's literal is never sent to us at all — a genuine
 	// protocol-level pre-fetch bound, not just a post-fetch check (contrast
-	// GetMessageBodies/fetchAttachments below, which have no equivalent
-	// search step ahead of them and so keep the post-fetch
-	// emailContentSize check as their only guard). UNSEEN is included in
-	// the same SEARCH so this stays scoped to exactly the messages we're
-	// about to consider (IMAP ANDs search criteria together).
+	// fetchAttachments below, which has no equivalent search step ahead of
+	// it and so keeps the post-fetch emailContentSize check as its only
+	// guard; GetMessageBodies uses this same UNSEEN/UID-scoped LARGER
+	// technique for its own batch). UNSEEN is included in the same SEARCH
+	// so this stays scoped to exactly the messages we're about to consider
+	// (IMAP ANDs search criteria together).
 	sb := goimap.Search().Unseen().Larger(int(mailmsg.MaxInboundMessageBytes))
 	oversizedUIDs, err := d.SearchUIDs(sb)
 	if err != nil {
@@ -849,13 +875,35 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		}
 	}
 
-	emails, err := d.GetEmails(uids...)
+	// Ask the server which of the requested UIDs are oversized *before*
+	// fetching any bodies — the same technique ListUnreadInbox uses for the
+	// poller's UNSEEN batch, scoped here to exactly the UID set this caller
+	// asked about via a UID search key (ANDed with LARGER, since IMAP search
+	// criteria are implicitly conjunctive). This closes the gap the
+	// LARGER-search-less mail-cache-sync/rules-run paths otherwise had: an
+	// attacker-delivered oversized message could previously be fully
+	// buffered by GetEmails below before any size check ran, on every
+	// inbox-cache-sync or rules-run pass over the victim's mailbox.
+	sb := goimap.Search().UID(uidSetCriteria(uids)).Larger(int(mailmsg.MaxInboundMessageBytes))
+	oversizedUIDs, err := d.SearchUIDs(sb)
 	if err != nil {
-		return nil, fmt.Errorf("imap fetch emails: %w", err)
+		return nil, fmt.Errorf("imap search oversized: %w", err)
 	}
+	toFetch, tooLarge := partitionUIDsBySize(uids, oversizedUIDs)
 
 	out := make(map[int]MessageContent, len(uids))
-	for _, uid := range uids {
+	for _, uid := range tooLarge {
+		out[uid] = MessageContent{TooLarge: true}
+	}
+
+	var emails map[int]*goimap.Email
+	if len(toFetch) > 0 {
+		emails, err = d.GetEmails(toFetch...)
+		if err != nil {
+			return nil, fmt.Errorf("imap fetch emails: %w", err)
+		}
+	}
+	for _, uid := range toFetch {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -863,20 +911,16 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		if e == nil {
 			continue
 		}
-		// Unlike ListUnreadInbox (which runs a server-side
-		// "SEARCH ... LARGER <cap>" before ever calling GetEmails, so an
-		// oversized message's body/attachments are never fetched at all),
-		// this method is called on demand — e.g. by the mail-cache Sync
-		// path for UIDs it reports as new — with no equivalent pre-filter
-		// step ahead of it. go-imap's GetEmails has therefore already fully
-		// decoded this message's body and attachments into memory by the
-		// time we see e here. This post-fetch check is this call site's
-		// only guard: it can't stop the fetch that already happened, but it
-		// does stop an oversized message going any further into the
-		// pipeline, and gives callers the sentinel needed to reject-and-
-		// notify instead of silently processing a huge message.
+		// Defense-in-depth: the message could have grown between the
+		// SEARCH above and this fetch (new mail arriving concurrently,
+		// etc). Re-check the actual decoded size rather than trusting the
+		// search result was still accurate by the time GetEmails ran. Marks
+		// this one UID TooLarge and moves on instead of failing the whole
+		// batch — one oversized message must not make every other UID in
+		// this call unreadable.
 		if emailContentSize(e) > mailmsg.MaxInboundMessageBytes {
-			return nil, mailmsg.ErrMessageTooLarge
+			out[uid] = MessageContent{TooLarge: true}
+			continue
 		}
 		body := strings.TrimSpace(e.HTML)
 		if body == "" {
@@ -1471,6 +1515,16 @@ func emailContentSize(e *goimap.Email) int64 {
 
 // fetchAttachments pulls one message and returns its parsed attachments
 // (go-imap's GetEmails decodes MIME parts into Email.Attachments).
+//
+// Deliberately kept as a post-fetch-only check (no pre-fetch LARGER SEARCH
+// like ListUnreadInbox/GetMessageBodies): both of this method's callers
+// (ListAttachments, GetAttachment) are reached only from an HTTP handler
+// serving one explicit, user-clicked UID (see server.go's
+// serveAttachmentList/serveAttachmentDownload) — never from an unattended
+// batch pass over a mailbox an attacker could aim at a victim's routine
+// sync. The one-message blast radius here is the same whether the size
+// check runs before or after the fetch, so the extra SEARCH round trip
+// buys no additional protection worth the complexity.
 func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid int) ([]goimap.Attachment, error) {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
