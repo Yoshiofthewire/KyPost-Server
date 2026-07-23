@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -58,5 +59,86 @@ func TestSendAsVerificationCooldownExpiresAfterWindow(t *testing.T) {
 
 	if ok, _ := c.allowed(key); !ok {
 		t.Fatal("expected probe to be allowed again once the cooldown window has elapsed")
+	}
+}
+
+// TestSendAsVerificationCooldownSweepRemovesStaleEntries proves sweep bounds
+// lastSent's growth: entries older than maxAge are removed, entries newer
+// than maxAge are kept. Without this, lastSent grows forever since it's keyed
+// on attacker-influenced (userID, candidate-email) pairs that anyone can
+// mint by attempting to verify an arbitrary address.
+func TestSendAsVerificationCooldownSweepRemovesStaleEntries(t *testing.T) {
+	c := newSendAsVerificationCooldown()
+	const staleKey = "user-1|stale@example.com"
+	const freshKey = "user-1|fresh@example.com"
+
+	c.recordSent(staleKey)
+	c.recordSent(freshKey)
+
+	// Backdate staleKey's timestamp so it's older than maxAge; leave freshKey
+	// as just recorded.
+	c.mu.Lock()
+	c.lastSent[staleKey] = time.Now().Add(-2 * time.Hour)
+	c.mu.Unlock()
+
+	c.sweep(1 * time.Hour)
+
+	c.mu.Lock()
+	_, staleStillPresent := c.lastSent[staleKey]
+	_, freshStillPresent := c.lastSent[freshKey]
+	c.mu.Unlock()
+
+	if staleStillPresent {
+		t.Fatal("expected sweep to remove an entry older than maxAge")
+	}
+	if !freshStillPresent {
+		t.Fatal("expected sweep to keep an entry newer than maxAge")
+	}
+}
+
+// TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel proves the
+// background sweeper actually fires sweep() on its ticker and returns
+// promptly once its context is canceled, mirroring StartPickupSweeper's
+// ticker/select shape (server.go).
+func TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
+	srv := newTestServer(t)
+
+	const staleKey = "user-1|stale@example.com"
+	srv.sendAsCooldown.recordSent(staleKey)
+	srv.sendAsCooldown.mu.Lock()
+	srv.sendAsCooldown.lastSent[staleKey] = time.Now().Add(-2 * time.Hour)
+	srv.sendAsCooldown.mu.Unlock()
+
+	old := sendAsCooldownSweepInterval
+	sendAsCooldownSweepInterval = 10 * time.Millisecond
+	t.Cleanup(func() { sendAsCooldownSweepInterval = old })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		srv.StartSendAsCooldownSweeper(ctx)
+		close(done)
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		srv.sendAsCooldown.mu.Lock()
+		_, present := srv.sendAsCooldown.lastSent[staleKey]
+		srv.sendAsCooldown.mu.Unlock()
+		if !present {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("expected StartSendAsCooldownSweeper to have swept the stale entry via its ticker")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected StartSendAsCooldownSweeper to return promptly after context cancellation")
 	}
 }

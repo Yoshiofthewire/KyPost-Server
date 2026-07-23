@@ -52,3 +52,28 @@ func (c *sendAsVerificationCooldown) recordSent(key string) {
 	defer c.mu.Unlock()
 	c.lastSent[key] = time.Now()
 }
+
+// sendAsCooldownSweepMaxAge bounds how long a lastSent entry is kept before
+// StartSendAsCooldownSweeper reclaims it. lastSent is keyed on
+// userID+"|"+candidate-email — an attacker can mint an unbounded number of
+// distinct keys just by attempting to verify arbitrary addresses, so without
+// a sweep this map grows forever. An entry is only ever consulted to enforce
+// sendAsVerificationCooldownFor (5 minutes), so anything older than that is
+// already dead weight; this uses a 12x margin (1 hour, matching the sweep
+// interval below) so entries are never reclaimed while still influencing an
+// active cooldown decision.
+const sendAsCooldownSweepMaxAge = 1 * time.Hour
+
+// sweep removes lastSent entries recorded more than maxAge ago, bounding the
+// map's growth under sustained abuse. Mirrors PickupStore.Sweep's
+// lock-then-iterate-and-delete shape (backend/internal/pgpmail/pickup.go).
+func (c *sendAsVerificationCooldown) sweep(maxAge time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for key, last := range c.lastSent {
+		if last.Before(cutoff) {
+			delete(c.lastSent, key)
+		}
+	}
+}

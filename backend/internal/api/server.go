@@ -386,6 +386,30 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 	}
 }
 
+// sendAsCooldownSweepInterval is a var rather than an inline literal (unlike
+// StartPickupSweeper's ticker) solely so tests can shrink it to observe a
+// real tick without waiting out the production interval; production always
+// runs with the 1-hour default below.
+var sendAsCooldownSweepInterval = 1 * time.Hour
+
+// StartSendAsCooldownSweeper runs sendAsCooldown.sweep on an interval for the
+// process lifetime, mirroring StartPickupSweeper's ticker/select pattern
+// exactly. Call once after NewServer, e.g.
+// `go srv.StartSendAsCooldownSweeper(context.Background())` alongside
+// StartPickupSweeper.
+func (s *Server) StartSendAsCooldownSweeper(ctx context.Context) {
+	ticker := time.NewTicker(sendAsCooldownSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sendAsCooldown.sweep(sendAsCooldownSweepMaxAge)
+		}
+	}
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	st := s.health.GetStatus()
 	status := http.StatusOK

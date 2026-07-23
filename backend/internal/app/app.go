@@ -146,6 +146,7 @@ func runServer(d runDeps) error {
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil)
 	srv.SetClassifier(newClassifierClient(d.cfg))
 	go srv.StartPickupSweeper(context.Background())
+	go srv.StartSendAsCooldownSweeper(context.Background())
 	go srv.StartOllamaVersionMonitor(context.Background())
 	return srv.Run()
 }
@@ -172,6 +173,7 @@ func runAll(d runDeps) error {
 	go poller.Run()
 	d.logger.Info("poller goroutine started")
 	go srv.StartPickupSweeper(context.Background())
+	go srv.StartSendAsCooldownSweeper(context.Background())
 	go srv.StartOllamaVersionMonitor(context.Background())
 	go monitorHealth(d.logger, d.health)
 	go func() {
