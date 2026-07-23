@@ -164,7 +164,7 @@ func TestPGPQRKeyRejectsTamperedSignature(t *testing.T) {
 	all, _ := srv.users.List()
 	userID := all[0].ID
 
-	token, _, err := srv.createPairingToken(userID, 2*time.Minute)
+	token, _, err := srv.createPairingToken(userID, pairingPurposePGPQRKey, 2*time.Minute)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestPGPQRKeyIncludesContactCardWhenSelfContactSet(t *testing.T) {
 		t.Fatalf("SetSelf: %v", err)
 	}
 
-	token, _, err := srv.createPairingToken(userID, 2*time.Minute)
+	token, _, err := srv.createPairingToken(userID, pairingPurposePGPQRKey, 2*time.Minute)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestPGPQRKeyOmitsContactCardWhenNoSelfContact(t *testing.T) {
 		t.Fatalf("SetPGPIdentity: %v", err)
 	}
 
-	token, _, err := srv.createPairingToken(userID, 2*time.Minute)
+	token, _, err := srv.createPairingToken(userID, pairingPurposePGPQRKey, 2*time.Minute)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}

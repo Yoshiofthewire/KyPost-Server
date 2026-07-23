@@ -24,7 +24,7 @@ func TestHandlePickupHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	token, _, err := srv.createPairingToken(id, time.Hour)
+	token, _, err := srv.createPairingToken(id, pairingPurposePickupLink, time.Hour)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestHandlePickupInvalidTokenNeverConsumesRecord(t *testing.T) {
 	// The record must still be intact: an invalid token must never reach
 	// pickupStore.View. Mint a real token now and confirm the record can
 	// still be viewed once.
-	token, _, err := srv.createPairingToken(id, time.Hour)
+	token, _, err := srv.createPairingToken(id, pairingPurposePickupLink, time.Hour)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestHandlePickupSecondViewIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	token, _, err := srv.createPairingToken(id, time.Hour)
+	token, _, err := srv.createPairingToken(id, pairingPurposePickupLink, time.Hour)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestHandlePickupUnknownIDIsGone(t *testing.T) {
 
 	// Never Create()d: a syntactically valid token for an ID that has no
 	// backing record on disk.
-	token, _, err := srv.createPairingToken("never-created-id", time.Hour)
+	token, _, err := srv.createPairingToken("never-created-id", pairingPurposePickupLink, time.Hour)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}

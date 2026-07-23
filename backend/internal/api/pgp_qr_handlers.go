@@ -27,7 +27,7 @@ func (s *Server) handlePGPQRToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no pgp identity configured", http.StatusBadRequest)
 		return
 	}
-	token, expiresAt, err := s.createPairingToken(ac.UserID, 2*time.Minute)
+	token, expiresAt, err := s.createPairingToken(ac.UserID, pairingPurposePGPQRKey, 2*time.Minute)
 	if err != nil {
 		http.Error(w, "failed to create qr token", http.StatusInternalServerError)
 		return
@@ -53,7 +53,7 @@ func (s *Server) handlePGPQRKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token is required", http.StatusBadRequest)
 		return
 	}
-	userID, err := s.parsePairingTokenUserID(token, time.Now())
+	userID, err := s.parsePairingTokenUserID(token, pairingPurposePGPQRKey, time.Now())
 	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusForbidden)
 		return

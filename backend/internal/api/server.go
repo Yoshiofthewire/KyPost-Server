@@ -1727,7 +1727,7 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		resp["configurationError"] = configurationError
 	}
 	if configured {
-		token, expiresAt, err := s.createPairingToken(subscriberID, time.Duration(pairingTTLSeconds)*time.Second)
+		token, expiresAt, err := s.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Duration(pairingTTLSeconds)*time.Second)
 		if err != nil {
 			s.logger.Error("failed to create pairing token", "subscriber_id", subscriberID, "error", err.Error())
 			http.Error(w, "failed to prepare mobile pairing", http.StatusInternalServerError)
@@ -1788,7 +1788,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
-	claims, err := s.decodeAndVerifyPairingToken(pairingToken, time.Now().UTC())
+	claims, err := s.decodeAndVerifyPairingToken(pairingToken, pairingPurposeNativeDevice, time.Now().UTC())
 	if err != nil {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
 		return
@@ -2155,13 +2155,26 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Pairing tokens are minted for exactly one of these purposes and are only
+// ever valid for that same purpose. Without this separation, a token minted
+// for one flow (e.g. a low-stakes pickup link, mailed in plaintext to a
+// recipient with no account) could be replayed against a different, more
+// sensitive flow (e.g. native device pairing, which grants full mail sync
+// and push-MFA-approval rights) if an attacker obtained it.
+const (
+	pairingPurposeNativeDevice = "native-device"
+	pairingPurposePGPQRKey     = "pgp-qr-key"
+	pairingPurposePickupLink   = "pickup-link"
+)
+
 type pairingTokenClaims struct {
-	Sub   string `json:"sub"`
-	Exp   int64  `json:"exp"`
-	Nonce string `json:"n"`
+	Sub     string `json:"sub"`
+	Exp     int64  `json:"exp"`
+	Nonce   string `json:"n"`
+	Purpose string `json:"purpose"`
 }
 
-func (s *Server) createPairingToken(subscriberID string, ttl time.Duration) (string, time.Time, error) {
+func (s *Server) createPairingToken(subscriberID, purpose string, ttl time.Duration) (string, time.Time, error) {
 	if ttl <= 0 {
 		ttl = 90 * time.Second
 	}
@@ -2172,9 +2185,10 @@ func (s *Server) createPairingToken(subscriberID string, ttl time.Duration) (str
 
 	expiresAt := time.Now().UTC().Add(ttl)
 	claims := pairingTokenClaims{
-		Sub:   strings.TrimSpace(subscriberID),
-		Exp:   expiresAt.Unix(),
-		Nonce: hex.EncodeToString(nonceBytes),
+		Sub:     strings.TrimSpace(subscriberID),
+		Exp:     expiresAt.Unix(),
+		Nonce:   hex.EncodeToString(nonceBytes),
+		Purpose: purpose,
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -2190,11 +2204,14 @@ func (s *Server) createPairingToken(subscriberID string, ttl time.Duration) (str
 }
 
 // decodeAndVerifyPairingToken decodes token (in the shape produced by
-// createPairingToken), verifies its HMAC signature, and checks expiry,
-// returning its claims. Shared by validatePairingToken (which additionally
-// checks the subject against a caller-supplied expectation) and
+// createPairingToken), verifies its HMAC signature, checks expiry, and
+// checks that the token's purpose matches wantPurpose, returning its claims.
+// The purpose check is a plain != — the purpose isn't secret, unlike the
+// HMAC signature and (in validatePairingToken) the subject, which correctly
+// stay constant-time comparisons. Shared by validatePairingToken (which
+// additionally checks the subject against a caller-supplied expectation) and
 // parsePairingTokenUserID (which returns the subject to the caller instead).
-func (s *Server) decodeAndVerifyPairingToken(token string, now time.Time) (pairingTokenClaims, error) {
+func (s *Server) decodeAndVerifyPairingToken(token, wantPurpose string, now time.Time) (pairingTokenClaims, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 2 {
 		return pairingTokenClaims{}, errors.New("invalid token format")
@@ -2223,12 +2240,15 @@ func (s *Server) decodeAndVerifyPairingToken(token string, now time.Time) (pairi
 	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
 		return pairingTokenClaims{}, errors.New("token expired")
 	}
+	if claims.Purpose != wantPurpose {
+		return pairingTokenClaims{}, errors.New("purpose mismatch")
+	}
 
 	return claims, nil
 }
 
-func (s *Server) validatePairingToken(subscriberID, token string, now time.Time) error {
-	claims, err := s.decodeAndVerifyPairingToken(token, now)
+func (s *Server) validatePairingToken(subscriberID, token, wantPurpose string, now time.Time) error {
+	claims, err := s.decodeAndVerifyPairingToken(token, wantPurpose, now)
 	if err != nil {
 		return err
 	}
@@ -2244,8 +2264,8 @@ func (s *Server) validatePairingToken(subscriberID, token string, now time.Time)
 // learn which user a token belongs to rather than confirm a known one —
 // unlike validatePairingToken (used for pickup links, where the URL path
 // already carries the expected ID to check against).
-func (s *Server) parsePairingTokenUserID(token string, now time.Time) (string, error) {
-	claims, err := s.decodeAndVerifyPairingToken(token, now)
+func (s *Server) parsePairingTokenUserID(token, wantPurpose string, now time.Time) (string, error) {
+	claims, err := s.decodeAndVerifyPairingToken(token, wantPurpose, now)
 	if err != nil {
 		return "", err
 	}

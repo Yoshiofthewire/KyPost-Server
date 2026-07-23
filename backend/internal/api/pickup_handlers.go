@@ -30,7 +30,7 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid pickup link", http.StatusBadRequest)
 		return
 	}
-	if err := s.validatePairingToken(id, token, time.Now()); err != nil {
+	if err := s.validatePairingToken(id, token, pairingPurposePickupLink, time.Now()); err != nil {
 		http.Error(w, "this link is invalid or has expired", http.StatusForbidden)
 		return
 	}
@@ -63,7 +63,7 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 	if err != nil {
 		return fmt.Errorf("create pickup record: %w", err)
 	}
-	token, _, err := s.createPairingToken(id, pickupLinkTTL)
+	token, _, err := s.createPairingToken(id, pairingPurposePickupLink, pickupLinkTTL)
 	if err != nil {
 		return fmt.Errorf("create pickup token: %w", err)
 	}

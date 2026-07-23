@@ -143,7 +143,7 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateSubscriberID: %v", err)
 	}
-	token, _, err := srv.createPairingToken(subscriberID, time.Minute)
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestNativeRegisterRejectsReplayedPairingToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOrCreateSubscriberID: %v", err)
 	}
-	token, _, err := srv.createPairingToken(subscriberID, time.Minute)
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
