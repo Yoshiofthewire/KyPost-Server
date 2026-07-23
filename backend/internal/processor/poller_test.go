@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,6 +301,146 @@ func (c *noopMailClient) FetchHeaderFields(context.Context, []int, ...string) (m
 	return nil, nil
 }
 func (c *noopMailClient) FetchRawMessage(context.Context, int) ([]byte, error) { return nil, nil }
+
+// TestShouldMarkProcessedOnError_TransientClassifierErrorLeavesUnmarked
+// proves a transient classifier-outage error (the classifier service
+// unreachable/timed out, classifyWithRetry already gave up retrying) tells
+// the loop NOT to mark the message processed, so it is retried on the next
+// poll tick instead of being silently and permanently skipped.
+func TestShouldMarkProcessedOnError_TransientClassifierErrorLeavesUnmarked(t *testing.T) {
+	err := &classifierErr{err: errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")}
+	if shouldMarkProcessedOnError(err) {
+		t.Fatal("expected a transient classifier error to NOT mark the message processed")
+	}
+}
+
+// TestShouldMarkProcessedOnError_PermanentClassifierErrorMarksProcessed
+// proves permanent classifier failures (bad input, credits exhausted) keep
+// today's behavior of marking the message processed — retrying them would
+// just burn classifier calls on mail that will never succeed.
+func TestShouldMarkProcessedOnError_PermanentClassifierErrorMarksProcessed(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"bad input / 422", &classifierErr{err: errors.New("classifier: 422 Unprocessable Entity")}},
+		{"ai credits exhausted", &classifierErr{err: errors.New("out of ai credits")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !shouldMarkProcessedOnError(tc.err) {
+				t.Fatal("expected a permanent classifier error to still mark the message processed")
+			}
+		})
+	}
+}
+
+// TestShouldMarkProcessedOnError_NonClassifierErrorMarksProcessed is the
+// regression guard: rule-matching and IMAP errors from handleMessage are not
+// classifierErr at all, and must keep marking the message processed exactly
+// as before this change — this task must not widen the skip-MarkProcessed
+// behavior beyond classifier errors specifically.
+func TestShouldMarkProcessedOnError_NonClassifierErrorMarksProcessed(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"plain rule/IMAP-style error", errors.New("imap: connection reset by peer")},
+		{"wrapped non-classifier error", fmt.Errorf("rule action failed: %w", errors.New("imap: timeout"))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if !shouldMarkProcessedOnError(tc.err) {
+				t.Fatal("expected a non-classifier error to still mark the message processed (regression guard)")
+			}
+		})
+	}
+}
+
+// TestRecordMessageFailure_TransientClassifierErrorLeavesMessageUnprocessed
+// exercises the actual code tickUser's message loop runs on a handleMessage
+// failure (recordMessageFailure), using a real state.Store, proving a
+// transient classifier error leaves the message unmarked end-to-end while
+// still recording the failure as a Decision.
+func TestRecordMessageFailure_TransientClassifierErrorLeavesMessageUnprocessed(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	p := &Poller{log: logger}
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	uc := userCtx{id: "user-1", store: store, mail: &noopMailClient{}}
+	msg := imapadapter.Message{ID: "50", Subject: "Hello", Sender: "a@example.com"}
+
+	classifyErr := &classifierErr{err: errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")}
+	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
+
+	if store.Seen(msg.ID) {
+		t.Fatal("expected the message to remain unmarked after a transient classifier outage, so it is retried next poll tick")
+	}
+	decisions := store.Decisions(10)
+	if len(decisions) != 1 || decisions[0].Status != "failed" {
+		t.Fatalf("expected a failed decision to still be recorded, got %+v", decisions)
+	}
+}
+
+// TestRecordMessageFailure_PermanentClassifierErrorMarksProcessed proves a
+// permanent classifier error (bad input/credits exhausted) still marks the
+// message processed, unchanged from today's behavior.
+func TestRecordMessageFailure_PermanentClassifierErrorMarksProcessed(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	p := &Poller{log: logger}
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	uc := userCtx{id: "user-1", store: store, mail: &noopMailClient{}}
+	msg := imapadapter.Message{ID: "51", Subject: "Hello", Sender: "a@example.com"}
+
+	classifyErr := &classifierErr{err: errors.New("out of ai credits")}
+	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
+
+	if !store.Seen(msg.ID) {
+		t.Fatal("expected the message to still be marked processed for a permanent classifier error")
+	}
+}
+
+// TestRecordMessageFailure_NonClassifierErrorMarksProcessed is the
+// regression guard at the recordMessageFailure level: a rule/IMAP-style
+// error (not a classifierErr) must still mark the message processed exactly
+// as before this task's change.
+func TestRecordMessageFailure_NonClassifierErrorMarksProcessed(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	p := &Poller{log: logger}
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	uc := userCtx{id: "user-1", store: store, mail: &noopMailClient{}}
+	msg := imapadapter.Message{ID: "52", Subject: "Hello", Sender: "a@example.com"}
+
+	ruleErr := errors.New("imap: connection reset by peer")
+	p.recordMessageFailure(store, uc.id, uc, msg, ruleErr)
+
+	if !store.Seen(msg.ID) {
+		t.Fatal("expected a non-classifier (rule/IMAP) error to still mark the message processed (regression guard)")
+	}
+}
 
 // TestHandleMessage_StopRuleShortCircuitsClassification proves a matched
 // "stop" rule skips classifyWithRetry entirely, rather than merely skipping

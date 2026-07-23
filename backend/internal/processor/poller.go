@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -480,19 +481,7 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		messageCancel()
 		if err != nil {
 			failedCount++
-			p.log.Error("message processing failed", "user_id", u.ID, "message_id", msg.ID, "error", err.Error())
-			_ = store.AddDecision(state.Decision{
-				MessageID: msg.ID,
-				Sender:    msg.Sender,
-				SentTo:    msg.SentTo,
-				Subject:   msg.Subject,
-				Status:    "failed",
-				Detail:    err.Error(),
-			})
-			// Retire the message so it is not retried on the next tick.
-			_ = store.MarkProcessed(msg.ID)
-			p.maybeSendPushNotification(uc, msg, "", nil)
-			p.maybeSendNativePushNotification(uc, msg, "", nil)
+			p.recordMessageFailure(store, u.ID, uc, msg, err)
 			continue
 		}
 		processedCount++
@@ -517,6 +506,60 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		"deferred_rate_limited", strconv.Itoa(rateLimitedCount),
 	)
 	return nil
+}
+
+// classifierErr marks an error returned by classifyWithRetry so tickUser's
+// message loop (via shouldMarkProcessedOnError) can distinguish classifier
+// failures from every other handleMessage failure mode (rule-matching
+// errors, IMAP errors), which must keep marking messages processed exactly
+// as they did before this gating was introduced.
+type classifierErr struct {
+	err error
+}
+
+func (e *classifierErr) Error() string { return e.err.Error() }
+func (e *classifierErr) Unwrap() error { return e.err }
+
+// shouldMarkProcessedOnError reports whether tickUser should mark a message
+// processed after handleMessage returned err. A classifier error only marks
+// processed when the underlying failure is permanent (bad input / AI
+// credits exhausted, per isPermanentClassifierError) — a transient
+// classifier outage leaves the message unmarked so it is retried on the
+// next poll tick, instead of being silently and permanently skipped. Any
+// non-classifier error (rule-matching, IMAP) always marks processed,
+// unchanged from prior behavior.
+func shouldMarkProcessedOnError(err error) bool {
+	var cerr *classifierErr
+	if errors.As(err, &cerr) {
+		return isPermanentClassifierError(cerr.err)
+	}
+	return true
+}
+
+// recordMessageFailure is what tickUser's message loop runs on every
+// handleMessage failure: it logs the failure, records it as a "failed"
+// Decision, and marks the message processed — except for a transient
+// classifier error, which is deliberately left unmarked so it retries next
+// poll tick. Push notifications still fire exactly as before this change;
+// only the MarkProcessed gating is new.
+func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc userCtx, msg imapadapter.Message, err error) {
+	p.log.Error("message processing failed", "user_id", userID, "message_id", msg.ID, "error", err.Error())
+	_ = store.AddDecision(state.Decision{
+		MessageID: msg.ID,
+		Sender:    msg.Sender,
+		SentTo:    msg.SentTo,
+		Subject:   msg.Subject,
+		Status:    "failed",
+		Detail:    err.Error(),
+	})
+	if shouldMarkProcessedOnError(err) {
+		// Retire the message so it is not retried on the next tick.
+		_ = store.MarkProcessed(msg.ID)
+	} else {
+		p.log.Info("transient classifier error; leaving message unmarked so it is retried next poll tick", "user_id", userID, "message_id", msg.ID)
+	}
+	p.maybeSendPushNotification(uc, msg, "", nil)
+	p.maybeSendNativePushNotification(uc, msg, "", nil)
 }
 
 func (p *Poller) reloadConfigIfNeeded() {
@@ -684,7 +727,11 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		if isAICreditsExhaustedError(err) {
 			p.flagAICreditsExhausted()
 		}
-		return err
+		// Wrapped so the caller (tickUser, via shouldMarkProcessedOnError)
+		// can tell a classifier failure apart from rule/IMAP errors and gate
+		// MarkProcessed on isPermanentClassifierError instead of always
+		// retiring the message — see recordMessageFailure.
+		return &classifierErr{err: err}
 	}
 	// A successful classification means the classifier has credits again; clear any flag.
 	p.clearAICreditsExhausted()
