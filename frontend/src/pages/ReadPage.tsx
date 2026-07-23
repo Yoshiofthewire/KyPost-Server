@@ -1052,7 +1052,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       })
       .join("\n");
 
-    const printWindow = window.open("", "_blank", "noopener,noreferrer,width=900,height=700");
+    const printWindow = window.open("", "_blank", "width=900,height=700");
     if (!printWindow) {
       setActionError("Popup blocked by browser; allow popups to print selected emails.");
       return;
