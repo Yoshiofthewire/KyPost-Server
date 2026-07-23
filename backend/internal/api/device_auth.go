@@ -2,7 +2,9 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
@@ -29,25 +31,41 @@ func deviceCredentialsFromRequest(r *http.Request) (deviceID, deviceSecret strin
 // headers, an unknown device, a wrong secret, and a deviceId that once
 // existed but has since been removed (unpaired) — that last case is what
 // makes removing a device an immediate, real revocation.
-func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device state.NativeDevice, ok bool) {
+//
+// retryAfter is nonzero exactly when deviceID is currently locked out after
+// deviceMaxFailures failed attempts (see s.deviceLockout); callers must
+// distinguish this ("come back later") from an ordinary ok=false ("bad
+// credentials") and answer 429 rather than 401 — see writeDeviceAuthFailure.
+// Every failure branch below that follows a lockout check pays (or would pay,
+// for an unregistered deviceID) toward that deviceID's strike count; a
+// correct secret against a deactivated account does not, since the secret
+// itself was valid and brute-forcing it is not what happened.
+func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device state.NativeDevice, ok bool, retryAfter time.Duration) {
 	deviceID, deviceSecret := deviceCredentialsFromRequest(r)
 	if deviceID == "" || deviceSecret == "" {
-		return "", state.NativeDevice{}, false
+		return "", state.NativeDevice{}, false, 0
+	}
+	if allowed, wait := s.deviceLockout.allowed(deviceID); !allowed {
+		return "", state.NativeDevice{}, false, wait
 	}
 	ownerID, okOwner := s.lookupUserByDevice(deviceID)
 	if !okOwner {
-		return "", state.NativeDevice{}, false
+		s.deviceLockout.recordFailure(deviceID)
+		return "", state.NativeDevice{}, false, 0
 	}
 	store, err := s.userStore(ownerID)
 	if err != nil {
-		return "", state.NativeDevice{}, false
+		s.deviceLockout.recordFailure(deviceID)
+		return "", state.NativeDevice{}, false, 0
 	}
 	dev, okDev := store.GetNativeDevice(deviceID)
 	if !okDev {
-		return "", state.NativeDevice{}, false
+		s.deviceLockout.recordFailure(deviceID)
+		return "", state.NativeDevice{}, false, 0
 	}
 	if !users.VerifySecretHash(dev.SecretHash, deviceSecret) {
-		return "", state.NativeDevice{}, false
+		s.deviceLockout.recordFailure(deviceID)
+		return "", state.NativeDevice{}, false, 0
 	}
 	// Honor account deactivation on the device path the same way currentUser
 	// does on the session path: a deactivated (offboarded/compromised) account
@@ -56,7 +74,25 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	// silently fail to revoke a paired device.
 	u, err := s.users.Get(ownerID)
 	if err != nil || !u.Active {
-		return "", state.NativeDevice{}, false
+		return "", state.NativeDevice{}, false, 0
 	}
-	return ownerID, dev, true
+	s.deviceLockout.recordSuccess(deviceID)
+	return ownerID, dev, true, 0
+}
+
+// writeDeviceAuthFailure writes the HTTP response for a failed
+// deviceAuthFromRequest call: 429 with a Retry-After header when retryAfter
+// is nonzero (the deviceID is locked out), 401 otherwise (missing/unknown/
+// wrong credentials). Shared by every handler that authenticates directly
+// via deviceAuthFromRequest and writes to w itself; server_userscope.go's
+// resolveMailAuthContext doesn't have a ResponseWriter at that point, so it
+// signals the same distinction via a sentinel error instead (see
+// mailLockedOutError in server_userscope.go).
+func writeDeviceAuthFailure(w http.ResponseWriter, retryAfter time.Duration) {
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
+	http.Error(w, "invalid device credentials", http.StatusUnauthorized)
 }

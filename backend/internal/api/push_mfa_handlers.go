@@ -232,9 +232,9 @@ func (s *Server) handlePushFinish(w http.ResponseWriter, r *http.Request) {
 // can never approve another user's login), and that the device is still
 // permitted to approve.
 func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
-	userID, device, ok := s.deviceAuthFromRequest(r)
+	userID, device, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
-		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
 	var req struct {

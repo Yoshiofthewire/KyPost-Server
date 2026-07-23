@@ -23,7 +23,7 @@ func TestDeviceAuthRejectedAfterDeactivation(t *testing.T) {
 	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "revoke-device")
 
 	// Sanity: the device works while the account is active.
-	if _, _, ok := srv.deviceAuthFromRequest(deviceRequest(deviceID, deviceSecret)); !ok {
+	if _, _, ok, _ := srv.deviceAuthFromRequest(deviceRequest(deviceID, deviceSecret)); !ok {
 		t.Fatal("device should authenticate while the account is active")
 	}
 
@@ -31,7 +31,7 @@ func TestDeviceAuthRejectedAfterDeactivation(t *testing.T) {
 		t.Fatalf("Deactivate: %v", err)
 	}
 
-	if _, _, ok := srv.deviceAuthFromRequest(deviceRequest(deviceID, deviceSecret)); ok {
+	if _, _, ok, _ := srv.deviceAuthFromRequest(deviceRequest(deviceID, deviceSecret)); ok {
 		t.Fatal("device must NOT authenticate after the account is deactivated")
 	}
 

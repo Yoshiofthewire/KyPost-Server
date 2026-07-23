@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/contacts"
@@ -44,6 +45,19 @@ var errIMAPNotConfigured = errors.New("imap configuration is required")
 // errMailUnauthorized is returned by resolveMailAuthContext for any failed
 // auth attempt (no session, no/invalid device credentials).
 var errMailUnauthorized = errors.New("unauthorized")
+
+// mailLockedOutError is returned by resolveMailAuthContext instead of
+// errMailUnauthorized when device-secret auth failed specifically because
+// the deviceID is currently locked out (see s.deviceLockout), rather than
+// because the presented credentials were wrong. resolveMailAuthContext
+// doesn't hold a http.ResponseWriter to answer 429 itself, so it hands its
+// one caller (withMailAuth) this typed sentinel to distinguish the two cases
+// and set Retry-After accordingly.
+type mailLockedOutError struct {
+	retryAfter time.Duration
+}
+
+func (e *mailLockedOutError) Error() string { return "device locked out" }
 
 func (s *Server) userConfigDir(userID string) string {
 	return filepath.Join(s.configDir, "users", userID)
@@ -255,8 +269,11 @@ func (s *Server) resolveMailAuthContext(r *http.Request) (AuthContext, error) {
 	if ac, ok := s.currentUser(r); ok {
 		return ac, nil
 	}
-	userID, _, ok := s.deviceAuthFromRequest(r)
+	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
+		if retryAfter > 0 {
+			return AuthContext{}, &mailLockedOutError{retryAfter: retryAfter}
+		}
 		return AuthContext{}, errMailUnauthorized
 	}
 	return AuthContext{UserID: userID}, nil

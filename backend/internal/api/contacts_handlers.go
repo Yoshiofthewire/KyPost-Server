@@ -354,9 +354,9 @@ type contactsSyncPushRequest struct {
 // via the X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see
 // device_auth.go).
 func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
-	userID, _, ok := s.deviceAuthFromRequest(r)
+	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
-		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
 	store, err := s.userContactsStore(userID)

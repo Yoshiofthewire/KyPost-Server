@@ -100,6 +100,7 @@ type Server struct {
 	loginLockout           *failureLockout
 	davLockout             *failureLockout
 	mfaLockout             *failureLockout
+	deviceLockout          *failureLockout
 	mfaPushCooldown        *mfaPushCooldown
 	sendAsCooldown         *sendAsVerificationCooldown
 	classifierTestCooldown *classifierTestCooldown
@@ -201,6 +202,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		loginLockout:           newLoginLockout(),
 		davLockout:             newFailureLockout(davMaxFailures, davLockoutFor),
 		mfaLockout:             newFailureLockout(mfaMaxFailures, mfaLockoutFor),
+		deviceLockout:          newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		mfaPushCooldown:        newMfaPushCooldown(),
 		sendAsCooldown:         newSendAsVerificationCooldown(),
 		classifierTestCooldown: newClassifierTestCooldown(),
@@ -1998,9 +2000,9 @@ func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.R
 // X-Kypost-Device-Secret credentials (deviceAuthFromRequest), so a device can
 // only ever remove itself, never another device on the account.
 func (s *Server) handleNotificationNativeDeregister(w http.ResponseWriter, r *http.Request) {
-	userID, device, ok := s.deviceAuthFromRequest(r)
+	userID, device, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
-		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
 	store, err := s.userStore(userID)
@@ -2054,9 +2056,9 @@ func (s *Server) handleNotificationNativeMode(w http.ResponseWriter, r *http.Req
 // client passes ?after=<cursor> to fetch only notifications newer than its
 // last poll.
 func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Request) {
-	userID, _, ok := s.deviceAuthFromRequest(r)
+	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
-		http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
 	store, err := s.userStore(userID)
@@ -3843,6 +3845,12 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ac, err := s.resolveMailAuthContext(r)
 		if err != nil {
+			var lockErr *mailLockedOutError
+			if errors.As(err, &lockErr) {
+				w.Header().Set("Retry-After", strconv.Itoa(int(lockErr.retryAfter.Seconds())+1))
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many failed attempts, try again later"})
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}

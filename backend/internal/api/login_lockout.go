@@ -37,6 +37,20 @@ const (
 	mfaMaxFailures = 10
 	mfaLockoutFor  = 15 * time.Minute
 
+	// deviceMaxFailures/deviceLockoutFor guard per-device secret auth
+	// (deviceAuthFromRequest), the credential every ongoing native-client
+	// request (mail sync, contacts sync, App Pull, push-MFA-approve,
+	// self-deregister) presents. Like dav, every failed attempt pays a full
+	// scrypt verification, so the realistic abuse is CPU exhaustion via
+	// unlimited guesses rather than a credible guessing campaign against a
+	// server-generated secret; the threshold mirrors dav's for the same
+	// reason. Keyed on deviceID rather than clientIP: deviceID is the actual
+	// expensive-scrypt unit being protected, and keying on IP would let one
+	// device's failures (or an attacker's) lock out unrelated devices behind
+	// the same shared-NAT/carrier-grade-NAT client IP.
+	deviceMaxFailures = 10
+	deviceLockoutFor  = 15 * time.Minute
+
 	// loginLockoutSweepThreshold bounds how large loginLockout.entries can
 	// grow before a housekeeping sweep runs. An attacker submitting a stream
 	// of distinct, nonexistent usernames each gets its own entry that never
